@@ -951,6 +951,15 @@ its distinct ordinary and concurrent-replay commit errors. The public service
 still publishes only after the store reports success; no new provider authority,
 epoch check, lock order or event policy is introduced.
 
+Full-assessment completion and crash reconciliation now settle their assessment,
+joined requests and PR scheduling state through the same transaction already
+owned by the worker. Shared private PR locking and terminal-policy helpers retain
+the existing repository/tenant checks, active-owner and pending-intent rules.
+The standalone scheduler still reads assessment identity before Begin, commits
+and then publishes its optional event. The two worker stores still have no
+publisher, so removing their nested savepoints adds no event. This is persistence
+composition, not a new current-allocation, review-authority or epoch fence.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1686,6 +1695,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Remove atomic steering's nested acknowledgement savepoint with one shared
   private SQL core; preserve standalone replay/error behavior and inventory the
   current public acknowledgement chain through its real service callers.
+- [x] Compose full-assessment completion and reconciliation with caller-owned
+  assessment/request/scheduler settlement, retaining standalone PR event policy
+  and proving whole-owner late-failure rollback without a nested savepoint.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2179,6 +2191,36 @@ automation success callbacks clear diff/base/head before `UpdateTurnComplete`, s
 they do not produce the hypothesized workspace wakeup. A diff-bearing tx-bound
 wrapper remains a latent hazard; reachable failed-result and awaiting-input status
 publication are separate owner-local follow-up work, not evidence of that wakeup.
+
+### 0a full-assessment scheduler settlement composition validation
+
+The expanded focused race selection passes locally on PostgreSQL 17.10:
+11 roots and 178 subtests, no failures or skips. Reproduce with an owned
+PostgreSQL 15+ `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+./internal/worker ./internal/services/codereview
+-run '^TestCodeReviewSchedule.*Persistence|^TestAssessmentSettlement(FullSchemaPostgres|LegacyPublicationFullSchemaPostgres)$|^TestRecheckReconciliationSchedulingOwnerFullSchemaPostgres$|^TestFullAssessmentSettlementUsesSuppliedTransaction$|^TestFullAssessmentCompletionWithRetainedWorkspacePostgres$|^TestConfirmedFullPublicationCompletionAtomicPostgres$|^TestCodeReviewSchedulingLifecyclePostgres$/^force_fresh'
+-count=1 -parallel=1 -timeout=3m`. Focused vet, pinned lint and whitespace
+checks pass. Counts include retained caller/owner and force-fresh regressions,
+not only the new persistence tests.
+
+The new supplied-transaction seam rejects nil and typed-nil transactions before
+I/O. Shared SQL preserves PR advisory locking, tenant/repository ownership,
+schedule creation/row locking, callback validation and final scheduler update.
+The policy keeps newer active owners, pending intent and wake identity; it settles
+only the original assessment's matching requests. A one-connection owner rejects
+nested Begin. Exact whole-graph assertions cover genuinely staged earlier
+completion writes, outer commit/rollback, replay and a fixture-only final
+scheduling-write failure. The standalone enabled publisher observes already
+committed rows through an independent reader and emits nothing on failure.
+An injected error before physical commit proves rejection/rollback, not a lost
+network acknowledgement or unknown-commit recovery protocol.
+
+Both actual worker call sites are pinned to the supplied-tx seam. Earlier
+intentionally separate publication preparation remains separate; no whole-function
+atomicity, new event, canonical shared authority or deployed floor is claimed.
+Registering the shared PR/policy vocabulary also exposes retained indirect
+callers; these remain explicitly syntax-only observations rather than newly
+approved mutation authority.
 
 ## Surprises & Discoveries
 
