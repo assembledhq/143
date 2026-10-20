@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -76,6 +77,7 @@ type exportServiceStub struct {
 	a        models.CodeReviewExportAcquisition
 	rows     []models.CodeReviewExportSource
 	acquires int
+	pageErr  error
 }
 
 func (s *exportServiceStub) Status(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.CodeReviewExportStatus, error) {
@@ -89,6 +91,9 @@ func (s *exportServiceStub) Acquire(context.Context, uuid.UUID, models.CodeRevie
 	return s.a, nil
 }
 func (s *exportServiceStub) Page(_ context.Context, _ uuid.UUID, c models.CodeReviewExportCursor, limit int) (models.CodeReviewExportAcquisition, []models.CodeReviewExportSource, error) {
+	if s.pageErr != nil {
+		return s.a, nil, s.pageErr
+	}
 	return s.a, s.rows[int(c.Position):min(int(c.Position)+limit, len(s.rows))], nil
 }
 func TestHistoricalExportPaginationAndScope(t *testing.T) {
@@ -137,4 +142,34 @@ func TestHistoricalExportProviderIDPrecision(t *testing.T) {
 	raw := models.CodeReviewExportSource{Kind: models.ReviewExportLegacy, ID: uuid.New(), Source: json.RawMessage(`{"github_review_id":9007199254740993}`)}
 	record := historicalExportRecord(raw)
 	require.Equal(t, json.Number("9007199254740993"), record.Evidence["github_review_id"].Value, "provider identifiers never round through float64")
+}
+
+func TestHistoricalExportFreshPageLifecycleRace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		cursor        bool
+		err, expected error
+	}{
+		{"fresh release race", false, db.ErrReviewExportReleased, db.ErrReviewExportBusy},
+		{"fresh expiry race", false, db.ErrReviewExportExpired, db.ErrReviewExportBusy},
+		{"released explicit cursor", true, db.ErrReviewExportReleased, db.ErrReviewExportReleased},
+		{"expired explicit cursor", true, db.ErrReviewExportExpired, db.ErrReviewExportExpired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			from := time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC)
+			filters := models.CodeReviewExportFilters{RepositoryID: uuid.New(), From: from, Until: from.AddDate(0, 0, 96), TimeBasis: models.ReviewExportCreated, IncludeUnresolvedPublicationTime: true}
+			stub := &exportServiceStub{a: models.CodeReviewExportAcquisition{ID: uuid.New(), Filters: filters}, pageErr: tt.err}
+			cursor := ""
+			if tt.cursor {
+				raw, err := json.Marshal(models.CodeReviewExportCursor{AcquisitionID: stub.a.ID})
+				require.NoError(t, err, "encode explicit initial-position cursor")
+				cursor = base64.RawURLEncoding.EncodeToString(raw)
+			}
+			_, err := NewHistoricalExportService(stub).Export(context.Background(), uuid.New(), filters, cursor, 100)
+			require.ErrorIs(t, err, tt.expected, "only a cursorless first-page lifecycle race is retryable busy")
+		})
+	}
 }

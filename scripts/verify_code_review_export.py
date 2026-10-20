@@ -51,6 +51,7 @@ def verify(manifest_path, sums_path):
     directory = manifest_path.parent
     manifest_raw = read_bounded(local_file(directory, manifest_path.name), MAX_MANIFEST_BYTES)
     manifest = json.loads(manifest_raw)
+    check(isinstance(manifest, dict), "archive manifest must be a JSON object")
     check(manifest.get("version") == 1, "unsupported archive manifest version")
     acquisition = manifest["acquisition"]
     check(acquisition["schema_version"] == 1, "unsupported export schema version")
@@ -117,7 +118,7 @@ def main():
         with os.fdopen(fd, "w") as output:
             json.dump(request, output, indent=2)
             output.write("\n")
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         # Do not echo evidence, local filenames, or identifiers in error output.
         print("archive verification failed; no release request sent", file=sys.stderr)
         return 1

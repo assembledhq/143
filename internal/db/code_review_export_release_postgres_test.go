@@ -68,6 +68,7 @@ func TestCodeReviewExportPostgresReleaseRetryAndPreservation(t *testing.T) {
 	require.NoError(t, err, "explicit release accepts verified complete archive attestation")
 	require.Equal(t, a, released.Acquisition, "identity schema filters boundary and completeness survive release")
 	require.Equal(t, models.ReviewExportReleased, released.State, "receipt reports released state")
+	require.Equal(t, time.UTC, released.ReleaseReceipt.ReleasedAt.Location(), "first release and persisted JSON receipt use canonical UTC regardless of process timezone")
 	require.Equal(t, int64(2), released.ReleaseReceipt.PayloadRowsDeleted, "only exact cached acquisition payloads are deleted")
 	require.Equal(t, []int64{1, 0, 0}, exportCacheCounts(t, f, a.ID), "durable header survives payload and slot release")
 	require.Equal(t, []int64{1, 2, 1}, exportCacheCounts(t, f, b.ID), "other live snapshot payloads and slot survive")

@@ -107,7 +107,7 @@ func (s *CodeReviewExportStore) Release(ctx context.Context, orgID, repositoryID
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&releasedAt); err != nil {
 		return status, err
 	}
-	receipt := models.CodeReviewExportReleaseReceipt{AcquisitionID: id, ReleasedAt: releasedAt, PayloadRowsDeleted: tag.RowsAffected(), Archive: proof}
+	receipt := models.CodeReviewExportReleaseReceipt{AcquisitionID: id, ReleasedAt: releasedAt.UTC(), PayloadRowsDeleted: tag.RowsAffected(), Archive: proof}
 	raw, err := json.Marshal(receipt)
 	if err != nil {
 		return status, err

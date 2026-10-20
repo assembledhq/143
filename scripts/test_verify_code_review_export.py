@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 
 from verify_code_review_export import InvalidArchive, verify
@@ -69,6 +71,26 @@ class VerifyExportTest(unittest.TestCase):
                     output.write(b" ")
                 with self.assertRaises(InvalidArchive):
                     verify(manifest, sums)
+
+    def test_malformed_manifest_cli_has_no_traceback_or_request(self):
+        tests = [("array", "[1]"), ("null", "null"),
+                 ("deeply nested", "[" * 4000 + "0" + "]" * 4000)]
+        script = Path(__file__).with_name("verify_code_review_export.py")
+        for name, raw in tests:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                manifest = directory / "private-manifest-name.json"
+                manifest.write_text(raw)
+                sums = directory / "SHA256SUMS"
+                sums.write_text("")
+                request = directory / "release-request.json"
+                result = subprocess.run([sys.executable, "-B", str(script),
+                                         "--manifest", str(manifest), "--checksums", str(sums),
+                                         "--request", str(request)], capture_output=True, text=True, check=False)
+                self.assertEqual(1, result.returncode)
+                self.assertEqual("", result.stdout)
+                self.assertEqual("archive verification failed; no release request sent\n", result.stderr)
+                self.assertFalse(request.exists())
 
     def test_empty_acquisition(self):
         def empty(pages, manifest):

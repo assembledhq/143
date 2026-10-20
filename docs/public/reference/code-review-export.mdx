@@ -477,7 +477,7 @@ payload detail. These specific codes replace the former ambiguous `EXPORT_LIMIT`
 
 | HTTP | `error.code` | Client action |
 | --- | --- | --- |
-| 429 | `EXPORT_BUSY` | Retry acquisition with bounded backoff; another acquisition holds the organization lock. |
+| 429 | `EXPORT_BUSY` | Retry acquisition with bounded backoff; the organization lock is busy or a concurrent release/expiry invalidated the acquisition attempt. |
 | 429 | `EXPORT_ACTIVE_SLOT_LIMIT` | Finish/verify and explicitly release an exact acquisition, or wait for expiry. Live acquisitions are never evicted. |
 | 422 | `EXPORT_ROW_LIMIT` | Narrow creation/completion filters; no partial acquisition exists. |
 | 422 | `EXPORT_PAYLOAD_BYTE_LIMIT` | Narrow filters; an individual oversized record still fails in full. Never skip/truncate it. |

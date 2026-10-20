@@ -100,7 +100,7 @@ func writeExportError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, db.ErrReviewExportExpired):
 		writeError(w, r, http.StatusGone, "EXPORT_EXPIRED", "export unavailable or expired; acquire a new export")
 	case errors.Is(err, db.ErrReviewExportBusy):
-		writeError(w, r, http.StatusTooManyRequests, "EXPORT_BUSY", "acquisition lock busy; retry with backoff")
+		writeError(w, r, http.StatusTooManyRequests, "EXPORT_BUSY", "acquisition contention; retry with backoff")
 	case errors.Is(err, db.ErrReviewExportSlots):
 		writeError(w, r, http.StatusTooManyRequests, "EXPORT_ACTIVE_SLOT_LIMIT", "active acquisition slots occupied; finish and explicitly release a verified archive or wait for expiry")
 	case errors.Is(err, db.ErrReviewExportRows):

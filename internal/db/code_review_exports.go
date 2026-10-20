@@ -107,6 +107,19 @@ func NewCodeReviewExportStore(database TxStarter) *CodeReviewExportStore {
 }
 
 func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f models.CodeReviewExportFilters) (models.CodeReviewExportAcquisition, error) {
+	a, err := s.acquire(ctx, orgID, f)
+	// Release does not hold the acquisition advisory lock. Its header update
+	// can invalidate a REPEATABLE READ snapshot or a just-reused acquisition.
+	// Report these races as retryable contention, never a gone first request.
+	var pgErr *pgconn.PgError
+	if errors.Is(err, ErrReviewExportReleased) || errors.Is(err, ErrReviewExportExpired) ||
+		(errors.As(err, &pgErr) && (pgErr.Code == "40001" || pgErr.Code == "40P01")) {
+		return models.CodeReviewExportAcquisition{}, ErrReviewExportBusy
+	}
+	return a, err
+}
+
+func (s *CodeReviewExportStore) acquire(ctx context.Context, orgID uuid.UUID, f models.CodeReviewExportFilters) (models.CodeReviewExportAcquisition, error) {
 	if orgID == uuid.Nil {
 		return models.CodeReviewExportAcquisition{}, pgx.ErrNoRows
 	}

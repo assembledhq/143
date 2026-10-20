@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
 	"strings"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 )
@@ -56,6 +58,11 @@ func (s *HistoricalExportService) Export(ctx context.Context, orgID uuid.UUID, f
 	}
 	a, rows, err := s.store.Page(ctx, orgID, c, limit)
 	if err != nil {
+		// A concurrent release/expiry can land after Acquire returns but before
+		// the first page locks the header. Explicit old cursors still fail gone.
+		if cursor == "" && (errors.Is(err, db.ErrReviewExportReleased) || errors.Is(err, db.ErrReviewExportExpired)) {
+			return models.CodeReviewExportPage{}, db.ErrReviewExportBusy
+		}
 		return models.CodeReviewExportPage{}, err
 	}
 	if !reflect.DeepEqual(a.Filters, filters) {
