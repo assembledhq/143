@@ -2,11 +2,15 @@ package db
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,18 +36,8 @@ func TestReopenIfUnchangedPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			pool, orgID, prID := newHealthSyncPostgres(t)
+			pool, orgID, prID := newReopenPostgres(t)
 			ctx := context.Background()
-			_, err := pool.Exec(ctx, `ALTER TABLE pull_requests ADD COLUMN merged_at timestamptz, ADD UNIQUE (org_id,id);
-				ALTER TABLE code_review_session_metadata ADD COLUMN decision text;
-				CREATE TABLE code_review_pull_request_lifecycle_observations (
-					org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE, pull_request_id uuid NOT NULL,
-					merged boolean NOT NULL, merged_at timestamptz, terminal boolean NOT NULL,
-					observed_at timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
-					PRIMARY KEY (org_id, pull_request_id),
-					FOREIGN KEY (org_id,pull_request_id) REFERENCES pull_requests(org_id,id) ON DELETE CASCADE
-				)`)
-			require.NoError(t, err, "add lifecycle schema to isolated health fixture")
 			store := NewPullRequestStore(pool)
 			version, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
 			require.NoError(t, err, "reserve original health capture")
@@ -131,4 +125,89 @@ func TestReopenIfUnchangedPostgres(t *testing.T) {
 			require.Equal(t, []string{head, "new-base"}, []string{current.HeadSHA, current.BaseSHA}, "health must cover the exact current revision, including base-only movement")
 		})
 	}
+}
+
+func TestReopenIfUnchangedPreservesMidStatementClosePostgres(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		status models.PullRequestStatus
+	}{
+		{name: "close commits while repair waits on PR lock", status: models.PullRequestStatusClosed},
+		{name: "merge commits while repair waits on PR lock", status: models.PullRequestStatusMerged},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool, orgID, prID := newReopenPostgres(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			observedAt := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+			accepted, err := NewCodeReviewInsightStore(pool).recordPullRequestLifecycle(ctx, orgID, prID, false, nil, true, observedAt)
+			require.NoError(t, err, "seed the missed closed lifecycle before resolving the mirror")
+			require.True(t, accepted, "fixture must begin with a closed mirror")
+			var expectedUpdatedAt time.Time
+			require.NoError(t, pool.QueryRow(ctx, `SELECT updated_at FROM pull_requests WHERE org_id=$1 AND id=$2`, orgID, prID).Scan(&expectedUpdatedAt), "capture the local mirror watermark before the GitHub read")
+			terminal, err := pool.Begin(ctx)
+			require.NoError(t, err, "start the competing lifecycle transaction")
+			defer func() { _ = terminal.Rollback(ctx) }()
+			_, err = terminal.Exec(ctx, `SELECT id FROM pull_requests WHERE org_id=$1 AND id=$2 FOR UPDATE`, orgID, prID)
+			require.NoError(t, err, "hold the PR row while repair reads the old committed snapshot")
+			contender, err := pool.Acquire(ctx)
+			require.NoError(t, err, "use an independent repair connection")
+			defer contender.Release()
+			pid := contender.Conn().PgConn().PID()
+			type result struct {
+				accepted bool
+				err      error
+			}
+			done := make(chan result, 1)
+			go func() {
+				accepted, err := NewPullRequestStore(contender).ReopenIfUnchanged(ctx, orgID, prID, expectedUpdatedAt, observedAt.Add(time.Minute))
+				done <- result{accepted: accepted, err: err}
+			}()
+			// Poll only database lock state: the regression must prove the repair
+			// reached its outer UPDATE before the competing lifecycle commits.
+			require.Eventually(t, func() bool {
+				var blocked bool
+				probeErr := pool.QueryRow(ctx, `SELECT wait_event_type = 'Lock' AND query LIKE '%WITH lifecycle AS%' FROM pg_stat_activity WHERE pid=$1`, pid).Scan(&blocked)
+				return probeErr == nil && blocked
+			}, 5*time.Second, time.Millisecond, "repair must block on the PR row after reading its pre-close snapshot")
+			require.NoError(t, NewPullRequestStore(terminal).UpdateStatus(ctx, orgID, prID, tt.status), "commit a new terminal state while repair is mid-statement")
+			require.NoError(t, terminal.Commit(ctx), "release the PR lock with the competing terminal state committed")
+			select {
+			case actual := <-done:
+				require.NoError(t, actual.err, "raced repair should return a clean superseded result")
+				require.False(t, actual.accepted, "PostgreSQL must recheck the updated_at fence after its row-lock wait")
+			case <-ctx.Done():
+				t.Fatal("repair did not resume after the competing terminal transaction committed")
+			}
+			var actualStatus models.PullRequestStatus
+			require.NoError(t, pool.QueryRow(ctx, `SELECT status FROM pull_requests WHERE org_id=$1 AND id=$2`, orgID, prID).Scan(&actualStatus), "read the terminal winner after both transactions finish")
+			require.Equal(t, tt.status, actualStatus, "mid-statement repair cannot reopen the closed or merged PR")
+			var actualObservedAt time.Time
+			var isTerminal bool
+			require.NoError(t, pool.QueryRow(ctx, `SELECT observed_at,terminal FROM code_review_pull_request_lifecycle_observations WHERE org_id=$1 AND pull_request_id=$2`, orgID, prID).Scan(&actualObservedAt, &isTerminal), "read the lifecycle observation after the repair rolls back")
+			require.Equal(t, observedAt, actualObservedAt.UTC(), "the repair's provisional lifecycle upsert must roll back when the outer CAS loses")
+			require.True(t, isTerminal, "provisional open state must not leak from the rejected repair")
+		})
+	}
+}
+
+func newReopenPostgres(t *testing.T) (*pgxpool.Pool, uuid.UUID, uuid.UUID) {
+	t.Helper()
+	pool, orgID, prID := newHealthSyncPostgres(t)
+	_, err := pool.Exec(context.Background(), `ALTER TABLE pull_requests ADD COLUMN merged_at timestamptz, ADD UNIQUE (org_id,id);
+		ALTER TABLE code_review_session_metadata ADD COLUMN decision text`)
+	require.NoError(t, err, "add lifecycle dependencies to isolated health fixture")
+	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000283_code_review_decision_outcomes.up.sql"))
+	require.NoError(t, err, "read the real lifecycle migration")
+	const table = "CREATE TABLE code_review_pull_request_lifecycle_observations"
+	_, after, found := strings.Cut(string(migration), table)
+	require.True(t, found, "migration must define the lifecycle observation table")
+	definition, _, found := strings.Cut(after, ";")
+	require.True(t, found, "lifecycle table definition must terminate")
+	_, err = pool.Exec(context.Background(), table+definition)
+	require.NoError(t, err, "apply the actual lifecycle table definition and composite tenant foreign key")
+	return pool, orgID, prID
 }

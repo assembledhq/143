@@ -764,9 +764,9 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 		}
 	}
 
-	// Review capture consumes terminal metadata for deterministic ineligibility.
-	// Avoid adding lifecycle cleanup under the capture's publication lock;
-	// ordinary health reconciliation below still repairs stale-open mirrors.
+	// Terminal review snapshots establish deterministic ineligibility without
+	// running close cleanup under the capture's publication lock. Ordinary
+	// health reconciliation below still repairs stale-open mirrors.
 	if capture != nil && strings.EqualFold(strings.TrimSpace(details.State), "closed") {
 		return nil
 	}
@@ -799,11 +799,13 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 			return fmt.Errorf("reconcile open pull request lifecycle: %w", err)
 		}
 		if !accepted {
+			s.logger.Debug().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("skipping superseded pull request reopen repair")
 			if capture != nil {
 				return ErrPullRequestHealthSyncSuperseded
 			}
 			return nil
 		}
+		s.logger.Warn().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("self-healing closed PR mirror after GitHub reported it open")
 	}
 
 	checkRuns, err := s.listCheckRunsForRef(ctx, token, owner, repoName, details.Head.SHA)
