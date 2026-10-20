@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/server ./cmd/server && \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/session-executor ./cmd/server && \
-    CGO_ENABLED=0 go build -o /bin/migrate ./cmd/migrate && \
+    CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/migrate ./cmd/migrate && \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/deploy-guardrail ./cmd/deploy-guardrail && \
     CGO_ENABLED=0 go build -ldflags "-X github.com/assembledhq/143/internal/version.BuildSHA=${BUILD_SHA}" -o /bin/worker-deployctl ./cmd/worker-deployctl
 
