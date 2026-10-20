@@ -28,7 +28,7 @@ and repository ownership again. There is no client-controlled organization selec
 | `until` | Required RFC3339 timestamp, exclusive; after `from`, at most 366 days later. |
 | `time_basis` | `created_or_completed` (default), `created`, `completed`, or `published`. |
 | `limit` | 1–100 records, default 50. May change between pages. |
-| `cursor` | Opaque continuation of an existing acquisition. Omit only for a new acquisition. |
+| `cursor` | Opaque continuation. Without it, acquire or reuse the matching unexpired acquisition. |
 
 Duplicate, unknown, or empty parameters are rejected. Keep every filter unchanged
 between pages. A cursor is a position in authorized server-side storage, not an
@@ -40,9 +40,11 @@ creation. A completed source with unknown completion cannot qualify by completio
 alone. Every status, unmerged PR, and superseded head is preserved if it matches.
 
 `published` is a separate acquisition mode. It selects bound provider submission
-timestamps in `[from, until)` **and** every source with unresolved publication
-timing, even outside that creation/completion interval. It does not prefilter by
-creation/completion. Returned filters explicitly declare
+timestamps in `[from, until)` **and** sources with unresolved publication
+timing whose creation precedes `until`. A source cannot have submitted its output
+before that source was created, so `created_at >= until` is excluded before
+candidate limits. There is no creation lower bound: unresolved sources created
+before `from` remain included. Returned filters explicitly declare
 `include_unresolved_publication_time: true`; there is no option to discard these
 records. Unresolved timing does not establish membership in the intended
 publication window.
@@ -58,9 +60,21 @@ Actual events and receipt-linked formal-approval events remain in
 source's publication clock. No completion, receipt-acquisition, or webhook receipt
 time is used as provider submission time.
 
+This evidence is systematically incomplete. The feedback ingestion path stores
+submitted review webhooks only for open PRs linked to a 143 session and with a
+nonempty review body. Reviews on PRs without that session link, and empty-body
+submissions, do not enter this path. `DATA_RETENTION_WEBHOOK_DAYS` defaults to 30;
+retention cleanup can remove the only retained submission clock for older reviews.
+Availability for a historical cohort depends on actual capture and retention, not
+just its date range. No deployment dates, live retention values, or production
+coverage are assumed by this export.
+
 ## Acquisition and consistency
 
-The first request materializes **complete raw payloads** in a PostgreSQL
+A cursor-less request reuses an unexpired acquisition with identical canonical
+filters and schema version. This includes its original boundary, counts, and expiry;
+retrying a lost first-page response does not consume another slot. When no matching
+acquisition exists, the request materializes **complete raw payloads** in a PostgreSQL
 `REPEATABLE READ` transaction. Its first snapshot-bearing statement establishes
 visibility; `acquired_at` is that transaction's start time and is also the upper
 bound on source `created_at`. Committed rows visible to that MVCC snapshot qualify;
@@ -72,17 +86,24 @@ the same database snapshot. No network/provider calls are made.
 Subsequent requests page frozen payloads ordered by source creation time, source
 UUID, then source kind. Updates, deletes, new assessments, late receipts, and PR
 merges after acquisition cannot change payloads, order, counts, or membership.
-Derived evidence annotations use the schema-v1 projection of those frozen
-payloads. The guarantee is **retained evidence as observed at acquisition**; it
+Derived evidence annotations use the serving binary's schema-v1 projection of those
+frozen payloads. Derived annotations can change across a server deployment even
+when raw payloads remain identical. Preserve raw evidence and the declared schema
+version. The guarantee is **retained evidence as observed at acquisition**; it
 cannot recover facts overwritten or never persisted before acquisition. Source
 rows marked immutable by the application retain their assessment-time meaning;
 mutable observations are labeled separately.
 
 Acquisitions expire after 24 hours. Each organization has at most three retained
-acquisitions, enforced by three unique database slots. New acquisitions reclaim
-that organization's expired headers and payloads. Expiry immediately prevents
+acquisitions with distinct filter sets, enforced by three unique database slots.
+Identical-filter retries share one slot; a different filter set can still encounter
+the quota until another acquisition expires. Fresh evidence for the same filters
+requires expiry; omitting the cursor does not refresh a retained snapshot.
+New acquisitions reclaim that organization's expired headers and payloads. Expiry immediately prevents
 reads; physical reclamation is lazy on the next acquisition, so expiry is not a
-guaranteed physical-erasure deadline. Materialization is capped at 20,000 source candidates (including overlapping legacy representations)
+guaranteed physical-erasure deadline. Removing the parent repository or organization
+also removes these disposable cache copies; it does not delete source reviews through
+the export tables. Materialization is capped at 20,000 source candidates (including overlapping legacy representations)
 and 64 MiB of serialized raw JSON candidates per acquisition; database statements have a
 30-second timeout. Oversized acquisitions fail atomically, without partial counts
 or a success response. Narrow a creation/completion interval if necessary and keep
@@ -141,9 +162,11 @@ tenancy still scopes every source and evidence join.
 
 All assessments survive independently, including multiple assessments with one
 session, head, PR, provider object, or publication key. A legacy row is represented
-by a selected assessment only when repository/PR match and either a positive
-provider review ID matches, a nonempty publication key matches without conflicting
-provider IDs, or an explicit assessment link represents otherwise unkeyed metadata.
+by a selected assessment only when repository/PR match and a nonempty publication
+key matches without conflicting provider IDs, or an explicit assessment link
+represents unkeyed metadata without a positive provider review ID. A provider ID
+alone never establishes overlap: the same provider object can be edited for
+multiple publications. Uncertain overlaps remain separate sources.
 Its complete metadata payload remains in `legacy_aliases`. Session/head equality
 alone never suppresses a row. If a matching assessment falls outside the selected
 cohort (including publication-time admission), the legacy row remains a source. This is representation overlap handling;
@@ -169,7 +192,7 @@ an overwrite is unavailable.
 | `risk_reason_details`, `failure_detail`, `failure_reason`, `from_fork`, `stale` | Retained disqualifiers/source lifecycle observations. | Absent reasons never imply safeguards passed or were evaluated. Exact zero measurements omitted by historical serialization cannot be recovered. |
 | `structured_outcome`, `description_assessments`, `requirement_reassessments`, `finding_reassessments` | Immutable assessment outcome and requirement/finding reassessment evidence when retained. | Full-review outcomes do not contain a complete immutable finding snapshot. Recheck statuses alone do not recreate source findings. Nested synthesis remains in `raw.source.structured_outcome`. |
 | `input_manifest` | Captured code paths/patch digests, base/head/ref, text/visual/request provenance, completeness flags, policy/execution digests, and gate fingerprints. | Gate fingerprints are not the original measured counts/check results. No current provider fetches reconstruct missing inputs. |
-| `policy_id`, `policy_version`, `policy_snapshot` | Source policy ID and exact retained version/configuration selected by that ID. | No active-policy fallback, current defaults, or old-policy expansion. Lost versions remain unavailable. |
+| `policy_id`, `policy_version`, `policy_snapshot` | Source policy ID and retained row version selected by that ID. | The snapshot/configuration is marked reconstructed: later schema migrations can add or backfill defaults into old policy rows (including approval prompts, scheduling, and continuation settings). Its exact assessment-time contents may be unavailable. No active-policy fallback or exporter-added defaults; lost versions remain unavailable. |
 | `captured_policy_version`, `captured_policy_digest` | Assessment manifest's policy version/digest, independently of the retained policy row. | Consumers can detect disagreement; exporter does not silently reconcile it. |
 | `agent_results` | Raw assessment-scoped results, or unassigned legacy-session results. | Marked reconstructed: mutable result status/output is observed at acquisition. This is supporting evidence, not an immutable historical count or synthesized outcome. |
 | `publication_state`, `publication_receipt`, `submitted_commit_sha` | Exact assessment state, receipt, and recorded submitted commit. | Legacy provider ID/key are identity evidence, not an invented confirmed state/receipt or submitted SHA. Preserve additional receipt IDs and casing. |
@@ -194,8 +217,11 @@ Identifiers use the risk-reason codes retained by the product (for example
 
 An explicit failure reason produces `failed` with the exact retained reason objects
 as inputs, including `actual`, `limit`, and `subject` only when present. Thresholds
-also expose the original policy settings for size, checks, branch, fork, author,
-and path gates. `screenshot` exposes retained description-policy requirements and
+also expose retained policy settings for size, checks, branch, fork, author,
+and path gates. Policy-derived thresholds and applicability are marked reconstructed
+because a retained versioned row can contain schema defaults added after assessment;
+explicit assessment reason objects and their measured `actual`/`limit` remain
+recorded. `screenshot` exposes retained description-policy requirements and
 applicability configuration but remains `unknown` without a dedicated aggregate
 screenshot result. No safeguard is reevaluated using today's implementation.
 
@@ -212,6 +238,11 @@ exclusive** (through October 18). It spans **96 days**. Do not replace these dat
 with a rolling 90-day window. This command acquires a creation/completion union,
 not a publication-time denominator. To acquire unresolved publication evidence
 separately, use `time_basis=published` and heed its broader inclusion semantics.
+Large published acquisitions can exceed the bound because old unresolved sources
+remain candidates; reducing only `from` does not remove those unknowns. Creation-based
+acquisitions can be partitioned and retain the raw publication evidence for the replay
+workflow to interpret; do not label those partitions a complete publication cohort
+without that separate audit.
 
 Set `API_BASE`, `REPOSITORY_ID`, `AUTH_HEADER_FILE`, and `EXPORT_DIR` first.
 `AUTH_HEADER_FILE` is an existing private file containing the user-session/personal
@@ -269,6 +300,9 @@ do not construct cursors, increment timestamps, or deduplicate by session/PR/hea
 Keep every response, including acquisition metadata. If interrupted, resume using
 the last nonterminal page's cursor and the same filters before expiry. On expiry,
 start a new output directory and acquisition; never splice different acquisitions.
+A retry from the beginning with the same filters reuses the unexpired acquisition,
+including after the first response was lost. Keep that retry in its own directory;
+it does not include changes after the original boundary.
 `complete` means the selected retained-source acquisition is fully paged, not that
 all historical provider evidence exists or that replay inclusion is established.
 Normalization, partitioning, checksums for normalized partitions, protocol freezing,
@@ -291,16 +325,16 @@ A retained size failure supplies evidence; missing publication timing stays null
 ```json
 {
   "evidence": {
-    "provider_submitted_at": {"value":null,"availability":"unavailable","provenance":"no retained provider submission bound to this source"},
+    "provider_submitted_at": {"value":null,"availability":"unavailable","provenance":"no unambiguous retained provider submission bound to this source's review ID, head, output marker, and lifecycle interval"},
     "coverage_complete": {"value":false,"availability":"recorded","provenance":"raw.source.coverage_complete"}
   },
   "safeguards": [{
     "id":"additions_limit_exceeded",
     "result":"failed",
-    "inputs":{"value":[{"code":"additions_limit_exceeded","actual":900,"limit":750}],"availability":"recorded","provenance":"raw.source.risk_reason_details"},
-    "threshold":{"value":750,"availability":"recorded","provenance":"raw.policy.risk_policy.max_additions"},
+    "inputs":{"value":[{"code":"additions_limit_exceeded","actual":900,"limit":750}],"availability":"recorded","provenance":"raw.source.risk_reason_details; exact retained reason objects including actual/limit/subject when present"},
+    "threshold":{"value":750,"availability":"reconstructed","provenance":"raw.policy.risk_policy.max_additions; retained setting, not proof of evaluation; retained policy row observed at acquisition; migrations may have added defaults after assessment; historical evaluation not established"},
     "applicability":{"value":null,"availability":"unavailable","provenance":"evaluation/applicability not retained"},
-    "provenance":"explicit retained failure reason"
+    "provenance":"explicit retained failure reason; missing numeric keys remain unknown, including omitted zero values"
   }]
 }
 ```

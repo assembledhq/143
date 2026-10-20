@@ -410,7 +410,8 @@ should still treat the cursor as opaque and pass it back as-is.
 `GET /api/v1/code-reviews/export` is an organization- and repository-authorized
 user read route for admin/builder/member/viewer roles. Required `repository_id`,
 `from`, and `until` filters define a bounded source window; `time_basis` separates
-creation/completion from unresolved publication timing. First requests acquire a
+creation/completion from unresolved publication timing. Cursor-less requests reuse
+a matching unexpired acquisition, or acquire a
 frozen payload cache; opaque cursors page at most 100 sources until expiry. The
 existing session list route retains its behavior. Responses include schema version,
 canonical filters, acquisition boundary, completeness counts, provenance envelopes,

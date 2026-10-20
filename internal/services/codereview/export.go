@@ -98,6 +98,9 @@ func exportEvidence(value any, availability models.ReviewEvidenceAvailability, p
 func recorded(value any, path string) models.ReviewExportEvidence {
 	return exportEvidence(value, models.ReviewEvidenceRecorded, path)
 }
+func retainedPolicyEvidence(value any, path string) models.ReviewExportEvidence {
+	return exportEvidence(value, models.ReviewEvidenceReconstructed, path+"; retained policy row observed at acquisition; migrations may have added defaults after assessment; historical evaluation not established")
+}
 func unavailable(reason string) models.ReviewExportEvidence {
 	return exportEvidence(nil, models.ReviewEvidenceUnavailable, reason)
 }
@@ -119,7 +122,7 @@ func historicalExportRecord(raw models.CodeReviewExportSource) models.CodeReview
 	}
 	evidence["pr_number"] = recorded(pr["number"], "raw.pull_request.number at acquisition")
 	evidence["policy_version"] = recorded(policy["version"], "raw.policy.version; retained version selected by source policy_id")
-	evidence["policy_snapshot"] = recorded(policy, "raw.policy; retained version by ID, no current-policy fallback or default expansion")
+	evidence["policy_snapshot"] = retainedPolicyEvidence(policy, "raw.policy; retained version selected by source policy_id, no active-policy fallback")
 	manifest := exportMap(src["input_manifest"])
 	contract := exportMap(manifest["contract"])
 	evidence["captured_policy_version"] = recorded(contract["policy_version"], "raw.source.input_manifest.contract.policy_version; compare with retained policy version without substituting")
@@ -190,7 +193,7 @@ func exportSafeguards(src, policy map[string]any) []models.ReviewExportSafeguard
 	for _, id := range ids {
 		g := models.ReviewExportSafeguard{ID: id, Result: models.ReviewSafeguardUnknown, Inputs: unavailable("measured inputs not retained"), Threshold: unavailable("threshold not retained"), Applicability: unavailable("evaluation/applicability not retained"), Provenance: "absent failure reason does not establish passed or not_evaluated"}
 		if key := thresholds[id]; key != "" {
-			g.Threshold = recorded(risk[key], "raw.policy.risk_policy."+key+"; retained setting, not proof of evaluation")
+			g.Threshold = retainedPolicyEvidence(risk[key], "raw.policy.risk_policy."+key+"; retained setting, not proof of evaluation")
 		}
 		if found := byCode[id]; len(found) > 0 {
 			g.Result = models.ReviewSafeguardFailed
@@ -198,16 +201,16 @@ func exportSafeguards(src, policy map[string]any) []models.ReviewExportSafeguard
 			g.Provenance = "explicit retained failure reason; missing numeric keys remain unknown, including omitted zero values"
 		}
 		if id == "reviewer_disabled" {
-			g.Threshold = recorded(policy["enabled"], "raw.policy.enabled")
+			g.Threshold = retainedPolicyEvidence(policy["enabled"], "raw.policy.enabled")
 		}
 		if id == "reviewer_quorum" {
-			g.Threshold = recorded(exportMap(policy["agent_roster"])["require_reviewer_quorum"], "raw.policy.agent_roster.require_reviewer_quorum")
+			g.Threshold = retainedPolicyEvidence(exportMap(policy["agent_roster"])["require_reviewer_quorum"], "raw.policy.agent_roster.require_reviewer_quorum")
 		}
 		if id == "author_ineligible" && (risk["eligible_authors"] != nil || risk["eligible_author_teams"] != nil) {
-			g.Threshold = recorded(map[string]any{"eligible_authors": risk["eligible_authors"], "eligible_author_teams": risk["eligible_author_teams"]}, "raw.policy.risk_policy eligible author/teams settings; no current team membership substitution")
+			g.Threshold = retainedPolicyEvidence(map[string]any{"eligible_authors": risk["eligible_authors"], "eligible_author_teams": risk["eligible_author_teams"]}, "raw.policy.risk_policy eligible author/teams settings; no current team membership substitution")
 		}
 		if id == "screenshot" {
-			g.Threshold = recorded(policy["description_policy"], "raw.policy.description_policy; visual requirements and applicability, no inferred screenshot result")
+			g.Threshold = retainedPolicyEvidence(policy["description_policy"], "raw.policy.description_policy; visual requirements and applicability, no inferred screenshot result")
 		}
 		out = append(out, g)
 	}
@@ -249,7 +252,7 @@ func exportSafeguards(src, policy map[string]any) []models.ReviewExportSafeguard
 	keys = append(keys, orphanKeys...)
 	for _, key := range keys {
 		req := exportMap(requirements[key])
-		g := models.ReviewExportSafeguard{ID: "description:" + key, Result: models.ReviewSafeguardUnknown, Inputs: unavailable("assessment-time description evaluation not retained"), Threshold: recorded(req, "raw.policy.description_policy.requirements"), Applicability: recorded(map[string]any{"applies_when": req["applies_when"], "applicability": req["applicability"], "evidence_kind": req["evidence_kind"], "required": req["required"]}, "retained requirement applicability configuration; not a current applicability verdict"), Provenance: "no default applicability or pass inferred"}
+		g := models.ReviewExportSafeguard{ID: "description:" + key, Result: models.ReviewSafeguardUnknown, Inputs: unavailable("assessment-time description evaluation not retained"), Threshold: retainedPolicyEvidence(req, "raw.policy.description_policy.requirements"), Applicability: retainedPolicyEvidence(map[string]any{"applies_when": req["applies_when"], "applicability": req["applicability"], "evidence_kind": req["evidence_kind"], "required": req["required"]}, "retained requirement applicability configuration; not a current applicability verdict"), Provenance: "no default applicability or pass inferred"}
 		if req == nil {
 			g.Applicability = unavailable("requirement policy applicability missing or conflicting")
 		}

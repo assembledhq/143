@@ -21,12 +21,11 @@ const reviewExportMaxRecords = 20000
 const reviewExportMaxBytes = 64 * 1024 * 1024
 const reviewExportTTL = 24 * time.Hour
 
-// Publication identity is stronger than session/head identity. Preserve conflicting
-// provider IDs even when an output key is shared. Explicit capture links only
-// suppress unkeyed metadata; a later legacy publication may reuse that session.
+// Provider review objects can be edited in place for distinct publications.
+// Only matching publication keys without conflicting provider IDs establish
+// overlap; explicit capture links may also represent otherwise unkeyed metadata.
 const reviewExportOverlap = `m.org_id=a.org_id AND m.repository_id=a.repository_id AND m.pull_request_id=a.pull_request_id AND (
- (m.github_review_id>0 AND m.github_review_id=a.github_review_id)
- OR (NULLIF(btrim(m.review_output_key),'') IS NOT NULL AND m.review_output_key=a.publication_key
+ (NULLIF(btrim(m.review_output_key),'') IS NOT NULL AND m.review_output_key=a.publication_key
      AND (COALESCE(m.github_review_id,0)<=0 OR COALESCE(a.github_review_id,0)<=0 OR m.github_review_id=a.github_review_id))
  OR (m.assessment_id=a.id AND COALESCE(m.github_review_id,0)<=0 AND COALESCE(btrim(m.review_output_key),'')='')
 )`
@@ -50,7 +49,7 @@ const reviewExportSources = `WITH review_event_groups AS MATERIALIZED (
  (@time_basis='created' AND created_at>=@from AND created_at<@until)
  OR (@time_basis='completed' AND completed_at>=@from AND completed_at<@until)
  OR (@time_basis='created_or_completed' AND ((created_at>=@from AND created_at<@until) OR (completed_at>=@from AND completed_at<@until)))
- OR @time_basis='published')
+ OR (@time_basis='published' AND created_at<@until))
 ), sources AS (
  SELECT 'assessment'::text AS kind,a.id,a.created_at,a.completed_at,to_jsonb(a)-'org_id' AS source,
  COALESCE((SELECT jsonb_agg(to_jsonb(m)-'org_id' ORDER BY m.created_at,m.id)
@@ -84,7 +83,7 @@ WHERE s.created_at <= @boundary AND (
  OR (@time_basis='created_or_completed' AND ((s.created_at>=@from AND s.created_at<@until) OR (s.completed_at>=@from AND s.completed_at<@until)))
  -- Publication filtering happens after conservative provider-event binding.
  -- Unknown timing remains included; completion is never a surrogate.
- OR @time_basis='published'
+ OR (@time_basis='published' AND s.created_at<@until)
 )
 ORDER BY s.created_at,s.id,s.kind LIMIT @max_records`
 
@@ -126,6 +125,24 @@ func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f 
 		return models.CodeReviewExportAcquisition{}, ErrReviewExportLimit
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM code_review_exports WHERE org_id=$1 AND expires_at<=now()`, orgID); err != nil {
+		return models.CodeReviewExportAcquisition{}, err
+	}
+	filters, err := json.Marshal(f)
+	if err != nil {
+		return models.CodeReviewExportAcquisition{}, err
+	}
+	// Retry a lost first-page response without consuming another organization slot.
+	var existingID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT id FROM code_review_exports
+ WHERE org_id=$1 AND repository_id=$2 AND schema_version=$3 AND filters=$4
+ ORDER BY acquired_at DESC,id LIMIT 1`, orgID, f.RepositoryID, models.CodeReviewExportSchemaVersion, filters).Scan(&existingID)
+	if err == nil {
+		if err = tx.Commit(ctx); err != nil {
+			return models.CodeReviewExportAcquisition{}, err
+		}
+		return s.acquisition(ctx, orgID, existingID)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return models.CodeReviewExportAcquisition{}, err
 	}
 	var slot int
@@ -213,10 +230,6 @@ func (s *CodeReviewExportStore) Acquire(ctx context.Context, orgID uuid.UUID, f 
 		selected = append(selected, payload)
 	}
 	encoded, err := json.Marshal(selected)
-	if err != nil {
-		return models.CodeReviewExportAcquisition{}, err
-	}
-	filters, err := json.Marshal(f)
 	if err != nil {
 		return models.CodeReviewExportAcquisition{}, err
 	}

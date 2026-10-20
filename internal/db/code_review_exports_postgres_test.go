@@ -92,7 +92,7 @@ func TestCodeReviewExportPostgresCohortsAndIdentity(t *testing.T) {
 		{"created inclusive exclusive", models.ReviewExportCreated, []string{"a1", "legacyDifferent", "legacyConflict", "a2", "legacyOutsideAssessment", "a3"}, models.CodeReviewExportCounts{Records: 6, Assessments: 3, Legacy: 3, RepresentedLegacy: 1, UnresolvedPublicationTime: 6, IncompleteSubstantiveEvidence: 4, MissingBaseRef: 3}},
 		{"completion differs from creation", models.ReviewExportCompleted, []string{"legacyEarlierCreation", "a1", "legacyDifferent", "legacyConflict", "a2", "legacyOutsideAssessment"}, models.CodeReviewExportCounts{Records: 6, Assessments: 2, Legacy: 4, RepresentedLegacy: 1, UnresolvedPublicationTime: 6, IncompleteSubstantiveEvidence: 5, MissingBaseRef: 4}},
 		{"explicit 96 day union", models.ReviewExportCreatedOrCompleted, []string{"legacyEarlierCreation", "a1", "legacyDifferent", "legacyConflict", "a2", "legacyOutsideAssessment", "a3"}, models.CodeReviewExportCounts{Records: 7, Assessments: 3, Legacy: 4, RepresentedLegacy: 1, UnresolvedPublicationTime: 7, IncompleteSubstantiveEvidence: 5, MissingBaseRef: 4}},
-		{"publication retains unresolved beyond date bounds", models.ReviewExportPublished, []string{"aBefore", "legacyEarlierCreation", "a1", "legacyDifferent", "legacyConflict", "a2", "a3", "legacyAtEnd"}, models.CodeReviewExportCounts{Records: 8, Assessments: 4, Legacy: 4, RepresentedLegacy: 2, UnresolvedPublicationTime: 8, IncompleteSubstantiveEvidence: 5, MissingBaseRef: 4}},
+		{"publication retains unresolved before creation upper bound", models.ReviewExportPublished, []string{"aBefore", "legacyEarlierCreation", "a1", "legacyDifferent", "legacyConflict", "a2", "a3"}, models.CodeReviewExportCounts{Records: 7, Assessments: 4, Legacy: 3, RepresentedLegacy: 2, UnresolvedPublicationTime: 7, IncompleteSubstantiveEvidence: 4, MissingBaseRef: 3}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -118,6 +118,12 @@ func TestCodeReviewExportPostgresCohortsAndIdentity(t *testing.T) {
 			f.exec(t, `INSERT INTO organizations VALUES($1)`, foreignOrg)
 			f.exec(t, `INSERT INTO repositories(id,org_id,full_name) VALUES($1,$2,'foreign/repo')`, foreignRepo, foreignOrg)
 			f.exec(t, `INSERT INTO code_review_agent_results VALUES($1,$2,$3,$4,'foreign','{"private":"foreign"}',now())`, uuid.New(), foreignOrg, f.session, a1)
+			// Other repositories in this tenant must not contribute sources or aliases.
+			otherRepo, otherPR := uuid.New(), uuid.New()
+			f.exec(t, `INSERT INTO repositories(id,org_id,full_name,github_id) VALUES($1,$2,'synthetic/other',456)`, otherRepo, f.org)
+			f.exec(t, `INSERT INTO pull_requests VALUES($1,$2,'synthetic/other',7,'open',NULL,NULL)`, otherPR, f.org)
+			f.exec(t, `INSERT INTO code_review_session_metadata SELECT $1,org_id,$2,$3,session_id,policy_id,assessment_id,head_sha,base_sha,review_output_key,github_review_id,decision,risk_reason_details,created_at,completed_at FROM code_review_session_metadata WHERE org_id=$4 AND review_output_key='one' AND github_review_id=101`, uuid.New(), otherRepo, otherPR, f.org)
+			f.exec(t, `INSERT INTO code_review_revision_assessments SELECT $1,org_id,$2,$3,session_id,policy_id,generation,head_sha,base_sha,base_ref,publication_key,github_review_id,review_scope,coverage_complete,status,decision,risk_reason_details,created_at,completed_at FROM code_review_revision_assessments WHERE org_id=$4 AND id=$5`, uuid.New(), otherRepo, otherPR, f.org, a1)
 			filters := f.filters(tt.basis)
 			acquisition, err := store.Acquire(f.ctx, f.org, filters)
 			require.NoError(t, err, "acquire exact bounded cohort")
@@ -233,12 +239,12 @@ func TestCodeReviewExportPostgresBoundsAndMigration(t *testing.T) {
 	f := newExportFixture(t)
 	store := NewCodeReviewExportStore(f.conn)
 	var acquisitions []models.CodeReviewExportAcquisition
-	for range 3 {
-		a, err := store.Acquire(f.ctx, f.org, f.filters(models.ReviewExportCreated))
+	for _, basis := range []models.ReviewExportTimeBasis{models.ReviewExportCreated, models.ReviewExportCompleted, models.ReviewExportCreatedOrCompleted} {
+		a, err := store.Acquire(f.ctx, f.org, f.filters(basis))
 		require.NoError(t, err, "three bounded acquisitions are supported")
 		acquisitions = append(acquisitions, a)
 	}
-	_, err := store.Acquire(f.ctx, f.org, f.filters(models.ReviewExportCreated))
+	_, err := store.Acquire(f.ctx, f.org, f.filters(models.ReviewExportPublished))
 	require.ErrorIs(t, err, ErrReviewExportLimit, "active snapshots cannot grow without bound")
 	_, empty, err := store.Page(f.ctx, f.org, models.CodeReviewExportCursor{AcquisitionID: acquisitions[0].ID}, 100)
 	require.NoError(t, err, "empty acquisitions remain pageable")
@@ -274,14 +280,15 @@ func TestCodeReviewExportPostgresRejectsTruncation(t *testing.T) {
 func TestCodeReviewExportPostgresRetainedProviderTiming(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, submitted string
-		foreign         bool
-		expected        []string
-		unresolved      int64
+		name, submitted    string
+		foreign, otherRepo bool
+		expected           []string
+		unresolved         int64
 	}{
-		{"inclusive publication boundary", "2026-07-15T00:00:00Z", false, []string{"assessment", "unknown"}, 1},
-		{"exclusive publication boundary preserves unresolved legacy", "2026-10-19T00:00:00Z", false, []string{"legacy", "unknown"}, 2},
-		{"foreign event cannot resolve publication", "2026-07-15T00:00:00Z", true, []string{"assessment", "unknown"}, 2},
+		{"inclusive publication boundary", "2026-07-15T00:00:00Z", false, false, []string{"assessment", "unknown"}, 1},
+		{"exclusive publication boundary preserves unresolved legacy", "2026-10-19T00:00:00Z", false, false, []string{"legacy", "unknown"}, 2},
+		{"foreign event cannot resolve publication", "2026-07-15T00:00:00Z", true, false, []string{"assessment", "unknown"}, 2},
+		{"same tenant other repository event cannot resolve publication", "2026-07-15T00:00:00Z", false, true, []string{"assessment", "unknown"}, 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -290,16 +297,22 @@ func TestCodeReviewExportPostgresRetainedProviderTiming(t *testing.T) {
 			assessment, legacy, unknown := uuid.New(), uuid.New(), uuid.New()
 			f.assessment(t, assessment, "2026-07-14", "2026-07-15", "one", "old-head", 101, 1, "full")
 			// An existing provider object's timestamp cannot be assigned to metadata
-			// created by a later historical attempt, even when its review ID/key match.
-			f.legacy(t, legacy, "2026-10-19T01:00:00Z", "2026-10-19T02:00:00Z", "one", 101, &assessment)
-			f.legacy(t, unknown, "2026-10-19T03:00:00Z", "2026-10-19T04:00:00Z", "unknown", 102, nil)
+			// created by a later historical attempt with an unmatched head, even when
+			// its provider ID/key match. A filtered assessment cannot hide that unknown.
+			f.legacy(t, legacy, "2026-10-18T01:00:00Z", "2026-10-18T02:00:00Z", "one", 101, &assessment)
+			f.legacy(t, unknown, "2026-10-18T03:00:00Z", "2026-10-18T04:00:00Z", "unknown", 102, nil)
+			f.exec(t, `UPDATE code_review_session_metadata SET head_sha='unmatched-head' WHERE org_id=$1 AND id=$2`, f.org, legacy)
 			org := f.org
 			if tt.foreign {
 				org = uuid.New()
 			}
 			digest := sha256.Sum256([]byte("one"))
 			marker := fmt.Sprintf("<!-- 143-code-review-output:%x -->", digest[:])
-			payload, err := json.Marshal(map[string]any{"action": "submitted", "repository": map[string]any{"id": 123}, "pull_request": map[string]any{"number": 7}, "review": map[string]any{"id": 101, "commit_id": "old-head", "body": marker, "submitted_at": tt.submitted}})
+			providerRepoID := 123
+			if tt.otherRepo {
+				providerRepoID = 456
+			}
+			payload, err := json.Marshal(map[string]any{"action": "submitted", "repository": map[string]any{"id": providerRepoID}, "pull_request": map[string]any{"number": 7}, "review": map[string]any{"id": 101, "commit_id": "old-head", "body": marker, "submitted_at": tt.submitted}})
 			require.NoError(t, err, "encode exact synthetic provider event")
 			f.exec(t, `INSERT INTO webhook_deliveries VALUES($1,$2,'github','pull_request_review',NULL,$3,now())`, uuid.New(), org, payload)
 			store := NewCodeReviewExportStore(f.conn)
@@ -314,7 +327,7 @@ func TestCodeReviewExportPostgresRetainedProviderTiming(t *testing.T) {
 			}
 			require.Equal(t, tt.expected, actual, "actual publication bounds and unknown inclusion precede representation overlap handling")
 			require.Equal(t, tt.unresolved, a.Counts.UnresolvedPublicationTime, "completeness distinguishes bound provider timestamps from unresolved ones")
-			if !tt.foreign && tt.expected[0] == "assessment" {
+			if !tt.foreign && !tt.otherRepo && tt.expected[0] == "assessment" {
 				require.Equal(t, exportDBTime(tt.submitted), rows[0].PublicationTime, "actual provider submission time is retained rather than completion time")
 			}
 		})
@@ -361,4 +374,173 @@ func TestCodeReviewExportPostgresRetainsFormalApprovalObservation(t *testing.T) 
 		SubmittedAt string `json:"submitted_at"`
 	}{{101, "2026-08-01T12:00:00Z"}, {777, "2026-08-01T12:00:01Z"}}, observations, "both provider objects retain their distinct submission timestamps")
 	require.Equal(t, exportDBTime("2026-08-01T12:00:00Z"), rows[0].PublicationTime, "formal approval does not replace the primary review's clock")
+}
+
+func TestCodeReviewExportPostgresPublicationOverlap(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, assessmentKey, legacyKey     string
+		assessmentProvider, legacyProvider int64
+		linked, represented                bool
+	}{
+		{"matching publication", "one", "one", 101, 101, true, true},
+		{"edited provider object is a distinct publication", "new-output", "old-output", 101, 101, true, false},
+		{"unkeyed shared provider object is uncertain", "", "", 101, 101, true, false},
+		{"missing legacy key cannot prove overlap", "one", "", 101, 101, false, false},
+		{"matching key with conflicting provider objects", "one", "one", 101, 102, true, false},
+		{"matching key with unavailable provider", "one", "one", 101, 0, false, true},
+		{"explicit unpublished capture link", "one", "", 0, 0, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newExportFixture(t)
+			assessment, legacy := uuid.New(), uuid.New()
+			f.assessment(t, assessment, "2026-08-02", "2026-08-02", tt.assessmentKey, "new-head", tt.assessmentProvider, 1, "full")
+			var link *uuid.UUID
+			if tt.linked {
+				link = &assessment
+			}
+			f.legacy(t, legacy, "2026-08-01", "2026-08-01", tt.legacyKey, tt.legacyProvider, link)
+			store := NewCodeReviewExportStore(f.conn)
+			a, err := store.Acquire(f.ctx, f.org, f.filters(models.ReviewExportCreatedOrCompleted))
+			require.NoError(t, err, "acquire publications sharing session and provider object")
+			_, rows, err := store.Page(f.ctx, f.org, models.CodeReviewExportCursor{AcquisitionID: a.ID}, 100)
+			require.NoError(t, err, "read independent publication identities")
+			actual := make([]uuid.UUID, 0, len(rows))
+			for _, row := range rows {
+				actual = append(actual, row.ID)
+			}
+			expected := []uuid.UUID{legacy, assessment}
+			var represented int64
+			if tt.represented {
+				expected = []uuid.UUID{assessment}
+				represented = 1
+			}
+			require.Equal(t, expected, actual, "a mutable provider object never collapses different or uncertain publications")
+			require.Equal(t, represented, a.Counts.RepresentedLegacy, "overlap counts reflect only established publication identity")
+		})
+	}
+}
+
+func TestCodeReviewExportPostgresRetryReusesAcquisition(t *testing.T) {
+	t.Parallel()
+	f := newExportFixture(t)
+	store := NewCodeReviewExportStore(f.conn)
+	first, err := store.Acquire(f.ctx, f.org, f.filters(models.ReviewExportCreated))
+	require.NoError(t, err, "acquire first-page snapshot")
+	f.legacy(t, uuid.New(), "2026-08-01", "2026-08-01", "later-insert", 101, nil)
+	for range 4 {
+		retried, err := store.Acquire(f.ctx, f.org, f.filters(models.ReviewExportCreated))
+		require.NoError(t, err, "retry first-page acquisition after interrupted transfer")
+		require.Equal(t, first, retried, "same filters reuse the original boundary, counts, and slot until expiry")
+	}
+	var retained int
+	err = f.conn.QueryRow(f.ctx, `SELECT count(*) FROM code_review_exports WHERE org_id=$1`, f.org).Scan(&retained)
+	require.NoError(t, err, "count retained retry acquisitions")
+	require.Equal(t, 1, retained, "failed client transfers do not exhaust all organization slots")
+}
+
+func TestCodeReviewExportPostgresPublishedExcludesFutureSourcesBeforeCap(t *testing.T) {
+	t.Parallel()
+	f := newExportFixture(t)
+	legacy := uuid.New()
+	f.legacy(t, legacy, "2026-07-14", "2026-07-14", "unknown-before-window", 101, nil)
+	f.assessment(t, uuid.New(), "2026-10-19", "2026-10-19", "future-assessment", "future-head", 102, 1, "full")
+	f.exec(t, `INSERT INTO code_review_session_metadata(id,org_id,repository_id,pull_request_id,session_id,policy_id,head_sha,review_output_key,created_at)
+ SELECT gen_random_uuid(),$1,$2,$3,$4,$5,'head','future-'||n,'2026-10-19'::timestamptz FROM generate_series(1,20001) n`, f.org, f.repo, f.pr, f.session, f.policy)
+	store := NewCodeReviewExportStore(f.conn)
+	a, err := store.Acquire(f.ctx, f.org, f.filters(models.ReviewExportPublished))
+	require.NoError(t, err, "future unresolved sources do not consume the historical candidate budget")
+	_, rows, err := store.Page(f.ctx, f.org, models.CodeReviewExportCursor{AcquisitionID: a.ID}, 100)
+	require.NoError(t, err, "read unresolved evidence preceding the publication interval")
+	actual := make([]uuid.UUID, 0, len(rows))
+	for _, row := range rows {
+		actual = append(actual, row.ID)
+	}
+	require.Equal(t, []uuid.UUID{legacy}, actual, "preserve old unresolved evidence and exclude the exclusive creation upper boundary")
+	require.Equal(t, int64(1), a.Counts.UnresolvedPublicationTime, "unknown evidence remains explicitly counted")
+}
+
+func TestCodeReviewExportPostgresCacheDoesNotBlockParentDeletion(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, table string }{{"repository", "repositories"}, {"organization", "organizations"}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newExportFixture(t)
+			a, err := NewCodeReviewExportStore(f.conn).Acquire(f.ctx, f.org, f.filters(models.ReviewExportCreated))
+			require.NoError(t, err, "cache an otherwise empty historical acquisition")
+			f.exec(t, `INSERT INTO code_review_export_rows(org_id,export_id,position,payload) VALUES($1,$2,1,'{}')`, f.org, a.ID)
+			if tt.table == "repositories" {
+				f.exec(t, `DELETE FROM repositories WHERE org_id=$1 AND id=$2`, f.org, f.repo)
+			} else {
+				f.exec(t, `DELETE FROM organizations WHERE id=$1`, f.org)
+			}
+			var headers, payloads int
+			err = f.conn.QueryRow(f.ctx, `SELECT (SELECT count(*) FROM code_review_exports WHERE org_id=$1),(SELECT count(*) FROM code_review_export_rows WHERE org_id=$1)`, f.org).Scan(&headers, &payloads)
+			require.NoError(t, err, "inspect only disposable cache children after parent deletion")
+			require.Equal(t, []int{0, 0}, []int{headers, payloads}, "deleting a parent reclaims cache copies without a foreign-key failure")
+		})
+	}
+}
+
+// The focused schema tests above isolate concurrency and intentionally incomplete
+// evidence. This companion also exercises the unmodified complete migration chain.
+func TestCodeReviewExportPostgresFullSchema(t *testing.T) {
+	t.Parallel()
+	raw := os.Getenv("TEST_DATABASE_URL")
+	if raw == "" {
+		t.Skip("set TEST_DATABASE_URL to disposable PostgreSQL 15+ for the full export schema")
+	}
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, raw)
+	require.NoError(t, err, "connect explicit disposable test server")
+	var version int
+	err = conn.QueryRow(ctx, `SELECT current_setting('server_version_num')::integer`).Scan(&version)
+	closeErr := conn.Close(ctx)
+	require.NoError(t, err, "check full migration prerequisites")
+	require.NoError(t, closeErr, "close migration prerequisite connection")
+	if version < 150000 {
+		t.Skip("the complete unmodified migration chain requires PostgreSQL 15+")
+	}
+	pool := newFeedbackLifecyclePool(t)
+	org, pr, session := seedFeedbackLifecycle(t, pool)
+	integration, repo, policy, oldMetadata, currentMetadata := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	_, err = pool.Exec(ctx, `INSERT INTO integrations(id,org_id,provider) VALUES($1,$2,'github')`, integration, org)
+	require.NoError(t, err, "create synthetic full-schema integration")
+	_, err = pool.Exec(ctx, `INSERT INTO repositories(id,org_id,integration_id,github_id,full_name,clone_url,installation_id)
+ VALUES($1,$2,$3,123,'example/app','https://example.test/app.git',1)`, repo, org, integration)
+	require.NoError(t, err, "create repository with the real constraints")
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_policies(id,org_id,version,approval_mode,description_policy,risk_policy,agent_roster)
+ VALUES($1,$2,1,'comment_only','{}','{"max_additions":750}','{}')`, policy, org)
+	require.NoError(t, err, "retain a real versioned policy including schema-added defaults")
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_session_metadata(id,org_id,session_id,repository_id,pull_request_id,policy_id,base_sha,head_sha,trigger_source,status,review_output_key,github_review_id,created_at,completed_at)
+ VALUES($1,$3,$4,$5,$6,$7,'base','old-head','slash_command','completed','old-output',101,'2026-08-01','2026-08-01'),
+ ($2,$3,$4,$5,$6,$7,'base','head','slash_command','completed','current-output',101,'2026-08-02','2026-08-02')`, oldMetadata, currentMetadata, org, session, repo, pr, policy)
+	require.NoError(t, err, "seed distinct publications on one mutable provider object using real metadata columns")
+	capture := testAssessmentCapture()
+	capture.OrgID, capture.RepositoryID, capture.PullRequestID, capture.PolicyID, capture.SessionID = org, repo, pr, policy, session
+	capture.PublicationKey = "current-output"
+	assessment, reused, err := NewCodeReviewAssessmentStore(pool).Create(ctx, capture)
+	require.NoError(t, err, "capture real immutable assessment with composite parent ownership")
+	require.False(t, reused, "first capture inserts a distinct assessment")
+	_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET created_at='2026-08-02' WHERE org_id=$1 AND id=$2`, org, assessment.ID)
+	require.NoError(t, err, "place synthetic capture in the explicit historical cohort")
+	filters := models.CodeReviewExportFilters{RepositoryID: repo, From: time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC), Until: time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC), TimeBasis: models.ReviewExportCreatedOrCompleted, IncludeUnresolvedPublicationTime: true}
+	store := NewCodeReviewExportStore(pool)
+	a, err := store.Acquire(ctx, org, filters)
+	require.NoError(t, err, "acquire against all real source and export columns")
+	_, rows, err := store.Page(ctx, org, models.CodeReviewExportCursor{AcquisitionID: a.ID}, 100)
+	require.NoError(t, err, "page full-schema frozen payloads")
+	actual := make([]uuid.UUID, 0, len(rows))
+	for _, row := range rows {
+		actual = append(actual, row.ID)
+	}
+	require.Equal(t, []uuid.UUID{oldMetadata, assessment.ID}, actual, "real constraints preserve distinct legacy publication and suppress only its matching representation")
+	require.Equal(t, models.CodeReviewExportCounts{Records: 2, Assessments: 1, Legacy: 1, RepresentedLegacy: 1, UnresolvedPublicationTime: 2, IncompleteSubstantiveEvidence: 2, MissingBaseRef: 1}, a.Counts, "full-schema completeness counts reflect actual captured and missing evidence")
+	var source map[string]any
+	require.NoError(t, json.Unmarshal(rows[1].Source, &source), "decode real assessment row projection")
+	require.Equal(t, currentMetadata.String(), source["metadata_id"], "raw JSON retains exact metadata lineage from real source columns")
+	require.Equal(t, "main", source["base_ref"], "assessment-time base ref comes from the real capture")
 }
