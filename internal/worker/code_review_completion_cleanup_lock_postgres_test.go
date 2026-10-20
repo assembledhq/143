@@ -17,7 +17,8 @@ func TestFullAssessmentCompletionWaitsForCleanupLockPostgres(t *testing.T) {
 	if os.Getenv("TEST_DATABASE_URL") == "" {
 		t.Skip("set TEST_DATABASE_URL for completion and cleanup lock ordering proof")
 	}
-	pool := fullRecoveryPostgresPool(t, context.Background())
+	// Match small CI runners even on development machines with more CPUs.
+	pool := fullRecoveryPostgresPoolWithMaxConns(t, context.Background(), 4)
 	for _, route := range []string{"complete", "reconcile"} {
 		t.Run(route, func(t *testing.T) {
 			t.Parallel()
@@ -53,7 +54,10 @@ func TestFullAssessmentCompletionWaitsForCleanupLockPostgres(t *testing.T) {
 			}()
 			require.Eventually(t, func() bool {
 				var waiting bool
-				err := pool.QueryRow(ctx, `SELECT EXISTS (
+				// Both parallel cases can hold a cleanup connection and a
+				// completion connection. Observe through the cleanup transaction
+				// so checking lock contention never needs a fifth pool slot.
+				err := cleanup.QueryRow(ctx, `SELECT EXISTS (
  SELECT 1 FROM pg_locks waiting JOIN pg_locks owner USING(locktype,database,classid,objid,objsubid)
  WHERE owner.pid=$1 AND owner.locktype='advisory' AND owner.granted AND NOT waiting.granted
 )`, cleanup.Conn().PgConn().PID()).Scan(&waiting)
