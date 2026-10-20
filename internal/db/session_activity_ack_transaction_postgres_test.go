@@ -82,6 +82,7 @@ func (p *inboxAckCommitProof) inspect(ctx context.Context, tx pgx.Tx) error {
 func TestInboxAckAtomicTransactionFullSchemaPostgres(t *testing.T) {
 	t.Parallel()
 	pool := newSessionPersistencePostgresPool(t)
+	fixtureOwner := t
 	for _, outcome := range []string{"commit", "outer error", "late phase failure", "started replay", "replay range mismatch", "abandoned repair", "abandoned range mismatch", "missing confirmation", "duplicate confirmation", "uncertain input", "foreign lease"} {
 		t.Run(outcome, func(t *testing.T) {
 			t.Parallel()
@@ -104,7 +105,7 @@ func TestInboxAckAtomicTransactionFullSchemaPostgres(t *testing.T) {
 				require.NoError(t, err, "retain one uncertain entry that positive contiguous receipt validation must not skip")
 			}
 			if outcome == "late phase failure" {
-				installInboxAckLateFailure(t, ctx, pool, fixture, old.ID)
+				installInboxAckLateFailure(t, fixtureOwner, ctx, pool, fixture, old.ID)
 			}
 			before := seedActivityTransactionSnapshot(t, ctx, pool, fixture)
 			configuration := pool.Config()
@@ -197,7 +198,7 @@ func inboxAckPostgresPhase(t *testing.T, ctx context.Context, conn DBTX, orgID, 
 	return phase
 }
 
-func installInboxAckLateFailure(t *testing.T, ctx context.Context, pool *pgxpool.Pool, f seedActivityTransactionFixture, oldPhaseID uuid.UUID) {
+func installInboxAckLateFailure(t, fixtureOwner *testing.T, ctx context.Context, pool *pgxpool.Pool, f seedActivityTransactionFixture, oldPhaseID uuid.UUID) {
 	t.Helper()
 	name := "test_steering_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	identifier := pgx.Identifier{name}.Sanitize()
@@ -219,10 +220,12 @@ func installInboxAckLateFailure(t *testing.T, ctx context.Context, pool *pgxpool
 	CREATE TRIGGER %s BEFORE INSERT ON session_activity_phases FOR EACH ROW EXECUTE FUNCTION %s()`, identifier, f.orgID, f.threadID, oldPhaseID, identifier, identifier)
 	_, err := pool.Exec(ctx, query)
 	require.NoError(t, err, "install a narrowly scoped real late-failure check only inside the generated test database")
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// DROP TRIGGER's exclusive table lock can queue siblings' independent reads.
+	// Remove instrumentation from the shared database after all children settle.
+	fixtureOwner.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_, err := pool.Exec(ctx, "DROP TRIGGER "+identifier+" ON session_activity_phases; DROP FUNCTION "+identifier+"()")
-		require.NoError(t, err, "remove only this generated fixture's late-failure instrumentation")
+		require.NoError(fixtureOwner, err, "remove only this generated fixture's late-failure instrumentation after all parallel transactions settle")
 	})
 }
