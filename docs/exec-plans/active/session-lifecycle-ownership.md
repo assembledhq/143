@@ -271,7 +271,7 @@ specialist identity/proof variants replace any generic ownership-bypass boolean.
 | Caller group | Transaction/lock owner | Shared-fence composition |
 | --- | --- | --- |
 | Lifecycle commands and worker/runtime adapters | Public command or existing runtime/domain unit of work | Service operations call the DB `...InTx` primitives in that transaction. |
-| Recheck `Dispatch`, `Claim`, `Complete`, `Fail`, `FailTerminalJob`, `Cancel`, `ReconcileDrainedTerminalTurn` | Existing review transaction and PR/assessment/receipt lock protocol | Same-package DB primitive calls replace shared session/thread mutations; receipt, result, and lifecycle projection stay atomic. Audit nested callers such as `code_review_scheduling.go:353` and use explicit in-transaction variants, not nested wrappers. |
+| Recheck `Dispatch`, `Claim`, `Complete`, `Fail`, `FailTerminalJob`, `Cancel`, `ReconcileDrainedTerminalTurn` | Existing review transaction and PR/assessment/receipt lock protocol | Same-package DB primitive calls replace shared session/thread mutations; receipt, result, and lifecycle projection stay atomic. Audit actual nested consumers such as `cancelForcedEvidenceAssessment`'s PR-locked terminal reconciliation and use explicit in-transaction variants, not nested wrappers. The scheduler sweep is a pool-backed caller, not nested Dispatch. |
 | Automation `EndInterruptedAttempt`, `CompleteExecutingPreflight`, `CompleteThreadTurnForAttempt`/`FailThreadTurnForAttempt`, `FailRetriesExhausted` | Existing domain owner, with explicit transaction wrapper where an atomic CTE currently owns the write | Split lock acquisition/domain mutation/shared projection inside one transaction. The old run/job lease locks remain held until projection commits. Never split the original atomic CTE into independent pool writes. |
 | `CompleteFromMarker` | Existing caller transaction; `automations.TurnCompleter.Complete` remains the outer owner | Call DB primitives using the supplied transaction; generation/result/hold release and retirement/wake intent stay within the existing commit boundary. |
 | PR feedback `PullRequestFeedbackStore.QueueContinuation` | Existing PR/batch transaction; add an explicit in-transaction variant | Compose `AdmitFeedbackTurnInTx` with typed `FeedbackAuthority` for org/PR/batch/current-head/job, preserving the feedback lane, message/inbox and `continue_pr_feedback:<batch>` job binding and post-commit notification atomically. Do not route this through ordinary unowned admission. |
@@ -918,7 +918,10 @@ path retain their original DBTX behavior; only the existing transactional result
 branch delegates. Returned session records keep the original UPDATE RETURNING
 shape, before later snapshot revisions or AFTER-trigger mirrors. Status, terminal
 stream expiry and workspace notifications retain their original order after
-confirmed commit. No new allocation, current-turn or epoch authority is implied.
+pool-backed commit. Legacy wrappers called through tx-bound stores can still
+publish after savepoint release before the true outer commit; converting those
+callers and carrying effects to the outer owner remains required. No new
+allocation, current-turn or epoch authority is implied.
 
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
@@ -2001,7 +2004,9 @@ message/inbox/batch/runtime/phase snapshots prove independent invisibility and
 exact outer commit/rollback. A real late phase uniqueness failure verifies that
 materialize, claim, ack and apply writes occurred before rollback; a later caller
 SQL failure removes a successful complete seed unit too. Foreign relationships,
-wrong/expired lease and invalid input stage no writes. Rolled-back seeds remain
+wrong/expired lease and invalid input stage no writes in the tested fully-foreign
+cases. Mixed valid/foreign seed sets can stage earlier writes and require whole
+owner rollback. Rolled-back seeds remain
 replayable; already committed/applied seeds remain rejected after their original
 phase completes. Returned batch timestamp representation retains the legacy
 input shape while its durable instant is checked independently. These are
@@ -2026,6 +2031,26 @@ status, terminal expiry, then workspace command order. Nil results, head-only an
 empty authoritative diffs retain legacy behavior; failed or uncertain commits
 produce no events. This remains persistence composition, not current allocation
 authority, canonical fencing, a deployed writer floor or production acceptance.
+
+### Composable persistence proof follow-ups
+
+Independent review follow-ups strengthen tests without changing production
+behavior. Foreign thread notification effects must produce the exact explicit
+rejection log before any reload, and zero effects produce no log or database
+access. Seed retry after rollback validates returned phase/batch values against
+the staged rows. Recheck completion now explicitly checks the root's authoritative
+empty diff. Legacy turn wrapper tests configure real Redis streams and cover
+successful workspace publication, no new status event, failure/uncertain-commit
+silence and optional notification failure.
+
+The focused race/full-schema selection passes locally on PostgreSQL 17.10:
+four roots and 43 subtests, no failures or skips. Reproduce with an owned
+PostgreSQL 15+ `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+-run '^(TestSessionTurnPersistenceLegacyTransactionEffects|TestThreadPersistenceCommittedEffects|TestSeedActivityTransactionFullSchemaPostgres|TestSessionTurnAndRecheckPersistenceFullSchemaPostgres)$'
+-count=1 -parallel=1 -timeout=3m`. Existing result/turn wrapper and DB/worker
+recheck regressions also pass at the preceding scalar-persistence snapshot:
+27 roots and 42 subtests, no failures or skips. Neither result proves all legacy
+tx-bound wrappers defer effects until their real outer transaction commits.
 
 ## Surprises & Discoveries
 

@@ -154,9 +154,13 @@ func TestSessionTurnAndRecheckPersistenceFullSchemaPostgres(t *testing.T) {
 			requireRecheckPersistenceState(t, after, before, completion, true, tt.variant == "empty diff")
 			var graph struct {
 				Receipt models.CodeReviewRecheckDispatch `json:"receipt"`
+				Session models.Session                   `json:"session"`
 			}
 			require.NoError(t, json.Unmarshal(after, &graph), "decode the exact committed receipt")
 			require.Equal(t, &messageID, graph.Receipt.ResultMessageID, "the returned message must be the exact assistant bound by the durable receipt")
+			if tt.variant == "empty diff" {
+				require.Equal(t, stringPtr(""), graph.Session.Diff, "a legitimate empty diff must replace the root diff rather than accidentally preserving a predecessor's nonempty workspace projection")
+			}
 		})
 	}
 }

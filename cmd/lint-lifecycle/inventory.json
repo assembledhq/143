@@ -2828,7 +2828,7 @@
       "operation": "caller-owned legacy provider seed/ack and activity-phase persistence",
       "owner": "SessionActivityPhaseStore persistence and existing lease/range checks; caller owns settlement and canonical authority",
       "predicate": "Exact scoped user-message IDs; thread/runtime token and unexpired lease; legacy primary-tab scope; recover only proven never-started old batches.",
-      "lock": "Concrete caller pgx.Tx only. Unchanged thread then runtime then ordered historical batches and entries/phase, including transitive startActivityPhaseTx; no Begin/savepoint, Commit/Rollback, retry, pool fallback or publication.",
+      "lock": "Concrete caller pgx.Tx only. Unchanged thread then runtime then ordered historical batches/entries; phase-start helper repeats thread/runtime checks and locks different terminal runtimes after batch/entry locks before phase insertion. No Begin/savepoint, Commit/Rollback, retry, pool fallback or publication.",
       "stale_result": "Nil/typed-nil transaction or invalid input returns no records before access; scope/lease/range/phase failures return zero phase and nil batch and require whole caller rollback, including earlier messages/ack writes. Successful models are staged until outer commit and are not provider-launch or shared-generation authority.",
       "classification": "fenced-specialist",
       "migration": "0a composable seed persistence prerequisite; existing wrapper is the concrete consumer. Preserve exact legacy message/range/lease/uncertainty predicates while canonical ClaimSeedInTx adds immutable allocation and shared admission/end/input binding under compatible locks.",
@@ -3899,7 +3899,7 @@
       "operation": "legacy status/result projection with conditional head/snapshot transaction",
       "owner": "SessionStore in internal/db",
       "predicate": "Unchanged org/session/nondeleted result row; nil result normalized. Direct DBTX fast path remains for no changeset head and no authoritative snapshot. Existing transactional path delegates to UpdateResultInTx; original RETURNING shape is retained.",
-      "lock": "No new Begin on the direct-write path. Existing head/snapshot path owns Begin, deferred rollback and Commit; only confirmed success publishes status, terminal stream expiry and then optional workspace event in the original order.",
+      "lock": "No new Begin on the direct-write path. Existing head/snapshot path owns Begin, deferred rollback and Commit; pool-backed success publishes status, terminal stream expiry and then optional workspace event after commit. A tx-bound legacy wrapper can publish after savepoint release before the true outer commit; convert those callers to InTx and outer-owned effects.",
       "stale_result": "Existing raw begin/query/commit errors propagate; failed or uncertain transactions emit no notifications. Optional notification failures do not reject durable persistence. Resource identity alone still allows stale successor projection.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a composable persistence prerequisite only. Move authority validation into the same owning canonical transaction before projection; existing transaction owners must use UpdateResultInTx rather than nesting this wrapper.",
@@ -3990,7 +3990,7 @@
       "source_sha256": "6c76514512ca0e3eb5d5699f26d0407ee1d9ba458c89d5375a6abc2bce358b20",
       "operation": "caller-owned standalone generic status persistence",
       "owner": "SessionStore persistence only; caller owns authority, settlement and status publication",
-      "predicate": "Unchanged org/session/nondeleted status projection and exact original RETURNING record. Does not mutate result/head/snapshot/phase/publication state or validate allocation/epochs.",
+      "predicate": "Unchanged org/session/nondeleted status projection, status-specific error/failure/deadline/timestamp resets and exact original RETURNING record. No changeset head, diff snapshot, phase or publication-state mutation or allocation/epoch validation.",
       "lock": "Only concrete caller pgx.Tx and shared updateStatusRow. No Begin/savepoint, settlement, retry, pool fallback or publication. The existing standalone status wrapper remains its direct autocommit path.",
       "stale_result": "Raw query/scan/no-row errors reach the owner with zero returned session. Success remains staged until outer commit. Resource identity alone is not a current-authority fence.",
       "classification": "unfenced-needs-conversion",
@@ -4022,7 +4022,8 @@
       "fence_outcome": "F2: AuthorizationRejected aborts. Only independently proven exact immutable own-attempt settlement may return Applied/AlreadyApplied/StaleSharedState; stale shared state skips ALL current status/result/diff/checkpoint/input acknowledgement/owner release and cannot start execution or publish externally.",
       "prerequisite_0a": "Validate current allocation and parent/lane/end epochs in the owning canonical operation, preserve exact own-attempt settlement distinction, then compose this seam. Convert competing writers and prove floor/drain before claiming compatibility.",
       "evidence": [
-        "internal/db/session_result_persistence.go:101",
+        "internal/db/session_result_persistence.go:128",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
         "Single shared turn/head/snapshot implementation; combined turn/phase delegates",
         "Actual CodeReviewRecheckStore.Complete uses supplied outer pgx.Tx and deliberately discards passive effects to retain no-publisher behavior",
         "internal/db/session_turn_persistence_test.go",
@@ -4044,7 +4045,8 @@
       "fence_outcome": "F2 applies only after independent exact own-attempt authority proof. Stale shared state must skip current result/status/diff/checkpoint/phase/ack/owner writes and external effects. The persistence seam itself has no stale-authority fence.",
       "prerequisite_0a": "Compose canonical authority and phase/session association in the same transaction before persistence. Preserve outer-only settlement, exact legacy row values and explicit post-confirmed-commit effects; drain/convert all legacy competitors before claiming the floor.",
       "evidence": [
-        "internal/db/session_result_persistence.go:135",
+        "internal/db/session_result_persistence.go:162",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
         "Delegates to SessionStore.UpdateTurnCompleteInTx then unchanged completeActivityPhaseInTransaction",
         "internal/db/session_result_persistence_test.go",
         "internal/db/session_result_persistence_postgres_test.go"
@@ -4062,7 +4064,7 @@
       "migration": "0a: explicit caller pgx.Tx persistence-only projection; validate exact allocation/current shared epochs, retain result/diff/phase atomicity and return effects after commit. Historical own settlement never changes current result/diff/checkpoint/phase.",
       "evidence": [
         "internal/db/session_store.go:1809",
-        "Discovered: boundary-definition, indirect-caller",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
         "Delegates to SessionStore.UpdateResultAndCompleteActivityPhaseInTx; PublishCommittedSessionPersistenceEffects follows confirmed commit",
         "Lock/transaction syntax: s.Begin",
         "Lock/transaction syntax: tx.Commit"
@@ -4159,7 +4161,7 @@
       "migration": "0a: explicit caller pgx.Tx persistence-only projection; validate exact allocation/current shared epochs, retain result/diff/phase atomicity and return effects after commit. Historical own settlement never changes current result/diff/checkpoint/phase.",
       "evidence": [
         "internal/db/session_store.go:1837",
-        "Discovered: boundary-definition, indirect-caller",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
         "Delegates to SessionStore.UpdateStatusAndCompleteActivityPhaseInTx",
         "Lock/transaction syntax: s.Begin",
         "Lock/transaction syntax: tx.Commit"
@@ -4175,7 +4177,7 @@
       "operation": "generic resumable idle turn/result writer",
       "owner": "SessionStore in internal/db",
       "predicate": "Defaults nil result; delegates resource-only updateTurnCompleteRow. Starts transaction only when persisting diff or changeset head; no expected current attempt/end epoch.",
-      "lock": "Unchanged direct DBTX row helper when no authoritative diff or head; otherwise own Begin/Commit around UpdateTurnCompleteInTx and explicit post-confirmed-commit workspace effects. Existing transaction owners must use InTx.",
+      "lock": "Unchanged direct DBTX row helper when no authoritative diff or head; otherwise own Begin/Commit around UpdateTurnCompleteInTx. Pool-backed wrappers publish after commit; existing tx-bound automation callers can publish after savepoint release before true outer commit. Converting them to InTx with outer-owned effects remains required.",
       "stale_result": "SQL/phase error rolls back owned transaction; matching successor resource is not rejected by a generation fence. Tx-bound caller cannot safely reuse a Begin wrapper.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: explicit caller pgx.Tx persistence-only projection; validate exact allocation/current shared epochs, retain result/diff/phase atomicity and return effects after commit. Historical own settlement never changes current result/diff/checkpoint/phase.",
@@ -4201,7 +4203,7 @@
       "migration": "0a: explicit caller pgx.Tx persistence-only projection; validate exact allocation/current shared epochs, retain result/diff/phase atomicity and return effects after commit. Historical own settlement never changes current result/diff/checkpoint/phase.",
       "evidence": [
         "internal/db/session_store.go:2469",
-        "Discovered: boundary-definition, indirect-caller",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
         "Delegates to SessionStore.UpdateTurnCompleteAndCompleteActivityPhaseInTx; PublishCommittedSessionPersistenceEffects follows confirmed commit",
         "Lock/transaction syntax: s.Begin",
         "Lock/transaction syntax: tx.Commit"
@@ -4480,6 +4482,7 @@
       "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
       "evidence": [
         "internal/db/session_thread_persistence.go:40",
+        "Discovered: boundary-definition, indirect-caller",
         "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
         "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
         "internal/db/session_thread_persistence_test.go",
@@ -4502,6 +4505,7 @@
       "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
       "evidence": [
         "internal/db/session_thread_persistence.go:54",
+        "Discovered: boundary-definition, indirect-caller",
         "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
         "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
         "internal/db/session_thread_persistence_test.go",
@@ -4524,6 +4528,7 @@
       "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
       "evidence": [
         "internal/db/session_thread_persistence.go:26",
+        "Discovered: boundary-definition, indirect-caller",
         "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
         "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
         "internal/db/session_thread_persistence_test.go",
@@ -4546,6 +4551,7 @@
       "prerequisite_0a": "Explicit transaction seam exists; canonical allocation/session/lane/end-epoch validation and mixed-writer conversions remain. Discard effects on error/rollback/uncertain commit and publish only after confirmed commit.",
       "evidence": [
         "internal/db/session_thread_persistence.go:71",
+        "Discovered: boundary-definition, indirect-caller",
         "Shared SQL for legacy wrapper and concrete InTx; neither establishes lifecycle authority",
         "PublishCommittedThreadPersistenceEffects returns a current-state wakeup, not exact write snapshot",
         "internal/db/session_thread_persistence_test.go",

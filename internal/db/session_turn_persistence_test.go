@@ -127,6 +127,72 @@ func newSessionTurnPersistenceFixture(variant string) sessionPersistenceFixture 
 	return fixture
 }
 
+func TestSessionTurnPersistenceLegacyTransactionEffects(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, variant, failure string }{
+		{name: "snapshot commit"},
+		{name: "empty snapshot commit", variant: "empty diff"},
+		{name: "head only commit", variant: "head only"},
+		{name: "begin failure", failure: "begin"},
+		{name: "row failure", failure: "row"},
+		{name: "head failure", failure: "head"},
+		{name: "snapshot failure", failure: "snapshot"},
+		{name: "revision failure", failure: "revision"},
+		{name: "commit failure", failure: "commit"},
+		{name: "optional notification failure", failure: "notification"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := newSessionTurnPersistenceFixture(tt.variant)
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create an isolated transaction-owning turn wrapper database")
+			t.Cleanup(mock.Close)
+			store, redis := sessionPersistenceStoreWithStreams(t, mock)
+			commands := captureSessionScalarNotifications(redis)
+			failure := errors.New("synthetic legacy turn " + tt.failure)
+			if tt.failure == "begin" {
+				mock.ExpectBegin().WillReturnError(failure)
+			} else {
+				mock.ExpectBegin()
+				_, writeErr := expectSessionTurnPersistence(t, mock, fixture, tt.failure)
+				if writeErr != nil {
+					failure = writeErr
+					mock.ExpectRollback()
+				} else if tt.failure == "commit" {
+					mock.ExpectCommit().WillReturnError(failure)
+					mock.ExpectRollback()
+				} else {
+					mock.ExpectCommit()
+				}
+			}
+			if tt.failure == "notification" {
+				redis.SetError("ERR synthetic optional workspace notification failure")
+			}
+			err = store.UpdateTurnComplete(context.Background(), fixture.orgID, fixture.sessionID, 2, fixture.result, "synthetic-agent", "synthetic-checkpoint")
+			if tt.failure != "" && tt.failure != "notification" {
+				require.ErrorIs(t, err, failure, "the legacy turn wrapper must preserve every original begin, persistence and commit error")
+				require.Empty(t, commands(), "failed or uncertain commits must not even attempt workspace publication")
+				require.Empty(t, redis.Keys(), "failed units must never notify a revision that did not commit")
+			} else {
+				require.NoError(t, err, "optional workspace notification failure cannot reject already committed turn persistence")
+				if tt.failure == "notification" {
+					require.Empty(t, redis.Keys(), "a failed optional notification must not fabricate an accepted event")
+				} else {
+					changed := shouldPersistDiffSnapshot(fixture.result)
+					requireSessionPersistenceWorkspaceEvent(t, redis, fixture, changed)
+					var expected []string
+					if changed {
+						expected = []string{"XADD:143:stream:{ses:" + fixture.sessionID.String() + "}:events"}
+					}
+					require.Equal(t, expected, commands(), "the legacy turn wrapper may emit only the existing post-commit workspace event, not a new status event or stream expiry")
+				}
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "the legacy wrapper must own its single transaction and unchanged row/head/snapshot pipeline")
+		})
+	}
+}
+
 func expectSessionTurnPersistence(t *testing.T, mock pgxmock.PgxPoolIface, fixture sessionPersistenceFixture, failure string) (SessionPersistenceEffects, error) {
 	t.Helper()
 	fail := errors.New("synthetic turn " + failure + " failure")
