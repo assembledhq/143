@@ -30,7 +30,7 @@ func TestLifecycleMigrationConnectionCommandPostgres(t *testing.T) {
 	defer buildCancel()
 	build := exec.CommandContext(buildCtx, "go", "build", "-ldflags", "-X github.com/assembledhq/143/internal/version.BuildSHA="+lifecycleMigrationProbeBuild, "-o", binary, ".")
 	if err := build.Run(); err != nil {
-		t.Fatal("build the actual migration command with a synthetic binary SHA before starting its database proof")
+		t.Fatalf("build the actual migration command with a synthetic binary SHA before starting its database proof (context status: %v)", buildCtx.Err())
 	}
 	tests := []struct {
 		name, options, expectedIdleTimeout string

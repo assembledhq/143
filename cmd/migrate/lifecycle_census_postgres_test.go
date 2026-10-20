@@ -469,7 +469,7 @@ func TestLifecycleCensusCommandExitFullSchemaPostgres(t *testing.T) {
 	defer buildCancel()
 	build := exec.CommandContext(buildCtx, "go", "build", "-o", binary, "../lifecycle-census")
 	if err := build.Run(); err != nil {
-		t.Fatal("build the actual standalone census command before starting its runtime proof")
+		t.Fatalf("build the actual standalone census command before starting its runtime proof (context status: %v)", buildCtx.Err())
 	}
 	tests := []struct {
 		name   string

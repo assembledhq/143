@@ -98,14 +98,16 @@ func TestAuxiliaryCommandBinaryAttribution(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			binary := filepath.Join(t.TempDir(), "auxiliary")
-			arguments := []string{"build", "-trimpath"}
+			// These private temporary binaries probe startup metadata, not path
+			// stripping; default flags reuse the normal test dependency cache.
+			arguments := []string{"build"}
 			if tt.build != "" {
 				arguments = append(arguments, "-ldflags", "-X github.com/assembledhq/143/internal/version.BuildSHA="+tt.build)
 			}
 			arguments = append(arguments, "-o", binary, tt.command)
 			build := exec.CommandContext(ctx, "go", arguments...)
 			if err := build.Run(); err != nil {
-				t.Fatal("build the actual command without publishing compiler output or machine-local paths")
+				t.Fatalf("build the actual command without publishing compiler output or machine-local paths (context status: %v)", ctx.Err())
 			}
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			require.NoError(t, err, "listen only on loopback for the test-owned startup capture")
