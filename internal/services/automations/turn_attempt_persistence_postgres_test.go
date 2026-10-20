@@ -103,6 +103,10 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			f := seedTurnAttemptPostgres(t, ctx, pool)
+			if tt.kind == "cancel" {
+				_, err := pool.Exec(ctx, `UPDATE sessions SET token_usage='{"input_tokens":11,"output_tokens":5}',model_used='synthetic-prior-model',result_summary='Synthetic prior result',error='Synthetic prior error',failure_explanation='Synthetic prior explanation',failure_category='timeout',failure_next_steps=ARRAY['Synthetic prior guidance'],failure_retry_advised=true WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID)
+				require.NoError(t, err, "seed nondefault prior result and failure fields so nil-result normalization cannot pass by comparing untouched defaults")
+			}
 			if tt.failure == "duration" || tt.failure == "commit" {
 				installTurnAttemptFailure(t, ctx, pool, f, tt.failure)
 			}
@@ -151,6 +155,9 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 			failure := errors.New("synthetic late callback failure")
 			model, summary := "synthetic-model", "Synthetic cleared automation result"
 			clearedResult := &models.SessionResult{TokenUsage: json.RawMessage(`{"input_tokens":7,"output_tokens":3}`), ModelUsed: &model, ResultSummary: &summary}
+			if tt.kind == "result" {
+				clearedResult.Error = new("Synthetic automation agent failure")
+			}
 			var expectedStatuses []models.Session
 			err = store.EndAttempt(ctx, func(ctx context.Context, tx pgx.Tx, bound agent.SessionStore) error {
 				marker := &models.AutomationRunResult{RunID: f.runID, OrgID: f.orgID, Attempt: 1, AttemptLockToken: f.token, ThreadID: f.threadID, TurnNumber: 1, Outcome: models.AutomationRunResultTurnCompleted, ReviewComplete: true}
@@ -326,7 +333,12 @@ func TestTurnAttemptPersistenceFullSchemaPostgres(t *testing.T) {
 				require.JSONEq(t, string(clearedResult.TokenUsage), string(persisted.TokenUsage), "diff-free automation must retain every synthetic token-usage value rather than normalize a real result to nil")
 				expected := *clearedResult
 				expected.TokenUsage, persisted.TokenUsage = nil, nil
-				require.Equal(t, expected, persisted, "actual failed and successful callbacks must preserve the nonnil cleared model and summary without adding diff fields")
+				require.Equal(t, expected, persisted, "actual failed and successful callbacks must preserve the exact selected token, model, summary and error result projection")
+			}
+			if tt.kind == "cancel" {
+				var persisted models.SessionResult
+				require.NoError(t, pool.QueryRow(ctx, `SELECT token_usage,model_used,result_summary,error,failure_explanation,failure_category,failure_next_steps,failure_retry_advised FROM sessions WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID).Scan(&persisted.TokenUsage, &persisted.ModelUsed, &persisted.ResultSummary, &persisted.Error, &persisted.FailureExplanation, &persisted.FailureCategory, &persisted.FailureNextSteps, &persisted.FailureRetryAdvised), "reload nil-result normalization of the real session result and stale failure fields after owner commit")
+				require.Equal(t, models.SessionResult{ModelUsed: new("synthetic-prior-model")}, persisted, "a nil result must clear token usage, summary, error and stale failure details while COALESCE retains the prior model")
 			}
 		})
 	}

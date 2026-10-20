@@ -201,7 +201,10 @@ func TestCheckpointPersistenceFullSchemaPostgres(t *testing.T) {
 					require.NotNil(t, captured, "a missing capture cannot prove that the direct SQL fence preserved all rows")
 					require.Equal(t, before, captured, "the direct revoked-token SQL branch must stage no session, generation, lease or target mutation")
 				} else {
-					require.NotEqual(t, before, staged.Load(), "success and the legacy missing-provenance false edge must both contain actual staged session writes")
+					captured, ok := staged.Load().(json.RawMessage)
+					require.True(t, ok, "the successful or missing-provenance caller must capture its actual staged checkpoint graph")
+					require.NotNil(t, captured, "an absent capture cannot establish genuine session writes before caller settlement")
+					require.NotEqual(t, before, captured, "success and the legacy missing-provenance false edge must both contain actual staged session writes")
 				}
 				if tt.variant == "missing" {
 					require.False(t, published, "missing provenance must preserve the legacy joined-result false return")
@@ -242,7 +245,10 @@ func TestCheckpointPersistenceFullSchemaPostgres(t *testing.T) {
 				require.False(t, published, "a real SQL or physical commit failure must not report acceptance")
 				if tt.variant == "commit" {
 					require.Equal(t, 1, starter.tx.commits, "the deferred PostgreSQL failure must occur at the actual owner's one physical Commit")
-					require.NotEqual(t, before, staged.Load(), "deferred commit failure must follow real staged checkpoint and provenance writes")
+					captured, ok := staged.Load().(json.RawMessage)
+					require.True(t, ok, "the physical commit failure must retain the graph captured before PostgreSQL rejected commit")
+					require.NotNil(t, captured, "an absent capture cannot prove checkpoint writes preceded the deferred commit failure")
+					require.NotEqual(t, before, captured, "deferred commit failure must follow real staged checkpoint and provenance writes")
 				}
 			} else {
 				require.NoError(t, publishErr, "legacy fence rejection, success and optional notification failures retain their exact error-free result")
@@ -261,7 +267,10 @@ func TestCheckpointPersistenceFullSchemaPostgres(t *testing.T) {
 				requireCheckpointPostgresValues(t, ctx, observer, f, kind, agentID, true)
 			}
 			if tt.variant == "missing" && tt.mode != "standalone" {
-				require.NotEqual(t, before, staged.Load(), "missing provenance false must be tested after the real CTE stages a session mutation, before outer rollback")
+				captured, ok := staged.Load().(json.RawMessage)
+				require.True(t, ok, "the missing-provenance owner must retain its captured pre-rollback checkpoint graph")
+				require.NotNil(t, captured, "an absent capture cannot demonstrate the missing-provenance session mutation")
+				require.NotEqual(t, before, captured, "missing provenance false must be tested after the real CTE stages a session mutation, before outer rollback")
 			}
 			actualCommands, hookErrors := commands()
 			require.Empty(t, hookErrors, "each accepted Redis command must independently observe the exact already committed checkpoint graph")

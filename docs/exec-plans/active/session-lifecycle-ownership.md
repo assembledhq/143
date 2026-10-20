@@ -2301,11 +2301,12 @@ approved mutation authority.
 ### 0a automation attempt post-commit effects validation
 
 The original slice's focused race selection passed on PostgreSQL 17.10: four
-roots and 25 subtests, no failures or skips. Full package verification passes 74 roots
-and 186 subtests. Reproduce with an owned PostgreSQL 15+ `TEST_DATABASE_URL` and
+roots and 25 subtests, no failures or skips. Original full-package verification
+passed 74 roots and 186 subtests. Reproduce with an owned PostgreSQL 15+
+`TEST_DATABASE_URL` and
 `go test -race -p=1 ./internal/services/automations
 -run '^TestTurnAttemptPersistence' -count=1 -timeout=3m`. Repeated
-`GOMAXPROCS=4` verification at `-parallel=8 -count=3` passes 12 roots and 75
+`GOMAXPROCS=4` verification at `-parallel=8 -count=3` passed 12 roots and 75
 case executions with no skips or failures. Focused vet and whitespace pass.
 
 The actual pool-backed `EndAttempt` uses one physical transaction and rejects
@@ -2360,9 +2361,9 @@ The original slice's repeated race verification passed on PostgreSQL 17.10 using
 an owned PostgreSQL 15+ `TEST_DATABASE_URL`. With `GOMAXPROCS=4`, run `go test -race -p=1
 ./internal/db ./internal/services/automations
 -run '^TestCheckpointPersistence|^TestTurnAttemptPersistence' -count=3 -timeout=3m`:
-30 root executions and 255 subtest executions pass, with no failures or skips.
+30 root executions and 255 subtest executions passed, with no failures or skips.
 The six new checkpoint roots alone, selected with `-run '^TestCheckpointPersistence'
--parallel=8 -count=5`, pass 30 roots/300 cases. Focused vet and whitespace pass.
+-parallel=8 -count=5`, passed 30 roots/300 cases. Focused vet and whitespace passed.
 
 Unit tests compare exact SQL/arguments, errors, UTC conversion, checkpoint kinds,
 nullable provenance and original effect payloads in both standalone and supplied
@@ -2427,11 +2428,13 @@ On PostgreSQL 17.10, all eight roots and 63 subtests pass; repeating with
 `-parallel=8 -count=3` passes 24 root executions and 189 subtest executions,
 with no failures or skips. Focused vet and lifecycle inventory guards pass.
 
-Rollback inequalities now require a typed, nonnil staged graph rather than
-allowing a missing observation to pass. The real failed and successful
-automation callbacks preserve a nonnil cleared result's model, summary and
-usage; cancellation separately retains nil-result normalization. A bounded AST
-test pins the calls and selectors of both inherited row-only session methods,
+Attempt marker, callback and commit rollback inequalities require a typed,
+nonnil staged graph rather than allowing a missing observation to pass.
+Checkpoint staged inequalities use the same explicit capture checks. The real
+owner's failed and successful callback persistence paths preserve a nonnil
+cleared result's model, summary, usage and failure error; cancellation separately
+verifies nil-result normalization. A bounded AST test pins the calls and
+selectors of both inherited row-only session methods,
 with direct, indirect, stream-reference and alias regression fixtures. It is
 not whole-program effect analysis or a new mutation-authority classification.
 
