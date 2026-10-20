@@ -11,21 +11,25 @@ import (
 // ApplicableDescriptionRequirements matches the full review's deterministic
 // requirement selection. Admission must inspect exactly the set for which the
 // validated orchestrator produced assessments.
-func ApplicableDescriptionRequirements(policy models.CodeReviewPolicyConfig, files []PullRequestFile) []models.CodeReviewDescriptionRequirement {
+func ApplicableDescriptionRequirements(policy models.CodeReviewPolicyConfig, files []PullRequestFile, riskTier *models.CodeReviewRiskTierSignal) []models.CodeReviewDescriptionRequirement {
 	policy = models.ResolveCodeReviewPolicyConfig(&policy)
 	result := make([]models.CodeReviewDescriptionRequirement, 0, len(policy.DescriptionPolicy.Requirements))
 	for _, r := range policy.DescriptionPolicy.Requirements {
 		if !r.Required || strings.TrimSpace(r.Key) == "" {
 			continue
 		}
-		if descriptionRequirementApplies(r, files) {
+		if descriptionRequirementApplies(r, files, riskTier) {
 			result = append(result, r)
 		}
 	}
 	return result
 }
 
-func descriptionRequirementApplies(r models.CodeReviewDescriptionRequirement, files []PullRequestFile) bool {
+func DescriptionRequirementRequiredByPublisher(r models.CodeReviewDescriptionRequirement, riskTier *models.CodeReviewRiskTierSignal) bool {
+	return r.AppliesWhen.PublisherRenderChange(riskTier) == models.CodeReviewUIRenderChangeTrue
+}
+
+func descriptionRequirementApplies(r models.CodeReviewDescriptionRequirement, files []PullRequestFile, riskTier *models.CodeReviewRiskTierSignal) bool {
 	if r.AppliesWhen.Empty() {
 		switch strings.ToLower(strings.TrimSpace(r.Applicability)) {
 		case "nontrivial":
@@ -35,6 +39,18 @@ func descriptionRequirementApplies(r models.CodeReviewDescriptionRequirement, fi
 		}
 	}
 	a := r.AppliesWhen
+	if a.Kind == models.CodeReviewDescriptionApplicabilityPublisher {
+		switch a.PublisherRenderChange(riskTier) {
+		case models.CodeReviewUIRenderChangeTrue:
+			return true
+		case models.CodeReviewUIRenderChangeFalse:
+			return false
+		}
+		if a.Fallback == nil {
+			return true
+		}
+		a = *a.Fallback
+	}
 	if a.MinFilesChanged > 0 && len(files) >= a.MinFilesChanged {
 		return true
 	}

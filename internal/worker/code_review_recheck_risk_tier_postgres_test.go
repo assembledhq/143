@@ -28,10 +28,13 @@ func TestCodeReviewRecheckPublicationRereadsRiskTierPostgres(t *testing.T) {
 	tests := []struct {
 		name          string
 		liveTier      string
+		liveRender    string
 		expectPublish bool
+		expectedLive  string
 	}{
-		{name: "unchanged live low publishes the staged approval", liveTier: "low", expectPublish: true},
-		{name: "live rescore to high withholds the staged approval on retry", liveTier: "high"},
+		{name: "unchanged live low publishes the staged approval", liveTier: "low", liveRender: "false", expectPublish: true},
+		{name: "live rescore to high withholds the staged approval on retry", liveTier: "high", liveRender: "false", expectedLive: "live authoritative/high/false"},
+		{name: "live rescore to true withholds the staged approval on retry", liveTier: "low", liveRender: "true", expectedLive: "live authoritative/low/true"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,7 +82,9 @@ func TestCodeReviewRecheckPublicationRereadsRiskTierPostgres(t *testing.T) {
 			staged := checkpointSignal.SizeSafeguardDecision(models.CodeReviewSizeMeasurement{Actual: 6, Limit: 5, Exceeded: true}, models.CodeReviewSizeMeasurement{Actual: 420, Limit: 300, Exceeded: true}, models.CodeReviewSizeMeasurement{Actual: 6, Limit: 300})
 			reasons, err := json.Marshal([]models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonSizeSafeguard, SizeSafeguard: &staged}})
 			require.NoError(t, err, "encode staged waiver record")
-			_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET risk_reason_details=$3, rendered_body='Approved after evidence recheck', submitted_commit_sha=head_sha WHERE org_id=$1 AND id=$2`, org, recheck, reasons)
+			stagedOutcome, err := json.Marshal(map[string]any{"risk_tier_signal": checkpointSignal})
+			require.NoError(t, err, "encode staged recheck outcome")
+			_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET risk_reason_details=$3, structured_outcome=$4, rendered_body='Approved after evidence recheck', submitted_commit_sha=head_sha WHERE org_id=$1 AND id=$2`, org, recheck, reasons, stagedOutcome)
 			require.NoError(t, err, "stage the approval with its waived size safeguard")
 			checkpointJSON, err := json.Marshal(checkpointSignal)
 			require.NoError(t, err, "encode checkpoint")
@@ -91,7 +96,7 @@ func TestCodeReviewRecheckPublicationRereadsRiskTierPostgres(t *testing.T) {
 			capture := &fixedRecheckCapture{result: codereviewsvc.AssessmentInputCaptureResult{Manifest: manifest, Policy: models.CodeReviewPolicyRecord{Enabled: true, ApprovalMode: models.CodeReviewApprovalModeApproveAcceptable, RiskPolicy: riskPolicy}}}
 			publisher := &fakeRecheckPublisher{}
 			lifecycle := &fakeRecheckLifecycle{assessments: stores.CodeReviewAssessments, txStarter: pool}
-			live := &fakeRiskTierCheckRuns{runs: []models.CodeReviewCheckRun{workerRiskTierRun(5, workerRiskTierAppID, workerRiskTierHead, tt.liveTier, "false")}}
+			live := &fakeRiskTierCheckRuns{runs: []models.CodeReviewCheckRun{workerRiskTierRun(5, workerRiskTierAppID, workerRiskTierHead, tt.liveTier, tt.liveRender)}}
 			services := &Services{CodeReviewInputCapture: capture, CodeReviewRechecksEnabled: true, CodeReviews: publisher, CodeReviewLifecycle: lifecycle, CodeReviewRiskTier: live}
 			handler := newRunCodeReviewRecheckHandler(stores, services, zerolog.Nop())
 			jobJSON, err := json.Marshal(codeReviewRecheckJob{OrgID: org, AssessmentID: recheck})
@@ -116,7 +121,7 @@ func TestCodeReviewRecheckPublicationRereadsRiskTierPostgres(t *testing.T) {
 			require.NotNil(t, after.FailureDetail, "the supersession should record why")
 			require.Contains(t, *after.FailureDetail, "evidence_recheck:risk-tier result changed before publication", "the supersession should name the risk-tier change")
 			require.Contains(t, *after.FailureDetail, "checkpoint authoritative/low/false", "the supersession should record the checkpoint observation")
-			require.Contains(t, *after.FailureDetail, "live authoritative/high/false", "the supersession should record the live observation")
+			require.Contains(t, *after.FailureDetail, tt.expectedLive, "the supersession should record the live observation")
 			require.Equal(t, []uuid.UUID{recheck}, lifecycle.refreshes, "the recheck should fall back to a fresh evaluation")
 		})
 	}

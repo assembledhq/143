@@ -251,7 +251,7 @@ func TestVerifyFullAssessmentFreshness(t *testing.T) {
 
 func TestFullAssessmentOutcomeDescriptionShape(t *testing.T) {
 	t.Parallel()
-	outcome, err := fullAssessmentOutcome(nil, nil, false)
+	outcome, err := fullAssessmentOutcome(nil, nil, false, nil)
 	require.NoError(t, err, "early stop outcome should encode")
 	var decoded struct {
 		DescriptionAssessments []codeReviewDescriptionAssessment `json:"description_assessments"`

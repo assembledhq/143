@@ -421,12 +421,13 @@ const (
 	CodeReviewDescriptionApplicabilityAll        CodeReviewDescriptionApplicabilityKind = "all"
 	CodeReviewDescriptionApplicabilityNontrivial CodeReviewDescriptionApplicabilityKind = "nontrivial"
 	CodeReviewDescriptionApplicabilityPaths      CodeReviewDescriptionApplicabilityKind = "paths"
+	CodeReviewDescriptionApplicabilityPublisher  CodeReviewDescriptionApplicabilityKind = "publisher_result"
 )
 
 func (k CodeReviewDescriptionApplicabilityKind) Validate() error {
 	switch k {
 	case "", CodeReviewDescriptionApplicabilityAll, CodeReviewDescriptionApplicabilityNontrivial,
-		CodeReviewDescriptionApplicabilityPaths:
+		CodeReviewDescriptionApplicabilityPaths, CodeReviewDescriptionApplicabilityPublisher:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewDescriptionApplicabilityKind: %q", k)
@@ -438,13 +439,15 @@ type CodeReviewDescriptionApplicability struct {
 	MinFilesChanged int                                    `json:"min_files_changed,omitempty"`
 	MinLinesChanged int                                    `json:"min_lines_changed,omitempty"`
 	PathPatterns    []string                               `json:"path_patterns,omitempty"`
+	Fallback        *CodeReviewDescriptionApplicability    `json:"fallback,omitempty"`
 }
 
 func (a CodeReviewDescriptionApplicability) Empty() bool {
 	return a.Kind == "" &&
 		a.MinFilesChanged == 0 &&
 		a.MinLinesChanged == 0 &&
-		len(a.PathPatterns) == 0
+		len(a.PathPatterns) == 0 &&
+		a.Fallback == nil
 }
 
 func (a CodeReviewDescriptionApplicability) Validate() error {
@@ -454,7 +457,31 @@ func (a CodeReviewDescriptionApplicability) Validate() error {
 	if a.MinFilesChanged < 0 || a.MinLinesChanged < 0 {
 		return fmt.Errorf("description applicability thresholds must not be negative")
 	}
-	return nil
+	if a.Kind != CodeReviewDescriptionApplicabilityPublisher {
+		if a.Fallback != nil {
+			return fmt.Errorf("only publisher_result description applicability may declare a fallback")
+		}
+		return nil
+	}
+	if a.MinFilesChanged != 0 || a.MinLinesChanged != 0 || len(a.PathPatterns) > 0 {
+		return fmt.Errorf("publisher_result description applicability keeps thresholds and path patterns in its fallback")
+	}
+	if a.Fallback == nil || a.Fallback.Kind != CodeReviewDescriptionApplicabilityPaths {
+		return fmt.Errorf("publisher_result description applicability requires a paths fallback")
+	}
+	return a.Fallback.Validate()
+}
+
+func (a CodeReviewDescriptionApplicability) PublisherRenderChange(signal *CodeReviewRiskTierSignal) CodeReviewUIRenderChange {
+	if a.Kind != CodeReviewDescriptionApplicabilityPublisher {
+		return ""
+	}
+	switch change := signal.AuthoritativeUIRenderChange(); change {
+	case CodeReviewUIRenderChangeTrue, CodeReviewUIRenderChangeFalse:
+		return change
+	default:
+		return ""
+	}
 }
 
 type CodeReviewDescriptionRequirement struct {
@@ -667,16 +694,19 @@ func DefaultCodeReviewPolicyConfig() CodeReviewPolicyConfig {
 				EvidenceKind:  CodeReviewDescriptionEvidenceKindVisual,
 				Applicability: "paths",
 				AppliesWhen: CodeReviewDescriptionApplicability{
-					Kind: CodeReviewDescriptionApplicabilityPaths,
-					PathPatterns: []string{
-						"frontend/**",
-						"apps/web/**",
-						"**/app/**",
-						"**/components/**",
-						"**/pages/**",
-						"**/*.tsx",
-						"**/*.jsx",
-						"**/*.css",
+					Kind: CodeReviewDescriptionApplicabilityPublisher,
+					Fallback: &CodeReviewDescriptionApplicability{
+						Kind: CodeReviewDescriptionApplicabilityPaths,
+						PathPatterns: []string{
+							"frontend/**",
+							"apps/web/**",
+							"**/app/**",
+							"**/components/**",
+							"**/pages/**",
+							"**/*.tsx",
+							"**/*.jsx",
+							"**/*.css",
+						},
 					},
 				},
 				Prompt: "Include screenshots or a preview link for frontend or UI-visible changes. Existing screenshots are acceptable when they still accurately represent the affected UI or workflow. Do not require a new screenshot merely because the pull request head changed. Require updated visual evidence only when the diff materially changes the rendered state shown by the existing evidence. Treat small changes that do not materially alter rendered output, non-visible changes, test-only changes, refactors, and unrelated changes as not applicable.",

@@ -200,7 +200,11 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if codereviewsvc.RecheckBaselineChange(capture.Manifest, baselineManifest) != "" {
 			return failCodeReviewRecheck(ctx, stores, services, a, "baseline code or review policy changed", true)
 		}
-		requirements, err := recheckRequirements(capture.Policy.Config(), capture.Files, synthesis)
+		riskTier, err := resolveCodeReviewRiskTierSignal(ctx, stores, services, runCodeReviewPayload{OrgID: a.OrgID, SessionID: a.SessionID, RepositoryID: a.RepositoryID, HeadSHA: a.HeadSHA}, capture.Policy.Config())
+		if err != nil {
+			return err
+		}
+		requirements, err := recheckRequirements(capture.Policy.Config(), capture.Files, riskTier, synthesis)
 		if err != nil {
 			return failCodeReviewRecheck(ctx, stores, services, a, err.Error(), true)
 		}
@@ -304,7 +308,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if liveErr != nil {
 			logger.Warn().Err(liveErr).Str("assessment_id", a.ID.String()).Msg("live risk-tier lookup failed before evidence recheck decision; treating the live result as non-authoritative")
 		}
-		if _, err = codeReviewDescriptionEvaluationFromSynthesis(fresh.Policy.Config(), fresh.Files, validated.Synthesis, fresh.VisualEvidence); err != nil {
+		if _, err = codeReviewDescriptionEvaluationFromSynthesis(fresh.Policy.Config(), fresh.Files, payload.RiskTierSignal, validated.Synthesis, fresh.VisualEvidence); err != nil {
 			return failCodeReviewRecheck(ctx, stores, services, a, "invalid merged evidence assessment: "+err.Error(), false)
 		}
 		decision, body := evaluateLiveCodeReviewOutcome(liveCodeReviewOutcomeInput{
@@ -324,13 +328,18 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			EvidenceRecheckURL:    codeReviewEvidenceRecheckURL(services, fresh.Policy.Config(), a.ID, true),
 			ReviewProvenance:      "Code review reused from assessment `" + baseline.ID.String() + "`. Updated evidence was checked in this assessment.",
 		})
+		var recordedRiskTier *models.CodeReviewRiskTierSignal
+		if payload.RiskTierSignal.Active() {
+			recordedRiskTier = payload.RiskTierSignal
+		}
 		outcome, err := json.Marshal(struct {
 			Synthesis                codeReviewOrchestratorSynthesis            `json:"synthesis"`
 			SourceAssessmentID       uuid.UUID                                  `json:"source_assessment_id"`
 			Dispatch                 models.CodeReviewRecheckDispatch           `json:"execution"`
 			RequirementReassessments []models.CodeReviewRequirementReassessment `json:"requirement_reassessments"`
 			FindingReassessments     []models.CodeReviewFindingReassessment     `json:"finding_reassessments"`
-		}{validated.Synthesis, baseline.ID, dispatch, validated.RequirementReassessments, validated.FindingReassessments})
+			RiskTierSignal           *models.CodeReviewRiskTierSignal           `json:"risk_tier_signal,omitempty"`
+		}{validated.Synthesis, baseline.ID, dispatch, validated.RequirementReassessments, validated.FindingReassessments, recordedRiskTier})
 		if err != nil {
 			return err
 		}
@@ -369,7 +378,7 @@ func recheckBaselineSynthesis(results []models.CodeReviewAgentResult) (codeRevie
 	return codeReviewOrchestratorSynthesis{}, uuid.Nil, errors.New("missing validated full-review orchestrator evidence")
 }
 
-func recheckRequirements(policy models.CodeReviewPolicyConfig, files []codereviewsvc.PullRequestFile, baseline codeReviewOrchestratorSynthesis) ([]models.CodeReviewDescriptionRequirement, error) {
+func recheckRequirements(policy models.CodeReviewPolicyConfig, files []codereviewsvc.PullRequestFile, riskTier *models.CodeReviewRiskTierSignal, baseline codeReviewOrchestratorSynthesis) ([]models.CodeReviewDescriptionRequirement, error) {
 	byKey := make(map[string]codeReviewDescriptionAssessment, len(baseline.DescriptionAssessments))
 	for _, a := range baseline.DescriptionAssessments {
 		if a.Key == "" || byKey[a.Key].Key != "" {
@@ -378,12 +387,12 @@ func recheckRequirements(policy models.CodeReviewPolicyConfig, files []coderevie
 		byKey[a.Key] = a
 	}
 	var requirements []models.CodeReviewDescriptionRequirement
-	for _, req := range codeReviewApplicableDescriptionRequirements(policy, files) {
+	for _, req := range codeReviewApplicableDescriptionRequirements(policy, files, riskTier) {
 		a, ok := byKey[req.Key]
 		if !ok {
 			return nil, errors.New("incomplete baseline description assessment")
 		}
-		if a.Status != codeReviewDescriptionAssessmentNotApplicable {
+		if a.Status != codeReviewDescriptionAssessmentNotApplicable || codereviewsvc.DescriptionRequirementRequiredByPublisher(req, riskTier) {
 			requirements = append(requirements, req)
 		}
 	}

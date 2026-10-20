@@ -559,7 +559,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("select code review inline findings: %w", err)
 		}
 		if assessment != nil {
-			assessmentOutcome, err = fullAssessmentOutcome(agentResults, decision.RiskReasonDetails, assessmentCoverage)
+			assessmentOutcome, err = fullAssessmentOutcome(agentResults, decision.RiskReasonDetails, assessmentCoverage, job.RiskTierSignal)
 			if err != nil {
 				return fmt.Errorf("encode full assessment outcome: %w", err)
 			}
@@ -1901,7 +1901,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		ApprovalMode:               cfg.ApprovalMode,
 		RequiredReviewerQuorum:     codeReviewRequiredReviewerQuorum(cfg, agentResults),
 		InlineCommentLimit:         cfg.InlineCommentLimit,
-		DescriptionRequirements:    codeReviewDescriptionRequirementsForPrompt(cfg, changedFiles),
+		DescriptionRequirements:    codeReviewDescriptionRequirementsForPrompt(cfg, changedFiles, job.RiskTierSignal),
 		RiskReasons:                models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, agentResults, findings, visualEvidence)),
 		ReviewerOutputs:            codeReviewReviewerOutputsForPrompt(agentResults),
 		Findings:                   codeReviewFindingsForPrompt(findings),
@@ -2421,10 +2421,10 @@ func codeReviewOrchestratorReviewSummary(synthesis codeReviewOrchestratorSynthes
 	return strings.TrimSpace(synthesis.Summary)
 }
 
-func codeReviewOrchestratorRepairPrompt(validationErr error, policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
+func codeReviewOrchestratorRepairPrompt(validationErr error, policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, riskTier *models.CodeReviewRiskTierSignal, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
 	return strings.TrimSpace(prompts.CodeReviewOrchestratorRepairPrompt(prompts.CodeReviewOrchestratorRepairPromptData{
 		ValidationError:         validationErr.Error(),
-		DescriptionRequirements: codeReviewDescriptionRequirementsForPrompt(policy, changedFiles),
+		DescriptionRequirements: codeReviewDescriptionRequirementsForPrompt(policy, changedFiles, riskTier),
 		VisualEvidence:          codeReviewAvailableVisualEvidenceForPrompt(visualEvidence),
 	}))
 }
@@ -2708,7 +2708,7 @@ func requestCodeReviewOrchestratorSynthesisRepair(
 		SessionID:     job.SessionID,
 		OrgID:         job.OrgID,
 		ThreadID:      threadID,
-		Message:       codeReviewOrchestratorRepairPrompt(validationErr, policy, changedFiles, visualEvidence),
+		Message:       codeReviewOrchestratorRepairPrompt(validationErr, policy, changedFiles, job.RiskTierSignal, visualEvidence),
 		MessageSource: models.SessionMessageSourceCodeReview,
 	}); err != nil {
 		logger.Warn().Err(err).
@@ -3422,7 +3422,7 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		}
 		synthesis, synthesisErr := parseCodeReviewOrchestratorSynthesis(raw)
 		if synthesisErr == nil {
-			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis, visualEvidence)
+			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, job.RiskTierSignal, synthesis, visualEvidence)
 		}
 		if synthesisErr != nil {
 			threads := newWorkerThreadService(stores, logger)
@@ -3686,7 +3686,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	var assessmentOutcome json.RawMessage
 	if assessment != nil {
 		var outcomeErr error
-		assessmentOutcome, outcomeErr = fullAssessmentOutcome(nil, decision.RiskReasonDetails, false)
+		assessmentOutcome, outcomeErr = fullAssessmentOutcome(nil, decision.RiskReasonDetails, false, job.RiskTierSignal)
 		if outcomeErr != nil {
 			return fmt.Errorf("encode early-stop assessment outcome: %w", outcomeErr)
 		}
@@ -3766,7 +3766,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 	descriptionEvaluationValid := false
 	if orchestratorSynthesisUsable {
 		var descriptionErr error
-		descriptionEvaluation, descriptionErr = codeReviewDescriptionEvaluationFromSynthesis(policy, input.ChangedFiles, input.OrchestratorSynthesis, input.VisualEvidence)
+		descriptionEvaluation, descriptionErr = codeReviewDescriptionEvaluationFromSynthesis(policy, input.ChangedFiles, input.Job.RiskTierSignal, input.OrchestratorSynthesis, input.VisualEvidence)
 		descriptionEvaluationValid = descriptionErr == nil
 	}
 	additions, deletions := codeReviewLineChanges(input.ChangedFiles)
@@ -4134,16 +4134,22 @@ func codeReviewDescriptionRequirementApplies(requirement models.CodeReviewDescri
 	}
 }
 
-func codeReviewApplicableDescriptionRequirements(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) []models.CodeReviewDescriptionRequirement {
-	return codereviewsvc.ApplicableDescriptionRequirements(policy, changedFiles)
+func codeReviewApplicableDescriptionRequirements(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, riskTier *models.CodeReviewRiskTierSignal) []models.CodeReviewDescriptionRequirement {
+	return codereviewsvc.ApplicableDescriptionRequirements(policy, changedFiles, riskTier)
 }
 
-func codeReviewDescriptionRequirementsForPrompt(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile) []prompts.CodeReviewDescriptionRequirementPromptData {
-	requirements := codeReviewApplicableDescriptionRequirements(policy, changedFiles)
+func codeReviewDescriptionRequirementsForPrompt(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, riskTier *models.CodeReviewRiskTierSignal) []prompts.CodeReviewDescriptionRequirementPromptData {
+	requirements := codeReviewApplicableDescriptionRequirements(policy, changedFiles, riskTier)
 	rendered := make([]prompts.CodeReviewDescriptionRequirementPromptData, 0, len(requirements))
 	for _, requirement := range requirements {
 		applicability := strings.TrimSpace(requirement.Applicability)
-		if applicability == "" {
+		switch {
+		case codereviewsvc.DescriptionRequirementRequiredByPublisher(requirement, riskTier):
+			applicability = string(models.CodeReviewDescriptionApplicabilityPublisher)
+		case applicability != "":
+		case requirement.AppliesWhen.Kind == models.CodeReviewDescriptionApplicabilityPublisher && requirement.AppliesWhen.Fallback != nil:
+			applicability = string(requirement.AppliesWhen.Fallback.Kind)
+		default:
 			applicability = string(requirement.AppliesWhen.Kind)
 		}
 		rendered = append(rendered, prompts.CodeReviewDescriptionRequirementPromptData{
@@ -4157,8 +4163,8 @@ func codeReviewDescriptionRequirementsForPrompt(policy models.CodeReviewPolicyCo
 	return rendered
 }
 
-func codeReviewDescriptionEvaluationFromSynthesis(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, synthesis codeReviewOrchestratorSynthesis, visualEvidence models.CodeReviewVisualEvidenceSnapshot) (codeReviewDescriptionEvaluation, error) {
-	requirements := codeReviewApplicableDescriptionRequirements(policy, changedFiles)
+func codeReviewDescriptionEvaluationFromSynthesis(policy models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, riskTier *models.CodeReviewRiskTierSignal, synthesis codeReviewOrchestratorSynthesis, visualEvidence models.CodeReviewVisualEvidenceSnapshot) (codeReviewDescriptionEvaluation, error) {
+	requirements := codeReviewApplicableDescriptionRequirements(policy, changedFiles, riskTier)
 	expected := make(map[string]models.CodeReviewDescriptionRequirement, len(requirements))
 	for _, requirement := range requirements {
 		expected[strings.TrimSpace(requirement.Key)] = requirement
@@ -4204,6 +4210,11 @@ func codeReviewDescriptionEvaluationFromSynthesis(policy models.CodeReviewPolicy
 			}
 			evaluation.RequirementSummaries = append(evaluation.RequirementSummaries, title+": passed ("+reason+")")
 		case codeReviewDescriptionAssessmentNotApplicable:
+			if codereviewsvc.DescriptionRequirementRequiredByPublisher(requirement, riskTier) {
+				evaluation.Passed = false
+				evaluation.RequirementSummaries = append(evaluation.RequirementSummaries, title+": failed (the risk-tier check reports a rendered UI change, so not applicable is not accepted: "+reason+")")
+				continue
+			}
 			evaluation.RequirementSummaries = append(evaluation.RequirementSummaries, title+": passed (not applicable: "+reason+")")
 		case codeReviewDescriptionAssessmentMissing:
 			evaluation.Passed = false
