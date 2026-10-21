@@ -466,11 +466,11 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 			if err := assessments.Complete(lockCtx, a.OrgID, a.ID, a.Generation, a.InputDigest, completion); err != nil {
 				return err
 			}
-			txStarter, ok := tx.(db.TxStarter)
+			publicationTx, ok := tx.(pgx.Tx)
 			if !ok {
 				return errors.New("assessment publication transaction cannot settle scheduler")
 			}
-			if err := db.NewCodeReviewScheduleStore(txStarter).SettleAssessment(lockCtx, a.OrgID, a.ID); err != nil {
+			if err := db.NewCodeReviewScheduleStore(publicationTx).SettleAssessmentInTx(lockCtx, a.OrgID, publicationTx, a.ID); err != nil {
 				return err
 			}
 			if _, ok := services.CodeReviews.(codeReviewStatusCommentUpdater); !ok {

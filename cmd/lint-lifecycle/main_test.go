@@ -658,6 +658,7 @@ func TestInventoryMatchesRepository(t *testing.T) {
 		"internal/db/code_review_scheduling.go:CodeReviewScheduleStore.withLockedPRInTx",
 		"internal/db/code_review_schedule_assessment.go:settleAssessmentLockedPR",
 		"internal/services/automations/turn_store.go:TurnStore.EndAttempt",
+		"internal/worker/code_review_recheck_handler.go:publishCodeReviewRecheck",
 		"internal/services/automations/turn_attempt_persistence.go:newTurnAttemptSessions",
 		"internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateStatus",
 		"internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateResult",
