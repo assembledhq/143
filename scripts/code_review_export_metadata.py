@@ -104,8 +104,10 @@ def read_relative(root, name, bound):
         with os.fdopen(fd, "rb") as source:
             info = os.fstat(source.fileno())
             need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= bound)
-            raw = source.read(bound + 1)
-            need(len(raw) <= bound)
+            # Allocate for the observed file, not its potentially large ceiling.
+            # One extra byte detects growth; a short read detects truncation.
+            raw = source.read(info.st_size + 1)
+            need(len(raw) == info.st_size)
             return raw
     finally:
         os.close(directory)

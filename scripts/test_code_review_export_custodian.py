@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import tracemalloc
 import unittest
 from unittest.mock import patch
 import uuid
@@ -20,6 +21,7 @@ from code_review_export_metadata import Document, InvalidCustody, canonical, inv
 from code_review_export_selection import RULESET, assignments, validate_selection
 
 PROTOCOL = b'''protocol_version = 3
+status = "draft"
 [replay]
 decision_version = 2
 status = "approved"
@@ -159,6 +161,33 @@ def write_synthetic_fixture(destination):
 
 
 class InventoryTest(unittest.TestCase):
+    def test_small_file_read_allocation_tracks_file_size(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "small.json").write_bytes(b"{}")
+            tracemalloc.start()
+            try:
+                actual = metadata.read_relative(root, "small.json", 64 * 1024 * 1024)
+                _, peak = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            self.assertEqual(b"{}", actual)
+            self.assertLess(peak, 1024 * 1024, "a tiny file must not allocate its full permitted bound")
+
+    def test_file_changes_between_stat_and_read_fail_closed(self):
+        for changed in (b"", b"a", b"abc", b"abcdef"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                path = root / "changing.json"
+                path.write_bytes(b"{}")
+                original_stat = os.fstat
+                def change_after_stat(fd):
+                    info = original_stat(fd)
+                    path.write_bytes(changed)
+                    return info
+                with patch.object(metadata.os, "fstat", side_effect=change_after_stat), self.assertRaises(InvalidCustody):
+                    metadata.read_relative(root, path.name, 4)
+
     def test_allowlist_exact_fingerprints_and_unknowns(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -403,6 +432,16 @@ class SelectionTest(unittest.TestCase):
                 with self.assertRaises(InvalidCustody):
                     validate_selection(index, index_raw, load(graph_raw), graph_raw, protocol_raw, load(plan_raw), plan_raw, incomplete)
 
+    def test_protocol_draft_and_frozen_status_are_supported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            index = inventory(root, fixture(root))
+            expected = assignments(index, graph_fixture(), PROTOCOL)
+            for status in (b"draft", b"frozen"):
+                with self.subTest(status=status):
+                    actual = assignments(index, graph_fixture(), PROTOCOL.replace(b'status = "draft"', b'status = "' + status + b'"', 1))
+                    self.assertEqual(expected, actual)
+
     def test_protocol_exact_types_and_approved_prerequisites(self):
         mutations = (
             (b'unknown_evidence = "conservative_bounds"', b'unknown_evidence = "optimistic"'),
@@ -445,6 +484,27 @@ class SelectionTest(unittest.TestCase):
 
 
 class MaterializeTest(unittest.TestCase):
+    def test_protocol_root_status_is_required_before_archive_reads(self):
+        cases = ((b'status = "draft"\n', b""),
+                 (b'status = "draft"', b'status = "approved"'),
+                 (b'status = "draft"', b'status = true'))
+        for before, after in cases:
+            with self.subTest(after=after), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                catalog = fixture(root)
+                args = list(documents(inventory(root, catalog)))
+                args[2] = args[2].replace(before, after, 1)
+                plan = load(args[3])
+                plan["protocol_sha256"] = sha(args[2])
+                args[3] = canonical(plan)
+                selection = load(args[4])
+                selection.update(protocol_sha256=sha(args[2]), partition_sha256=sha(args[3]))
+                args[4] = canonical(selection)
+                output = root / "not-published.zip"
+                with patch.object(custodian, "read_relative", side_effect=AssertionError("archive IO before protocol validation")), self.assertRaises(InvalidCustody):
+                    custodian.materialize(root, catalog, *args, sha(args[-1]), output)
+                self.assertFalse(output.exists())
+
     def test_exact_raw_outputs_and_receipt_no_unselected_records(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

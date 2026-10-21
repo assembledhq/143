@@ -147,7 +147,10 @@ fetch or inspect that evidence.
 The validator supports only `chronological-pr-stack-outcome-censor/v1`, protocol
 TOML version 3 / replay decision version 2, the explicit July 15 through October
 19 exclusive 2026 UTC window (96 days), conservative unknowns, disabled holdouts,
-and the exact approved split rules. Unsupported rules fail closed.
+and the exact approved split rules. The top-level protocol `status` must be
+explicitly `draft` or `frozen`; this validation does not freeze the protocol or
+authorize any data access. Missing or unsupported status fails before page reads.
+Unsupported rules fail closed.
 
 It independently validates the replay-owned assignment of every observation:
 whole PR/stack grouping, identity/alias connectivity, conflicting observation and

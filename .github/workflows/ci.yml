@@ -268,7 +268,8 @@ jobs:
             race=(-race)
             package_timeout=360s
           fi
-          go test ./internal/worker -coverpkg=./internal/... -coverprofile=coverage-unit-worker.out \
+          # Retain individual test events when a failure has only a package summary.
+          go test -json ./internal/worker -coverpkg=./internal/... -coverprofile=coverage-unit-worker.out \
             -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
       - name: Run agent unit tests

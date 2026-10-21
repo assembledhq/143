@@ -12,6 +12,7 @@ OPEN_PARTITIONS = PARTITIONS[:2]
 
 def protocol_rules(raw):
     protocol = tomllib.loads(raw.decode("utf-8"))
+    need(protocol.get("status") in ("draft", "frozen"))
     need(type(protocol["protocol_version"]) is int and protocol["protocol_version"] == 3)
     replay, window, split = protocol["replay"], protocol["window"], protocol["split"]
     need(type(replay["decision_version"]) is int and replay["decision_version"] == 2)
