@@ -92,6 +92,41 @@ func (s *SessionStore) UpdateStatusAndCompleteActivityPhaseInTx(
 	return phase, session, nil
 }
 
+// UpdateTurnCompleteInTx persists the existing turn result, changeset head and
+// optional diff snapshot using only the caller's transaction. It normalizes nil
+// results like UpdateTurnComplete, but never begins, settles, retries or publishes
+// a transaction. On error the caller must roll back the whole unit. Returned
+// effects may be published only after a confirmed commit, not as authority or
+// proof of ownership, generation, checkpoint readiness or admission.
+func (s *SessionStore) UpdateTurnCompleteInTx(
+	ctx context.Context,
+	orgID uuid.UUID,
+	tx pgx.Tx,
+	sessionID uuid.UUID,
+	turn int,
+	result *models.SessionResult,
+	agentSessionID, snapshotKey string,
+) (SessionPersistenceEffects, error) {
+	if nilLifecycleDependency(tx) {
+		return SessionPersistenceEffects{}, fmt.Errorf("persist session turn: transaction is required")
+	}
+	if result == nil {
+		result = &models.SessionResult{}
+	}
+	diffStats := computeDiffStatsForResult(result)
+	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
+		return SessionPersistenceEffects{}, err
+	}
+	if !shouldPersistDiffSnapshot(result) {
+		return SessionPersistenceEffects{}, nil
+	}
+	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
+	if err != nil {
+		return SessionPersistenceEffects{}, err
+	}
+	return SessionPersistenceEffects{orgID: orgID, sessionID: sessionID, workspaceRevision: updated, workspaceChanged: true}, nil
+}
+
 // UpdateTurnCompleteAndCompleteActivityPhaseInTx persists the unchanged turn,
 // result, diff and activity-phase writes in tx, without transaction settlement
 // or publication. On error the caller must roll back the whole unit. Returned
@@ -112,20 +147,9 @@ func (s *SessionStore) UpdateTurnCompleteAndCompleteActivityPhaseInTx(
 	if nilLifecycleDependency(tx) {
 		return models.SessionActivityPhase{}, SessionPersistenceEffects{}, fmt.Errorf("persist session turn and activity phase: transaction is required")
 	}
-	if result == nil {
-		result = &models.SessionResult{}
-	}
-	diffStats := computeDiffStatsForResult(result)
-	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
+	effects, err := s.UpdateTurnCompleteInTx(ctx, orgID, tx, sessionID, turn, result, agentSessionID, snapshotKey)
+	if err != nil {
 		return models.SessionActivityPhase{}, SessionPersistenceEffects{}, err
-	}
-	effects := SessionPersistenceEffects{}
-	if shouldPersistDiffSnapshot(result) {
-		updated, err := s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
-		if err != nil {
-			return models.SessionActivityPhase{}, SessionPersistenceEffects{}, err
-		}
-		effects = SessionPersistenceEffects{orgID: orgID, sessionID: sessionID, workspaceRevision: updated, workspaceChanged: true}
 	}
 	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
 	if err != nil {

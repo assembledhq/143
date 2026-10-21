@@ -469,9 +469,9 @@ func (s *CodeReviewRecheckStore) Complete(ctx context.Context, c models.CodeRevi
 	if c.OrgID == uuid.Nil || c.AssessmentID == uuid.Nil || c.JobID == uuid.Nil || c.LockToken == uuid.Nil || c.SessionID == uuid.Nil || c.ThreadID == uuid.Nil || c.ExpectedTurn < 1 || c.SessionTurn < 1 || c.Result == nil || len(c.Summary) > 256*1024 || (len(c.TokenUsage) > 0 && !json.Valid(c.TokenUsage)) {
 		return 0, fmt.Errorf("invalid code review recheck completion")
 	}
-	// A code review turn is read-only. Reusing the ordinary session writer for
-	// a changed worktree would open its own diff transaction and invalidate the
-	// one-transaction receipt guarantee.
+	// A code review turn remains read-only even though its persistence now
+	// composes within this transaction. A nonempty workspace diff is rejected
+	// rather than silently discarding it from the completed receipt.
 	if c.Result.Diff != nil && *c.Result.Diff != "" {
 		return 0, fmt.Errorf("code review recheck changed workspace")
 	}
@@ -533,10 +533,13 @@ func (s *CodeReviewRecheckStore) Complete(ctx context.Context, c models.CodeRevi
 	}
 	rootResult := *c.Result
 	rootResult.TokenUsage = rootUsage
-	if err = NewSessionStore(tx).UpdateTurnComplete(ctx, c.OrgID, c.SessionID, c.SessionTurn, &rootResult, c.ParentAgentSessionID, c.SnapshotKey); err != nil {
+	// These temporary stores intentionally have no publishers. Preserve the
+	// existing receipt-only behavior by discarding passive effect data instead
+	// of publishing or reloading through a transaction that is not yet committed.
+	if _, err = NewSessionStore(tx).UpdateTurnCompleteInTx(ctx, c.OrgID, tx, c.SessionID, c.SessionTurn, &rootResult, c.ParentAgentSessionID, c.SnapshotKey); err != nil {
 		return 0, err
 	}
-	if err = NewSessionThreadStore(tx).UpdateTurnComplete(ctx, c.OrgID, c.ThreadID, c.ExpectedTurn, c.Result, c.ProviderSessionID); err != nil {
+	if _, err = NewSessionThreadStore(tx).UpdateTurnCompleteInTx(ctx, c.OrgID, tx, c.ThreadID, c.ExpectedTurn, c.Result, c.ProviderSessionID); err != nil {
 		return 0, err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE code_review_recheck_dispatches SET status='completed',result_message_id=$5,provider_session_id=NULLIF($6,''),snapshot_key=NULLIF($7,''),native_context=$8,completed_at=now(),updated_at=now() WHERE org_id=$1 AND assessment_id=$2 AND job_id=$3 AND attempt_lock_token=$4 AND status='running'`, c.OrgID, c.AssessmentID, c.JobID, c.LockToken, msg.ID, c.ProviderSessionID, c.SnapshotKey, c.NativeContext)
