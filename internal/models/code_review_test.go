@@ -699,6 +699,56 @@ func TestEvaluateCodeReviewRisk(t *testing.T) {
 			expected: codeReviewRiskEvaluationForTest(),
 		},
 		{
+			name: "allows explicitly eligible bot outside configured GitHub teams case insensitively",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.EligibleAuthors = []string{"sample-bot[bot]"}
+				c.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform"}
+			},
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				Additions:         20,
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Author:            "SAMPLE-BOT[BOT]",
+			},
+			expected: codeReviewRiskEvaluationForTest(),
+		},
+		{
+			name: "blocks unlisted bot outside configured GitHub teams",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.EligibleAuthors = []string{"sample-bot[bot]"}
+				c.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform"}
+			},
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				Additions:         20,
+				ChecksPassing:     true,
+				DescriptionPassed: true,
+				Author:            "other-bot[bot]",
+			},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonAuthorIneligible},
+			),
+		},
+		{
+			name: "explicitly eligible bot still requires passing quality gates",
+			mutate: func(c *CodeReviewPolicyConfig) {
+				c.RiskPolicy.EligibleAuthors = []string{"sample-bot[bot]"}
+				c.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform"}
+				c.RiskPolicy.RequirePassingChecks = true
+			},
+			input: CodeReviewRiskInput{
+				FilesChanged:      1,
+				Additions:         20,
+				ChecksPassing:     false,
+				DescriptionPassed: true,
+				Author:            "sample-bot[bot]",
+			},
+			expected: codeReviewRiskEvaluationForTest(
+				CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing},
+			),
+		},
+		{
 			name: "blocks author outside configured GitHub teams",
 			mutate: func(c *CodeReviewPolicyConfig) {
 				c.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform"}

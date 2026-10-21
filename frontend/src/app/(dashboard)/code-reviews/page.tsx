@@ -3901,7 +3901,7 @@ function EligibleGitHubAuthorsEditor({
   ];
   const countLabel = `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`;
   const addDisabled = disabled || !draft.trim();
-  const addDisabledReason = disabled ? "Wait for the policy to load." : "Enter a GitHub username or team.";
+  const addDisabledReason = disabled ? "Wait for the policy to load." : "Enter a GitHub user, bot, or team.";
 
   const addEntry = () => {
     const value = draft.trim();
@@ -3942,7 +3942,7 @@ function EligibleGitHubAuthorsEditor({
             </Label>
             <SettingInfoTooltip
               label="Eligible GitHub authors"
-              description="The reviewer may auto-approve when the author matches any listed user or is an active member of any listed team. Leave empty to allow any author. Team membership is checked live before approval."
+              description="The reviewer may auto-approve when the author matches any listed user or bot, or is an active member of any listed team. Bots can be listed directly without joining a team. All other approval criteria still apply. Leave empty to allow any author. Team membership is checked live before approval."
             />
           </div>
           <Badge variant="outline" className="shrink-0 text-xs">
@@ -3950,7 +3950,7 @@ function EligibleGitHubAuthorsEditor({
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground">
-          Allow automated approval for any matching user or active team member. Leave empty to allow all authors.
+          Allow listed users, bots, or active team members. Add bots by their exact GitHub login, including [bot] (for example, build-helper[bot]). Leave empty to allow all authors.
         </p>
       </div>
       <div className="divide-y divide-border border-t border-border">
@@ -3959,7 +3959,7 @@ function EligibleGitHubAuthorsEditor({
         ) : (
           entries.map((entry) => {
             const EntryIcon = entry.kind === "user" ? UserRound : Users;
-            const typeLabel = entry.kind === "user" ? "User" : "Team";
+            const typeLabel = entry.kind === "team" ? "Team" : /\[bot\]$/i.test(entry.value) ? "Bot" : "User";
             return (
               <div key={`${entry.kind}:${entry.value}`} className="flex min-h-10 items-center gap-3 px-4 py-2">
                 <EntryIcon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -3989,7 +3989,7 @@ function EligibleGitHubAuthorsEditor({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="user">User</SelectItem>
+              <SelectItem value="user">User or bot</SelectItem>
               <SelectItem value="team">Team</SelectItem>
             </SelectContent>
           </Select>
@@ -3997,7 +3997,7 @@ function EligibleGitHubAuthorsEditor({
             id="eligible-github-author-input"
             value={draft}
             disabled={disabled}
-            placeholder={kind === "user" ? "GitHub username" : "Organization/team-slug"}
+            placeholder={kind === "user" ? "GitHub user or bot login" : "Organization/team-slug"}
             aria-label="Eligible GitHub author"
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={handleKeyDown}

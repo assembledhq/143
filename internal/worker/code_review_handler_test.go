@@ -4740,6 +4740,11 @@ func TestLoadCodeReviewAuthorTeams(t *testing.T) {
 			eligibleAuthors: []string{"anya"},
 		},
 		{
+			name:            "skips provider lookup for explicitly eligible bot case insensitively",
+			author:          "SAMPLE-BOT[BOT]",
+			eligibleAuthors: []string{"sample-bot[bot]"},
+		},
+		{
 			name:          "returns matching active team",
 			author:        "sam",
 			teamActive:    true,

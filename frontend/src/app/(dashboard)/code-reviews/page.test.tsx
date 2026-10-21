@@ -3798,6 +3798,45 @@ describe("CodeReviewsPage", () => {
     expect(within(eligibleAuthorsEditor as HTMLElement).getByText("0 entries")).toBeInTheDocument();
   });
 
+  it("allows a named bot alongside eligible teams without broadening author eligibility", async () => {
+    const user = userEvent.setup();
+    const policyUpdates = vi.fn();
+    const state = mockCodeReviewBaseHandlers(githubTriggerReady, policyUpdates);
+
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+    await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
+
+    expect(screen.getByRole("combobox", { name: "GitHub author type" })).toHaveTextContent("User or bot");
+    expect(screen.getByText(/Add bots by their exact GitHub login/)).toBeInTheDocument();
+    const input = screen.getByRole("textbox", { name: "Eligible GitHub author" });
+    expect(input).toHaveAttribute("placeholder", "GitHub user or bot login");
+    await user.click(input);
+    await user.paste("  build-helper[bot]  ");
+    await user.click(screen.getByRole("button", { name: "Add author" }));
+
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy,
+      eligible_authors: ["anya", "build-helper[bot]"],
+    }));
+    const botRow = (await screen.findByText("build-helper[bot]")).parentElement;
+    expect(within(botRow as HTMLElement).getByText("Bot")).toBeInTheDocument();
+
+    const savesAfterAdding = policyUpdates.mock.calls.length;
+    await user.click(input);
+    await user.paste("BUILD-HELPER[BOT]");
+    await user.keyboard("{Enter}");
+    expect(input).toHaveValue("");
+    expect(policyUpdates).toHaveBeenCalledTimes(savesAfterAdding);
+    expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy,
+      eligible_authors: ["anya", "build-helper[bot]"],
+    });
+
+    await user.click(screen.getByRole("button", { name: "Remove user build-helper[bot]" }));
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual(policy.config.risk_policy));
+    expect(screen.queryByText("build-helper[bot]")).not.toBeInTheDocument();
+  });
+
   it("saves independent additions and deletions limits", async () => {
     const user = userEvent.setup();
     const state = mockCodeReviewBaseHandlers();
