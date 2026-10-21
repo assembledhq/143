@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/version"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -594,6 +596,7 @@ func RunMigrations(databaseURL string) (err error) {
 	if err != nil {
 		return err
 	}
+	databaseURL = db.LifecycleMigrationDatabaseURL(databaseURL, version.BuildSHA)
 	m, err := migrate.New(source, databaseURL)
 	if err != nil {
 		return err
@@ -704,11 +707,10 @@ func readSeedBody(seedPath string) ([]byte, error) {
 }
 
 func connectPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
-	config, err := pgxpool.ParseConfig(databaseURL)
+	config, err := lifecyclePoolConfig(databaseURL, version.BuildSHA)
 	if err != nil {
-		return nil, fmt.Errorf("parse database URL: %w", err)
+		return nil, err
 	}
-	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("create pool: %w", err)
@@ -718,6 +720,17 @@ func connectPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error)
 		return nil, fmt.Errorf("ping database: %w", err)
 	}
 	return pool, nil
+}
+
+func lifecyclePoolConfig(databaseURL, build string) (*pgxpool.Config, error) {
+	config, err := db.NewPoolConfig(databaseURL, db.PoolOptions{
+		ApplicationName: db.LifecycleOperatorConnectionApplicationName(build),
+	})
+	if err != nil {
+		return nil, err
+	}
+	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	return config, nil
 }
 
 func tempDatabaseName() (string, error) {

@@ -143,6 +143,15 @@ when a caller explicitly supplies attribution; empty options retain all previous
 naming inputs. Unrelated startup options remain untouched. Neither command starts
 an observer or sets a writer-version marker; uninjected builds retain `dev`.
 
+Demo-seed's admin, fallback and temporary pools and its embedded migrator now
+share that passive operator/build policy. Pool budgets, native parsing, simple
+protocol and existing Check deadlines/cleanup remain unchanged. The migration
+URI transformation has one owner in `internal/db`; `cmd/migrate` delegates to
+it without changing driver behavior. Existing demo entrypoints remain uninjected
+development builds unless their caller explicitly supplies the shared SHA linker
+flag. Labels do not distinguish command instances, prove privilege or grant a
+writer floor. Manual SQL and any unlabelled external writer remain inventory gates.
+
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
 current tree rather than treating line numbers as permanent identities.
@@ -1547,6 +1556,8 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Validate backfill/waiter attribution through real PostgreSQL factories,
   binary startup frames and native environment/keyword targets, including the
   shared opt-in pool's case-alias handling without writer authority.
+- [x] Attribute demo-seed's existing pools and embedded migration driver with
+  shared operator metadata while preserving target isolation and native behavior.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1790,6 +1801,26 @@ Parse-error, cancellation, retry-wait and actual-loop wiring checks retain the
 existing retry policy. Shared pool tests exercise opted-in runtime/operator
 aliases and unrelated options on fresh, reused and reset backends. These remain
 local attribution checks, not deployment, floor/drain proof or completion of 0a.
+
+### 0a demo attribution validation
+
+The complete demo and migration race suites passed locally on PostgreSQL 17.10:
+55 root tests and 822 subtests, with no failures or test skips. `cmd/demo-seed`
+has no test files and reports a package-level skip. Reproduce with an owned
+disposable PostgreSQL 15+ server in `TEST_DATABASE_URL` and
+`go test -race -p=1 ./internal/demoseed ./cmd/demo-seed ./cmd/migrate -count=1
+-parallel=3 -timeout=3m`.
+
+The full-schema Check still migrates and seeds only its generated sibling.
+Separate pool cases verify native configuration, simple protocol, safe labels,
+unrelated options and absent writer marker after opening, reuse and reset.
+The embedded lib/pq probe observes the exact connection blocked on a synthetic
+custom ledger, then verifies no-change success and the unchanged ledger/table
+set. It is a minimal-ledger driver probe, not another full-schema migration.
+An additional linked-SHA test run covers those real pool/driver paths; it does
+not claim an actual demo command invocation. The unchanged complete migration
+command suite separately exercises the promoted shared URI helper. These checks
+add no observer or lifecycle authority and do not establish a deployed floor.
 
 ## Surprises & Discoveries
 
