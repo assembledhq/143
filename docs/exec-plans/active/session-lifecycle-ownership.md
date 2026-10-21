@@ -844,19 +844,19 @@ is sufficient for this slice; no speculative schema is added. The syntax guard
 explicitly inventories the extracted root and its direct callers so extraction
 cannot silently remove its review coverage.
 
-The unchanged joined grant query has a pre-existing concurrent lost-update
-hazard: its metadata snapshot is taken before waiting on `FOR UPDATE OF s`.
-Waiting for that lock does not refresh the joined metadata snapshot, whether the
-other writer only locked or also updated the session row. Two unprelocked grants
-can both succeed while the last session/automation snapshot drops an earlier
-grant, or a duplicate is missed. The legacy wrapper deliberately preserves that
-SQL in this candidate.
-The canonical operation must lock the parent in an earlier statement or reread
-metadata after locking; wrapping this seam in the runner alone is insufficient.
-Full-schema concurrent distinct-grant proof of both retained grants is mandatory
-before converting callers, including coexistence with any unconverted legacy
-wrapper. Existing lock-order and consent/readiness gates still apply; the earlier
-lock is not an independent authorization check.
+The initial extraction retained a joined-read lost-update hazard: its metadata
+snapshot preceded the wait on `FOR UPDATE OF s`, and acquiring the lock did not
+refresh that snapshot. A subsequent freshness slice requires READ COMMITTED
+before any parent access, locks the parent in a separate statement, then reads
+fresh metadata. Both wrapper and caller-owned paths preserve concurrent distinct
+grants and recognize a concurrent duplicate on the full schema. An unsupported
+caller or connection-default isolation fails explicitly without being downgraded;
+the caller retains settlement of its transaction. No writer marker is installed.
+Historical binaries using the joined read/lock SQL can still overwrite grants:
+the test-only historical probe retains that evidence, not a desired production
+contract. This repair does not establish a drained floor, canonical lock order,
+exact consent/readiness or epoch authority. The session-before-automation order
+and independent human-input grant transaction still require conversion.
 
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
@@ -1558,6 +1558,10 @@ revision; it must not reinterpret new durable records or trigger replay.
   shared opt-in pool's case-alias handling without writer authority.
 - [x] Attribute demo-seed's existing pools and embedded migration driver with
   shared operator metadata while preserving target isolation and native behavior.
+- [x] Repair grant snapshot freshness for conforming READ COMMITTED wrapper and
+  caller-owned paths, proving retained concurrent grants, duplicate detection and
+  pre-lock isolation rejection on the full schema. Historical-writer drain and
+  canonical consent/lock-order conversion remain open.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1650,6 +1654,18 @@ the unchanged 123 job-status sites. This increment is passive extraction, not
 an additional lifecycle authority owner or completion of 0a. The legacy lock
 inversion and independent human-input grant transaction remain until canonical
 admission and all mixed-writer conversions are implemented and proved.
+
+A subsequent grant-freshness slice changes the current persistence seam: it
+checks READ COMMITTED, locks the parent in a separate statement and reads joined
+metadata afterward. Its combined focused race selection passed on PostgreSQL
+17.10: six root tests and 58 subtests, zero failures or skips. The complete
+unchanged schema covers both wrapper and caller-owned concurrency, exact
+duplicates, initially absent metadata and rejection of repeatable-read,
+serializable and read-uncommitted isolation before parent access. The historical
+joined-read test remains explicitly test-only evidence that older binaries must
+still drain. Reproduce with an owned PostgreSQL 15+ server and
+`go test -race -p=1 ./internal/db -run '^TestAgentCapabilityApprovedGrant' -count=1
+-parallel=1 -timeout=3m`. This is freshness proof, not consent or floor proof.
 
 After the review follow-ups, the combined race selection on PostgreSQL 17.10
 passed 334 subtests and 45 test roots, with zero failures or skips (23.429s).
