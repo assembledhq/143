@@ -711,6 +711,15 @@ Baseline cycles are real design debt, not regressions introduced by extraction:
 | Recheck Complete attempt rows -> thread -> session (`recheck_dispatch.go:476`, `:502`, `:513`) | Dispatch parent -> thread (`:265`); LockAttempt's multi-relation FOR UPDATE is not a documented physical relation order. |
 | StartSeed thread -> runtime -> batches/entries (`session_activity_seed.go:28`) | Other claim/reclaim scans first lock executor/job/runtime; original runtime CreateStarting mutates expired runtime/holder/inbox before inserting new runtime (`thread_runtime_store.go:58`). |
 
+The references above describe the baseline, not current line offsets. The 0a
+structured-answer prerequisite now constructs capability grants without a
+standalone appender and persists them on the answer's supplied transaction.
+Request-before-parent acquisition remains; session `FOR UPDATE`, metadata and
+automation-row locks now last through the outer claim/message/job commit.
+That stronger parent lock also blocks implicit FK `KEY SHARE` child inserts for
+the window. Removing the separate grant transaction does not resolve the
+existing request/parent or session/run order inversions or prove a writer floor.
+
 FK graph is part of acquisition: input -> sessions/threads/user; runtime ->
 session/thread; inbox -> session/thread/runtime; executor -> session/job/node;
 phase/batch -> thread/runtime/message relationships; repair/review/automation

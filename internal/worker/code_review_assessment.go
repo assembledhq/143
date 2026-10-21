@@ -583,7 +583,7 @@ func reconcileCompletedFullAssessment(ctx context.Context, stores *Stores, metad
 	if err := store.Complete(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: *assessment.ResultOrigin, CoverageComplete: assessment.CoverageComplete, Decision: *assessment.Decision, Acceptable: *assessment.Acceptable, RiskReasonDetails: assessment.RiskReasonDetails, StructuredOutcome: assessment.StructuredOutcome, RenderedBody: *assessment.RenderedBody}); err != nil {
 		return err
 	}
-	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessment(ctx, assessment.OrgID, assessment.ID); err != nil {
+	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(ctx, assessment.OrgID, tx, assessment.ID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -819,7 +819,7 @@ func completeFullAssessment(ctx context.Context, txStarter db.TxStarter, assessm
 			}
 		}
 	}
-	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessment(ctx, assessment.OrgID, assessment.ID); err != nil {
+	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(ctx, assessment.OrgID, tx, assessment.ID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

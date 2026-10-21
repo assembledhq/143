@@ -237,6 +237,8 @@ type fakeRepository struct {
 	enqueuedHumanInputRequestID uuid.UUID
 	notifiedJobID               uuid.UUID
 	committed                   bool
+	grant                       *models.AgentCapabilitySnapshotItem
+	grantErr                    error
 }
 
 func (r *fakeRepository) GetSession(context.Context, uuid.UUID, uuid.UUID) (models.Session, error) {
@@ -284,6 +286,14 @@ func (tx *fakeTx) AnswerRequest(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ u
 	req.AnsweredAt = &now
 	tx.repo.request = req
 	return req, nil
+}
+
+func (tx *fakeTx) AppendApprovedCapabilityGrant(_ context.Context, orgID, sessionID uuid.UUID, item models.AgentCapabilitySnapshotItem) ([]models.AgentCapabilitySnapshotItem, error) {
+	if tx.repo.grantErr != nil {
+		return nil, tx.repo.grantErr
+	}
+	tx.repo.grant = &item
+	return []models.AgentCapabilitySnapshotItem{item}, nil
 }
 
 func (tx *fakeTx) CancelRequest(_ context.Context, _ uuid.UUID, _ uuid.UUID, _ uuid.UUID, answerText *string, answerPayload json.RawMessage, answeredBy uuid.UUID) (models.HumanInputRequest, error) {

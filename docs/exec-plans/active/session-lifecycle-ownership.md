@@ -839,8 +839,9 @@ into its existing transaction-owning wrapper and
 only the caller's concrete `pgx.Tx`; it never settles or retries the unit. The
 wrapper retains its existing errors, duplicate behavior, SQL and
 session-before-automation lock order. This lower-level persistence seam is not
-the canonical `AppendApprovedGrantInTx` authority operation. No human-input
-caller is rewired, and consent, exact request/readiness, epochs and canonical
+the canonical `AppendApprovedGrantInTx` authority operation. The initial extraction
+did not rewire human-input callers; the later version-0 answer atomicity step
+below does. Canonical consent, exact request/readiness, epochs and domain
 domain prelocking remain unimplemented gates. Existing snapshot representation
 is sufficient for this slice; no speculative schema is added. The syntax guard
 explicitly inventories the extracted root and its direct callers so extraction
@@ -929,6 +930,42 @@ tx-bound wrapper. The same terminal receipt, retained PR owner, physical drain
 and exact thread-turn predicates are shared with the standalone wrapper. The PR
 owner still updates scheduling state, commits and then emits its existing event.
 This is caller-transaction composition, not shared epoch or allocation fencing.
+
+The structured-answer path now constructs its approved capability through one
+shared validation method and persists it through the existing answer transaction.
+A later claim, message, job enqueue or commit failure therefore rolls back both
+the answer and capability snapshots, including the linked automation mirror.
+The handler adapter only constructs the item; it cannot independently commit a
+grant. The standalone grant service retains its configuration error and duplicate
+behavior and currently has no production callers; it remains for compatibility
+and tests. Answer's pure construction does not require that standalone appender;
+production wiring still configures it. This version-0 atomicity prerequisite preserves existing pending-request,
+approval parsing, checkpoint and resume policy, including the request-before-parent
+lock order. It is not the canonical `AdmitAnswerInTx`/`AppendApprovedGrantInTx`
+authority operation, and cannot activate readiness enforcement or a writer floor.
+Acquisition order is unchanged, but the session `FOR UPDATE`, metadata and
+automation-row locks now remain held through the outer claim/message/job commit.
+The stronger parent lock can block implicit FK `KEY SHARE` child inserts for
+that window; this does not establish compatibility with competing run-first
+automation writers or the chosen future lock protocol.
+
+Atomic steering now calls a private concrete-transaction acknowledgement core,
+instead of entering the standalone acknowledgement owner's nested savepoint.
+One SQL sequence retains old-phase closure, exact delivered-input acknowledgement,
+batch creation and watermark CAS before the existing replacement-phase operation.
+The standalone path keeps input validation and initial replay before Begin, plus
+its distinct ordinary and concurrent-replay commit errors. The public service
+still publishes only after the store reports success; no new provider authority,
+epoch check, lock order or event policy is introduced.
+
+Full-assessment completion and crash reconciliation now settle their assessment,
+joined requests and PR scheduling state through the same transaction already
+owned by the worker. Shared private PR locking and terminal-policy helpers retain
+the existing repository/tenant checks, active-owner and pending-intent rules.
+The standalone scheduler still reads assessment identity before Begin, commits
+and then publishes its optional event. The two worker stores still have no
+publisher, so removing their nested savepoints adds no event. This is persistence
+composition, not a new current-allocation, review-authority or epoch fence.
 
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
@@ -1659,6 +1696,15 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Remove the nested terminal-reconciliation savepoint in the actual
   force-fresh PR callback, preserving standalone outcomes and proving whole-owner
   rollback plus scheduling publication only after visible outer commit.
+- [x] Keep version-0 structured-answer grant construction pure and persist its
+  request-keyed item through the same answer/claim/message/job transaction, with
+  full-schema late-failure rollback of session and linked automation snapshots.
+- [x] Remove atomic steering's nested acknowledgement savepoint with one shared
+  private SQL core; preserve standalone replay/error behavior and inventory the
+  current public acknowledgement chain through its real service callers.
+- [x] Compose full-assessment completion and reconciliation with caller-owned
+  assessment/request/scheduler settlement, retaining standalone PR event policy
+  and proving whole-owner late-failure rollback without a nested savepoint.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1749,8 +1795,10 @@ canonical authorization operation. The reviewed source
 inventory now contains 607 lifecycle symbols (one added persistence root) and
 the unchanged 123 job-status sites. This increment is passive extraction, not
 an additional lifecycle authority owner or completion of 0a. The legacy lock
-inversion and independent human-input grant transaction remain until canonical
-admission and all mixed-writer conversions are implemented and proved.
+inversion remains until canonical admission and mixed-writer conversions are
+implemented and proved. The independent human-input grant transaction recorded
+at this initial extraction is removed by the later version-0 atomicity step;
+that does not implement the canonical authority or readiness contract.
 
 A subsequent grant-freshness slice changes the current persistence seam: it
 checks READ COMMITTED, locks the parent in a separate statement and reads joined
@@ -2091,6 +2139,106 @@ publication uses an independent reader to observe the already committed graph.
 The actual force-fresh callback's supplied-tx call is separately pinned in source;
 existing service modes cover its retained behavior. This does not implement a
 canonical current-allocation/epoch fence or prove a deployed compatibility floor.
+
+### 0a structured-answer capability grant atomicity validation
+
+Eight focused race roots and 40 subtests pass locally on PostgreSQL 17.10, with
+no failures or skips. Reproduce using an owned PostgreSQL 15+
+`TEST_DATABASE_URL` and `go test -race -p=1
+./internal/services/agentcapabilities ./internal/services/humaninput ./internal/api/handlers
+-run '^(TestServiceBuildApprovedGrant|TestServiceApplyApprovedGrant.*|TestHumanInputApprovedGrant.*|TestHumanInputDBGrantRejectsNilTransaction|TestHumanInputCapabilityApprovalRecovery|TestSessionCapabilityApproverBuildsWithoutAppender)$'
+-count=1 -parallel=1 -timeout=3m`. Full touched-package race verification also
+passes: 1,490 roots and 1,890 subtests, with one existing external image-tool
+fixture skip. Focused vet and whitespace checks pass.
+
+Pure construction shares the prior catalog/access checks and exact item fields
+with standalone approval; only the retained standalone method checks appender
+configuration first. Real `Answer` runs on the full unchanged schema
+with a one-connection owner and nested-Begin rejection. Whole-row snapshots prove
+independent invisibility and atomic settlement of the request, capability metadata,
+automation mirror, claims, message and continuation job. Tenant mismatch and a
+same-tenant request from another session cannot bind a grant. Denial, nil service,
+invalid catalog data, existing grant retries and duplicate answers retain their
+previous semantics. Fixture-only late claim/message errors observe genuine prior
+answer/grant staging; enqueue and deferred-commit triggers first validate earlier
+writes, then raise genuine PostgreSQL errors. All rejected units return no accepted
+result and restore the exact prior row set. This intermediate version-0 repair is
+not consent/readiness/epoch fencing or evidence of a deployed compatibility floor.
+
+The visibility observer owns a dedicated physical connection opened before
+`Answer`, independently of the shared fixture setup/DDL pool. This avoids a
+parallel-test pool-acquisition cycle that PostgreSQL cannot detect while another
+case's trigger DDL waits on the open answer's table locks. Explicit migration
+driver registrations keep the fixture independent of sibling test files.
+Repeated race verification with `GOMAXPROCS=4` passes at default parallelism
+(`-count=3`: three roots, 36 case executions) and at `-parallel=8 -count=5`
+(five roots, 60 case executions), with no failures or skips. Serial proof alone
+did not exercise this harness hazard.
+
+### 0a atomic steering acknowledgement composition validation
+
+The expanded database race selection passes locally on PostgreSQL 17.10:
+11 roots and 62 subtests, no failures or skips. Reproduce with an owned
+PostgreSQL 15+ `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+-run '^TestInboxAck|^TestSessionActivityPhaseStoreAcknowledgeInboxBatch|^TestSessionActivityPhaseStorePostgresConcurrentBatchRetriesCreateOnePhase$'
+-count=1 -parallel=1 -timeout=3m`. Two retained agent delivery-receipt roots
+and nine subtests also pass: `go test -race -p=1 ./internal/services/agent
+-run '^TestThreadDeliveryPostgres(LateReceiptDoesNotResurrectPhase|AtomicSteeringRejectsForeignOrStaleReceipt)$'
+-count=1 -parallel=1 -timeout=3m`. Focused vet and formatting pass.
+
+The real atomic owner runs with one occupied connection and rejects nested Begin.
+Independent whole-row observations remain unchanged until the outer commit;
+successful commit exposes exact staged old/new phases, acknowledged/applied inputs,
+batch receipts and runtime watermarks. A scoped replacement-phase trigger first
+checks genuine earlier mutations, then raises a real PostgreSQL error; whole-owner
+rollback restores the entire prior graph. Injected outer commit error, started
+replay, abandoned repair, missing/duplicate confirmations, uncertain input and
+foreign lease retain original outcomes. Unit tests cover every retained SQL/count
+failure, initial replay before Begin, nil/typed-nil inputs and commit error prefixes.
+
+The syntax inventory now covers the previously unregistered acknowledgement chain:
+five DB symbols and three actual agent/service callers. New exact names require
+concrete root/direct-caller contracts even for generic receivers. These are
+conservative syntax candidates, not semantic runtime authority. Standalone legacy
+lease checks use acknowledgement time and allow draining, while initial replay
+does not revalidate live ownership; the atomic path additionally checks the actual
+clock and exact positive receipts. Canonical allocation/epoch fencing remains open.
+
+A separate caller trace qualifies earlier wrapper risk notes: the two current
+automation success callbacks clear diff/base/head before `UpdateTurnComplete`, so
+they do not produce the hypothesized workspace wakeup. A diff-bearing tx-bound
+wrapper remains a latent hazard; reachable failed-result and awaiting-input status
+publication are separate owner-local follow-up work, not evidence of that wakeup.
+
+### 0a full-assessment scheduler settlement composition validation
+
+The expanded focused race selection passes locally on PostgreSQL 17.10:
+11 roots and 178 subtests, no failures or skips. Reproduce with an owned
+PostgreSQL 15+ `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+./internal/worker ./internal/services/codereview
+-run '^TestCodeReviewSchedule.*Persistence|^TestAssessmentSettlement(FullSchemaPostgres|LegacyPublicationFullSchemaPostgres)$|^TestRecheckReconciliationSchedulingOwnerFullSchemaPostgres$|^TestFullAssessmentSettlementUsesSuppliedTransaction$|^TestFullAssessmentCompletionWithRetainedWorkspacePostgres$|^TestConfirmedFullPublicationCompletionAtomicPostgres$|^TestCodeReviewSchedulingLifecyclePostgres$/^force_fresh'
+-count=1 -parallel=1 -timeout=3m`. Focused vet, pinned lint and whitespace
+checks pass. Counts include retained caller/owner and force-fresh regressions,
+not only the new persistence tests.
+
+The new supplied-transaction seam rejects nil and typed-nil transactions before
+I/O. Shared SQL preserves PR advisory locking, tenant/repository ownership,
+schedule creation/row locking, callback validation and final scheduler update.
+The policy keeps newer active owners, pending intent and wake identity; it settles
+only the original assessment's matching requests. A one-connection owner rejects
+nested Begin. Exact whole-graph assertions cover genuinely staged earlier
+completion writes, outer commit/rollback, replay and a fixture-only final
+scheduling-write failure. The standalone enabled publisher observes already
+committed rows through an independent reader and emits nothing on failure.
+An injected error before physical commit proves rejection/rollback, not a lost
+network acknowledgement or unknown-commit recovery protocol.
+
+Both actual worker call sites are pinned to the supplied-tx seam. Earlier
+intentionally separate publication preparation remains separate; no whole-function
+atomicity, new event, canonical shared authority or deployed floor is claimed.
+Registering the shared PR/policy vocabulary also exposes retained indirect
+callers; these remain explicitly syntax-only observations rather than newly
+approved mutation authority.
 
 ## Surprises & Discoveries
 

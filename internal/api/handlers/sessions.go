@@ -647,8 +647,8 @@ type sessionCapabilityApprover struct {
 	svc *agentcapabilities.Service
 }
 
-func (a sessionCapabilityApprover) ApplyApprovedGrant(ctx context.Context, orgID, sessionID, requestID uuid.UUID, capability models.AgentCapabilityID, accessLevel models.AgentCapabilityAccessLevel) ([]models.AgentCapabilitySnapshotItem, error) {
-	return a.svc.ApplyApprovedGrant(ctx, agentcapabilities.ApprovedGrantInput{
+func (a sessionCapabilityApprover) BuildApprovedGrant(_ context.Context, orgID, sessionID, requestID uuid.UUID, capability models.AgentCapabilityID, accessLevel models.AgentCapabilityAccessLevel) (models.AgentCapabilitySnapshotItem, error) {
+	return a.svc.BuildApprovedGrant(agentcapabilities.ApprovedGrantInput{
 		OrgID:               orgID,
 		SessionID:           sessionID,
 		HumanInputRequestID: requestID,

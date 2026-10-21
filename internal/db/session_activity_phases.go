@@ -607,10 +607,11 @@ func (s *SessionActivityPhaseStore) AcknowledgeInboxBatchAndStartPhase(ctx conte
 		if !exactInboxSequenceRange(confirmedSequences, previous+1, sequenceEnd) {
 			return emptyPhase, emptyBatch, nil, ErrInboxBatchNoPhaseTransition
 		}
-		batch, completed, err = NewSessionActivityPhaseStore(tx).acknowledgeInboxBatch(ctx, orgID, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, at)
-		if err != nil {
-			return emptyPhase, emptyBatch, nil, err
+		acknowledged, acknowledgeErr := s.acknowledgeInboxBatchInTx(ctx, orgID, tx, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, at)
+		if acknowledgeErr != nil {
+			return emptyPhase, emptyBatch, nil, acknowledgeErr
 		}
+		batch, completed = acknowledged.batch, acknowledged.completedPhase
 	} else if replayErr != nil {
 		return emptyPhase, emptyBatch, nil, fmt.Errorf("read atomic steering replay: %w", replayErr)
 	} else {
@@ -703,6 +704,38 @@ func (s *SessionActivityPhaseStore) acknowledgeInboxBatch(ctx context.Context, o
 		return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("begin acknowledge inbox delivery batch: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	acknowledged, err := s.acknowledgeInboxBatchInTx(ctx, orgID, tx, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, acknowledgedAt)
+	if err != nil {
+		return models.ThreadInboxDeliveryBatch{}, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		if acknowledged.concurrentReplay {
+			return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("commit concurrently replayed inbox delivery batch: %w", err)
+		}
+		return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("commit acknowledged inbox delivery batch: %w", err)
+	}
+	return acknowledged.batch, acknowledged.completedPhase, nil
+}
+
+type inboxAcknowledgmentResult struct {
+	batch            models.ThreadInboxDeliveryBatch
+	completedPhase   *models.SessionActivityPhase
+	concurrentReplay bool
+}
+
+// acknowledgeInboxBatchInTx preserves the locked acknowledgment sequence on
+// the supplied transaction. Neither it nor its callers' phase composition gains
+// input, epoch or provider authority here. It never begins, settles, retries or
+// publishes; the owner must roll back its whole unit on error. The private
+// replay bit only preserves the standalone owner's legacy commit error prefix.
+func (s *SessionActivityPhaseStore) acknowledgeInboxBatchInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, sessionID, threadID, runtimeID, leaseToken uuid.UUID, activePhaseID *uuid.UUID, sequenceEnd int64, acknowledgedAt time.Time) (inboxAcknowledgmentResult, error) {
+	if nilLifecycleDependency(tx) {
+		return inboxAcknowledgmentResult{}, fmt.Errorf("acknowledge inbox delivery batch: transaction is required")
+	}
+	acknowledgedAt = postgresTimestamp(acknowledgedAt)
+	if sequenceEnd <= 0 || acknowledgedAt.IsZero() {
+		return inboxAcknowledgmentResult{}, fmt.Errorf("acknowledge inbox delivery batch: invalid sequence or acknowledgment time")
+	}
 
 	var previous int64
 	if err := tx.QueryRow(ctx, `
@@ -712,11 +745,11 @@ func (s *SessionActivityPhaseStore) acknowledgeInboxBatch(ctx context.Context, o
 		  AND lease_token = $5 AND status IN ('starting', 'live', 'paused', 'draining')
 		  AND lease_expires_at IS NOT NULL AND lease_expires_at > $6
 		FOR UPDATE`, orgID, sessionID, threadID, runtimeID, leaseToken, acknowledgedAt).Scan(&previous); err != nil {
-		return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("lock thread runtime for inbox acknowledgment: %w", err)
+		return inboxAcknowledgmentResult{}, fmt.Errorf("lock thread runtime for inbox acknowledgment: %w", err)
 	}
 	sequenceStart := previous + 1
 	if sequenceEnd < previous {
-		return models.ThreadInboxDeliveryBatch{}, nil, ErrInboxBatchConflict
+		return inboxAcknowledgmentResult{}, ErrInboxBatchConflict
 	}
 	if sequenceEnd == previous {
 		rows, queryErr := tx.Query(ctx, `SELECT `+inboxBatchColumns+`
@@ -725,16 +758,13 @@ func (s *SessionActivityPhaseStore) acknowledgeInboxBatch(ctx context.Context, o
 			  AND runtime_id = $4 AND sequence_end = $5`,
 			orgID, sessionID, threadID, runtimeID, sequenceEnd)
 		if queryErr != nil {
-			return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("get concurrently replayed inbox delivery batch: %w", queryErr)
+			return inboxAcknowledgmentResult{}, fmt.Errorf("get concurrently replayed inbox delivery batch: %w", queryErr)
 		}
 		batch, queryErr := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.ThreadInboxDeliveryBatch])
 		if queryErr != nil {
-			return models.ThreadInboxDeliveryBatch{}, nil, ErrInboxBatchConflict
+			return inboxAcknowledgmentResult{}, ErrInboxBatchConflict
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("commit concurrently replayed inbox delivery batch: %w", err)
-		}
-		return batch, nil, nil
+		return inboxAcknowledgmentResult{batch: batch, concurrentReplay: true}, nil
 	}
 
 	var matching int64
@@ -745,10 +775,10 @@ func (s *SessionActivityPhaseStore) acknowledgeInboxBatch(ctx context.Context, o
 		  AND runtime_id = $4 AND sequence_no BETWEEN $5 AND $6
 		  AND delivery_state = 'delivered'`,
 		orgID, sessionID, threadID, runtimeID, sequenceStart, sequenceEnd).Scan(&matching); err != nil {
-		return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("validate inbox delivery batch entries: %w", err)
+		return inboxAcknowledgmentResult{}, fmt.Errorf("validate inbox delivery batch entries: %w", err)
 	}
 	if matching != sequenceEnd-sequenceStart+1 {
-		return models.ThreadInboxDeliveryBatch{}, nil, ErrInboxBatchConflict
+		return inboxAcknowledgmentResult{}, ErrInboxBatchConflict
 	}
 	var completedPhase *models.SessionActivityPhase
 	if activePhaseID != nil {
@@ -761,14 +791,14 @@ func (s *SessionActivityPhaseStore) acknowledgeInboxBatch(ctx context.Context, o
 			RETURNING `+activityPhaseColumns,
 			orgID, *activePhaseID, acknowledgedAt, sessionID, threadID, runtimeID)
 		if updateErr != nil {
-			return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("close steered activity phase: %w", updateErr)
+			return inboxAcknowledgmentResult{}, fmt.Errorf("close steered activity phase: %w", updateErr)
 		}
 		phase, collectErr := pgx.CollectOneRow(phaseRows, pgx.RowToStructByName[models.SessionActivityPhase])
 		if errors.Is(collectErr, pgx.ErrNoRows) {
-			return models.ThreadInboxDeliveryBatch{}, nil, ErrActivityPhaseConflict
+			return inboxAcknowledgmentResult{}, ErrActivityPhaseConflict
 		}
 		if collectErr != nil {
-			return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("collect steered activity phase: %w", collectErr)
+			return inboxAcknowledgmentResult{}, fmt.Errorf("collect steered activity phase: %w", collectErr)
 		}
 		completedPhase = &phase
 	}
@@ -781,11 +811,11 @@ func (s *SessionActivityPhaseStore) acknowledgeInboxBatch(ctx context.Context, o
 		RETURNING `+inboxBatchColumns,
 		orgID, sessionID, threadID, runtimeID, sequenceStart, sequenceEnd, acknowledgedAt)
 	if err != nil {
-		return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("insert inbox delivery batch: %w", err)
+		return inboxAcknowledgmentResult{}, fmt.Errorf("insert inbox delivery batch: %w", err)
 	}
 	batch, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.ThreadInboxDeliveryBatch])
 	if err != nil {
-		return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("collect acknowledged inbox delivery batch: %w", err)
+		return inboxAcknowledgmentResult{}, fmt.Errorf("collect acknowledged inbox delivery batch: %w", err)
 	}
 	ackedTag, err := tx.Exec(ctx, `
 		UPDATE thread_inbox_entries
@@ -794,10 +824,10 @@ func (s *SessionActivityPhaseStore) acknowledgeInboxBatch(ctx context.Context, o
 		  AND sequence_no BETWEEN $5 AND $6 AND delivery_state = 'delivered'`,
 		orgID, sessionID, threadID, runtimeID, sequenceStart, sequenceEnd, acknowledgedAt)
 	if err != nil {
-		return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("mark inbox delivery batch entries acknowledged: %w", err)
+		return inboxAcknowledgmentResult{}, fmt.Errorf("mark inbox delivery batch entries acknowledged: %w", err)
 	}
 	if ackedTag.RowsAffected() != matching {
-		return models.ThreadInboxDeliveryBatch{}, nil, ErrInboxBatchConflict
+		return inboxAcknowledgmentResult{}, ErrInboxBatchConflict
 	}
 	tag, err := tx.Exec(ctx, `
 		UPDATE thread_runtimes
@@ -806,15 +836,12 @@ func (s *SessionActivityPhaseStore) acknowledgeInboxBatch(ctx context.Context, o
 		  AND lease_token = $5 AND last_acked_sequence = $8`,
 		orgID, sessionID, threadID, runtimeID, leaseToken, sequenceEnd, acknowledgedAt, previous)
 	if err != nil {
-		return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("advance inbox acknowledgment watermark: %w", err)
+		return inboxAcknowledgmentResult{}, fmt.Errorf("advance inbox acknowledgment watermark: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		return models.ThreadInboxDeliveryBatch{}, nil, ErrInboxBatchConflict
+		return inboxAcknowledgmentResult{}, ErrInboxBatchConflict
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return models.ThreadInboxDeliveryBatch{}, nil, fmt.Errorf("commit acknowledged inbox delivery batch: %w", err)
-	}
-	return batch, completedPhase, nil
+	return inboxAcknowledgmentResult{batch: batch, completedPhase: completedPhase}, nil
 }
 
 func validateTerminalActivityPhase(status models.ActivityPhaseStatus, reason models.ActivityPhaseBoundaryReason, completedAt time.Time) error {

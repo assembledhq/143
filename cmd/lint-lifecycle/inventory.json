@@ -1284,7 +1284,7 @@
       "lock": "Caller-supplied pgx.Tx; isolation check, parent FOR UPDATE in an earlier statement, fresh metadata read, metadata UPSERT, optional automation run UPDATE in unchanged legacy session-before-automation order. No Begin, Commit, Rollback, retry or pool fallback.",
       "stale_result": "Fresh-snapshot duplicate returns unchanged snapshot plus ErrCapabilityAlreadyGranted; absent/foreign session returns pgx.ErrNoRows. Unsupported isolation returns ErrCapabilityGrantRequiresReadCommitted before parent access and leaves caller settlement unchanged. Conforming concurrent grants retain both snapshots; historical joined-read writers remain a mixed-writer lost-update risk. Any error requires caller rollback; staged results need outer commit; no stale-authority fence exists.",
       "classification": "unfenced-needs-conversion",
-      "migration": "0a: canonical AppendApprovedGrantInTx must prelock/revalidate domain associations in the selected order, validate exact request/decision/readiness and expected epochs, then compose this persistence seam with answer/dispatch in one commit. Do not wire the seam alone into humaninput or treat the legacy lock order as floor-compatible.",
+      "migration": "0a: canonical AppendApprovedGrantInTx must prelock/revalidate domain associations in the selected order, validate exact request/decision/readiness and expected epochs, then compose persistence with answer/dispatch. A version-0 answer atomicity prerequisite now shares this seam with the existing locked request and validated decision; it does not establish canonical authority, activate readiness or make the retained legacy lock order floor-compatible.",
       "canonical_target": "AppendApprovedGrantInTx",
       "authority": "OrdinaryAuthority plus exact authorized human-input capability request/decision and expected session/domain epochs; this persistence seam does not establish them.",
       "fence_outcome": "Canonical authority/readiness/epoch rejection must roll back all composed writes. Persistence-only success is not command acceptance or compatibility-floor proof.",
@@ -1659,11 +1659,30 @@
       ]
     },
     {
+      "id": "internal/db/code_review_ended_recovery.go:CodeReviewScheduleStore.ReconcileEndedFullReview",
+      "source_sha256": "d65eb355ba305c10982e54f94e8df0f75f01397b31285ad3130ee9095783022a",
+      "operation": "CodeReviewScheduleStore.ReconcileEndedFullReview: indirect lifecycle caller (syntax observation only)",
+      "owner": "CodeReviewScheduleStore in internal/db",
+      "predicate": "Syntactic boundary/callee candidates: internal/db/code_review_scheduling.go:CodeReviewScheduleStore.WithLockedPR; no independent authorization proof inferred.",
+      "lock": "Observed transaction/lock syntax: FOR UPDATE OF a; FOR UPDATE OF s; s.WithLockedPR. This does not establish caller ownership or lock order.",
+      "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "evidence": [
+        "internal/db/code_review_ended_recovery.go:27",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: internal/db/code_review_scheduling.go:CodeReviewScheduleStore.WithLockedPR",
+        "Lock/transaction syntax: FOR UPDATE OF a",
+        "Lock/transaction syntax: FOR UPDATE OF s",
+        "Lock/transaction syntax: s.WithLockedPR"
+      ]
+    },
+    {
       "id": "internal/db/code_review_loop_guard.go:CodeReviewScheduleStore.StopFullReviewFallbackLoop",
-      "source_sha256": "eac695127d3963272dd6550284128c91d88873c3ad6dba85907594e7fd63f44c",
+      "source_sha256": "62a89e2346533c052c8f91ac0c18845024154e3cc9dde869ade789879ecd4be3",
       "operation": "CodeReviewScheduleStore.StopFullReviewFallbackLoop: indirect lifecycle caller",
       "owner": "CodeReviewScheduleStore in internal/db",
-      "predicate": "Syntactic boundary/callee candidates: stopFullReviewFallbackLoop; stopFullReviewFallbackLoop -> internal/db/code_review_loop_guard.go:stopFullReviewFallbackLoop; stopFullReviewFallbackLoop(ctx, tx, a, limit, reason, state); stopFullReviewFallbackLoop(ctx, tx, a, limit, reason, state) -> internal/db/code_review_loop_guard.go:stopFullReviewFallbackLoop; no independent authorization proof inferred.",
+      "predicate": "Syntactic boundary/callee candidates: internal/db/code_review_loop_guard.go:stopFullReviewFallbackLoop; internal/db/code_review_scheduling.go:CodeReviewScheduleStore.WithLockedPR; stopFullReviewFallbackLoop; no independent authorization proof inferred.",
       "lock": "Observed transaction/lock syntax: s.WithLockedPR. This does not establish caller ownership or lock order.",
       "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
       "classification": "unfenced-needs-conversion",
@@ -1671,8 +1690,9 @@
       "evidence": [
         "internal/db/code_review_loop_guard.go:15",
         "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: internal/db/code_review_loop_guard.go:stopFullReviewFallbackLoop",
+        "Boundary/call candidate: internal/db/code_review_scheduling.go:CodeReviewScheduleStore.WithLockedPR",
         "Boundary/call candidate: stopFullReviewFallbackLoop",
-        "Boundary/call candidate: stopFullReviewFallbackLoop -> internal/db/code_review_loop_guard.go:stopFullReviewFallbackLoop",
         "Lock/transaction syntax: s.WithLockedPR"
       ]
     },
@@ -1940,23 +1960,145 @@
       ]
     },
     {
+      "id": "internal/db/code_review_schedule_assessment.go:CodeReviewScheduleStore.SettleAssessment",
+      "source_sha256": "92758fccb845d61622d5e288395ff08774e76c030641d5c48ea24ba9329570f3",
+      "operation": "legacy assessment/request/PR scheduler settlement wrapper",
+      "owner": "CodeReviewScheduleStore legacy wrapper; pool-backed caller owns physical commit",
+      "predicate": "Preserves the org/assessment identity read before Begin, then delegates terminal assessment/request/state policy through WithLockedPR. Assessment identity alone is not current lifecycle authority.",
+      "lock": "Existing wrapper Begin/rollback/Commit through WithLockedPR. The same transaction takes PR advisory lock, verifies repository/org ownership, inserts the FK-backed scheduling row, locks it FOR UPDATE, applies shared terminal policy and writes final state.",
+      "stale_result": "Raw identity, callback, validation or commit errors propagate and the wrapper rolls back its whole unit, including staged callback writes. Pool-backed success publishes the existing scheduling event only after commit; a transaction-bound legacy wrapper can still release a savepoint before the physical outer commit.",
+      "migration": "0a persistence prerequisite: one shared assessment-settlement implementation now serves the retained wrapper and explicit transaction seam. Preserve the pre-Begin identity read and existing publication behavior; this does not activate canonical authority or solve arbitrary transaction-bound legacy wrappers.",
+      "prerequisite_0a": "Use the explicit supplied transaction at a real owner before shared projection, retain exact policy/whole-owner rollback and post-confirmed-commit publication, and add immutable allocation/current epochs/receipt and compatible lock/floor proof before canonical conversion.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future ReviewAuthority for any shared projection: exact PR/assessment/generation/input/domain owner plus immutable current allocation, admission/end epochs and attempt/receipt proof. Existing scheduler/domain predicates and transaction ownership do not establish this authority.",
+      "fence_outcome": "This 0a persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must not project current status/result/phase/ack/owner state or publish. Exact current authority and compatible lock/floor proof remain prerequisites.",
+      "evidence": [
+        "internal/db/code_review_schedule_assessment.go:15",
+        "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: internal/db/code_review_schedule_assessment.go:settleAssessmentLockedPR",
+        "Boundary/call candidate: internal/db/code_review_scheduling.go:CodeReviewScheduleStore.WithLockedPR",
+        "Boundary/call candidate: settleAssessmentLockedPR",
+        "Lock/transaction syntax: s.WithLockedPR",
+        "internal/db/code_review_schedule_assessment_persistence_test.go",
+        "internal/db/code_review_schedule_assessment_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/code_review_schedule_assessment.go:CodeReviewScheduleStore.SettleAssessmentInTx",
+      "source_sha256": "f6698102cf4bf7062d02d15c4b796c4c35447853049420236303f29ef9720a86",
+      "operation": "caller-owned terminal assessment/request/PR scheduler persistence",
+      "owner": "CodeReviewScheduleStore persistence only; caller owns authority, settlement and publication",
+      "predicate": "Rejects nil and typed-nil concrete pgx.Tx, reads the org/assessment PR identity on that transaction, and delegates the unchanged terminal assessment/request/scheduling policy. This seam introduces no epoch, receipt, current allocation or readiness validation.",
+      "lock": "Only supplied pgx.Tx: PR advisory lock, repository/org ownership check, FK-backed scheduling-row insert, row FOR UPDATE, shared terminal policy and final state UPDATE. No Begin/savepoint, Commit/Rollback, retry, publication or pool fallback anywhere in the seam.",
+      "stale_result": "Raw identity/lock/ownership/insert/query/policy/validation/update errors propagate; helper returns zero state on error. Any earlier request/state/callback writes remain staged until the caller rolls back its entire unit. Success neither attests commit nor establishes authority.",
+      "migration": "0a composition prerequisite now used by two existing full-assessment worker transaction owners with temporary nil-streams stores. No independent lifecycle writer, new notification or lock ordering policy is added.",
+      "prerequisite_0a": "Before any canonical shared projection compose future ReviewAuthority with exact immutable allocation, current admission/end epochs and receipt under chosen compatible locks/floor; preserve whole-owner rollback, terminal policy and existing domain association.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future ReviewAuthority for any shared projection: exact PR/assessment/generation/input/domain owner plus immutable current allocation, admission/end epochs and attempt/receipt proof. Existing scheduler/domain predicates and transaction ownership do not establish this authority.",
+      "fence_outcome": "This 0a persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must not project current status/result/phase/ack/owner state or publish. Exact current authority and compatible lock/floor proof remain prerequisites.",
+      "evidence": [
+        "internal/db/code_review_schedule_assessment.go:28",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
+        "Boundary/call candidate: internal/db/code_review_schedule_assessment.go:settleAssessmentLockedPR",
+        "Boundary/call candidate: internal/db/code_review_scheduling.go:CodeReviewScheduleStore.withLockedPRInTx",
+        "Boundary/call candidate: s.withLockedPRInTx",
+        "Boundary/call candidate: settleAssessmentLockedPR",
+        "Lock/transaction syntax: caller-supplied pgx.Tx",
+        "internal/db/code_review_schedule_assessment_persistence_test.go",
+        "internal/db/code_review_schedule_assessment_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/code_review_schedule_assessment.go:settleAssessmentLockedPR",
+      "source_sha256": "6fdf80b1dd69bcd8cc7d83fc1d1a51795bb4cac04a3813be3a9cfbe5aa2a62bf",
+      "operation": "shared terminal assessment/request/PR scheduler policy under retained PR lock",
+      "owner": "private scheduling policy helper; enclosing supplied-transaction owner retains settlement",
+      "predicate": "Reads exact org/assessment/repository/PR. Completed assessments satisfy exact assessment requests and legacy joined full-review requests for the same session/PR; failed/cancelled/superseded assessments fail their bound requests. State changes require exact active assessment or legacy full-session ownership. Newer pending input/wake survives; completed matching head/base/ref becomes covered, otherwise idle with prior completed baseline fallback. Nonterminal assessment preserves the original no-op policy, not a new rejection.",
+      "lock": "Runs on the concrete transaction already holding PR advisory lock, verified repository/org ownership and scheduling-row FOR UPDATE. Request updates and state mutation feed the same final scheduling UPDATE; no Begin, settlement, retry, publication or pool fallback.",
+      "stale_result": "Non-owning or nonterminal policy branches retain their existing behavior rather than claiming stale-authority rejection. Raw failures require whole-owner rollback, including any staged request/callback writes; outer helper returns zero state on error.",
+      "migration": "0a shared policy extraction only. Existing assessment/session ownership predicates are domain association, not immutable current execution allocation, admission/end epochs or a canonical authority fence.",
+      "prerequisite_0a": "Retain exact assessment/legacy ownership, request binding, pending wake and baseline policy when composing future ReviewAuthority; establish immutable allocation/current epochs/receipt and chosen compatible locks/floor before shared lifecycle projection.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future ReviewAuthority for any shared projection: exact PR/assessment/generation/input/domain owner plus immutable current allocation, admission/end epochs and attempt/receipt proof. Existing scheduler/domain predicates and transaction ownership do not establish this authority.",
+      "fence_outcome": "This 0a persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must not project current status/result/phase/ack/owner state or publish. Exact current authority and compatible lock/floor proof remain prerequisites.",
+      "evidence": [
+        "internal/db/code_review_schedule_assessment.go:48",
+        "Discovered: boundary-definition",
+        "Lock/transaction syntax: caller-supplied pgx.Tx",
+        "internal/db/code_review_schedule_assessment_persistence_test.go",
+        "internal/db/code_review_schedule_assessment_persistence_postgres_test.go"
+      ]
+    },
+    {
       "id": "internal/db/code_review_scheduling.go:CodeReviewScheduleStore.RepairMissingWakes",
-      "source_sha256": "660a5c11601148f6090b12e5cfe5285a0bfa568b95b30263d523ba057f9e1725",
+      "source_sha256": "905632ea2b886d342d199ef5f87ae691863ab1622c105d756676fbc90cef8b55",
       "operation": "CodeReviewScheduleStore.RepairMissingWakes: indirect lifecycle caller",
       "owner": "CodeReviewScheduleStore in internal/db",
-      "predicate": "AST-observed SQL predicates: WHERE (d.status IN ('pending','running') AND j.status IN ('succeeded','failed','cancelled','dead_letter')) OR (d.status IN ('failed','cancelled') AND t.current_turn=d.expected_turn-1 AND (sess.status IN ('running','cancelled') OR t.status IN ('running','cancelled'))) ORDER BY d.created_at,d.assessment_id LIMIT 100 | WHERE (st.pending_input IS NOT NULL OR EXISTS( SELECT 1 FROM code_review_revision_assessments a JOIN code_review_session_metadata m ON m.org_id=a.org_id AND m.id=a.metadata_id WHERE a.org_id=st.org_id AND a.pull_request_id=st.pull_request_id AND a.review_scope='full' AND m.status IN ('stale','failed','cancelled') AND a.publication_receipt IS NULL AND a.github_review_id IS NULL AN [excerpt; see symbol source]",
+      "predicate": "Syntactic boundary/callee candidates: internal/db/code_review_schedule_assessment.go:CodeReviewScheduleStore.SettleAssessment; rechecks.FailTerminalJob; rechecks.ReconcileDrainedTerminalTurn; no independent authorization proof inferred.",
       "lock": "Observed transaction/lock syntax: s.db.Begin; tx.Commit. This does not establish caller ownership or lock order.",
       "stale_result": "Observed guard/error branches: candidate.status == \"pending\" || candidate.status == \"running\". These are syntax observations, not a proven stale-result contract.",
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/db/code_review_scheduling.go:229",
-        "Discovered: boundary-caller",
-        "Boundary/call candidate: NewCodeReviewRecheckStore",
+        "internal/db/code_review_scheduling.go:243",
+        "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: internal/db/code_review_schedule_assessment.go:CodeReviewScheduleStore.SettleAssessment",
         "Boundary/call candidate: rechecks.FailTerminalJob",
         "Boundary/call candidate: rechecks.ReconcileDrainedTerminalTurn",
         "Lock/transaction syntax: s.db.Begin",
         "Lock/transaction syntax: tx.Commit"
+      ]
+    },
+    {
+      "id": "internal/db/code_review_scheduling.go:CodeReviewScheduleStore.WithLockedPR",
+      "source_sha256": "27b0e15757663ad363f6507b3c889adad8eef7a8311468757b2e212d5d1fd137",
+      "operation": "legacy PR lock/callback/scheduling-state transaction wrapper",
+      "owner": "CodeReviewScheduleStore legacy transaction owner when constructed on a pool",
+      "predicate": "Delegates existing PR ownership, callback and state enum validation to withLockedPRInTx. Callback business policy remains operation-specific; generic scheduling serialization is not lifecycle authorization.",
+      "lock": "Existing Begin/rollback/Commit surrounds one supplied-transaction protocol: PR advisory lock, repository/org ownership, scheduling-row FK insert, FOR UPDATE, callback, validation and final state UPDATE. Publication follows successful wrapper Commit.",
+      "stale_result": "Begin/lock/callback/validation/final-write/commit errors propagate with whole-wrapper rollback, including callback-staged writes. Pool-backed success preserves the existing best-effort postcommit scheduling event; a transaction-bound wrapper still has latent savepoint-before-physical-commit behavior.",
+      "migration": "0a persistence prerequisite: retained legacy wrapper delegates one same-transaction implementation and keeps original event timing. No blanket callback authority promotion, new lifecycle writer, lock order or canonical epoch activation.",
+      "prerequisite_0a": "Actual outer owners should use the explicit protocol and discard staged effects on failure. Add future typed ReviewAuthority for any shared projection only after immutable allocation/current epochs/receipt and compatible locks/floor are proven; do not infer them from PR serialization.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future ReviewAuthority for any shared projection: exact PR/assessment/generation/input/domain owner plus immutable current allocation, admission/end epochs and attempt/receipt proof. Existing scheduler/domain predicates and transaction ownership do not establish this authority.",
+      "fence_outcome": "This 0a persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must not project current status/result/phase/ack/owner state or publish. Exact current authority and compatible lock/floor proof remain prerequisites.",
+      "evidence": [
+        "internal/db/code_review_scheduling.go:100",
+        "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: internal/db/code_review_scheduling.go:CodeReviewScheduleStore.withLockedPRInTx",
+        "Boundary/call candidate: s.withLockedPRInTx",
+        "Lock/transaction syntax: s.db.Begin",
+        "Lock/transaction syntax: tx.Commit",
+        "internal/db/code_review_schedule_assessment_persistence_test.go",
+        "internal/db/code_review_schedule_assessment_persistence_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/code_review_scheduling.go:CodeReviewScheduleStore.withLockedPRInTx",
+      "source_sha256": "77268a1cf32dc59ee51b292706c8c67ad0a8ffce3a2b28ba6e7d535b256ce9a8",
+      "operation": "caller-owned PR lock/callback/scheduling-state persistence",
+      "owner": "private CodeReviewScheduleStore persistence protocol; caller owns physical transaction",
+      "predicate": "Rejects nil/typed-nil concrete pgx.Tx; validates org/PR/repository ownership even for an existing scheduling row. Callback runs on that exact transaction/state; state and wait-reason enums are validated before final UPDATE.",
+      "lock": "Exact retained order on supplied transaction: PR advisory lock, repository/org ownership read, FK-backed INSERT ON CONFLICT, scheduling SELECT FOR UPDATE, callback/shared terminal policy, enum validation, final UPDATE. Protocol itself has no Begin/savepoint, settlement, retry, publisher or pool fallback; callback must retain supplied transaction ownership.",
+      "stale_result": "Ownership miss returns pgx.ErrNoRows; raw query/callback/validation/write failures return zero state. Earlier row insertion or callback writes may remain staged, so the caller must roll back its complete unit; returned state is neither commit proof nor execution authority.",
+      "migration": "0a explicit persistence protocol shared by WithLockedPR and SettleAssessmentInTx. Scheduling serialization itself is not a newly authorized lifecycle writer and does not select a compatible canonical lock protocol.",
+      "prerequisite_0a": "Compose future ReviewAuthority before any shared projection, with immutable current allocation, admission/end epochs, receipt and chosen compatible locks/floor. Preserve exact callback policy, zero error result and whole-owner rollback.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future ReviewAuthority for any shared projection: exact PR/assessment/generation/input/domain owner plus immutable current allocation, admission/end epochs and attempt/receipt proof. Existing scheduler/domain predicates and transaction ownership do not establish this authority.",
+      "fence_outcome": "This 0a persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must not project current status/result/phase/ack/owner state or publish. Exact current authority and compatible lock/floor proof remain prerequisites.",
+      "evidence": [
+        "internal/db/code_review_scheduling.go:124",
+        "Discovered: boundary-definition",
+        "Lock/transaction syntax: FOR UPDATE",
+        "Lock/transaction syntax: caller-supplied pgx.Tx",
+        "Lock/transaction syntax: pg_advisory_xact_lock",
+        "internal/db/code_review_schedule_assessment_persistence_test.go",
+        "internal/db/code_review_schedule_assessment_persistence_postgres_test.go"
       ]
     },
     {
@@ -2018,10 +2160,10 @@
     },
     {
       "id": "internal/db/code_review_terminal_recovery.go:CodeReviewScheduleStore.ReconcileTerminalReviews",
-      "source_sha256": "18519f87b224c6e7310b6774a7b1693eb349724651e661cdc3c60cacf94afc36",
+      "source_sha256": "fbb41f936fb2e765acb06936fe01fd9492b82ab061b5f2949b28df47a9bab8a8",
       "operation": "CodeReviewScheduleStore.ReconcileTerminalReviews: named lifecycle boundary",
       "owner": "CodeReviewScheduleStore in internal/db",
-      "predicate": "Syntactic boundary/callee candidates: reconcileTerminalReviews; reconcileTerminalReviews -> internal/db/code_review_terminal_recovery.go:reconcileTerminalReviews; reconcileTerminalReviews(ctx, tx, orgID, prID, state); reconcileTerminalReviews(ctx, tx, orgID, prID, state) -> internal/db/code_review_terminal_recovery.go:reconcileTerminalReviews; no independent authorization proof inferred.",
+      "predicate": "Syntactic boundary/callee candidates: internal/db/code_review_scheduling.go:CodeReviewScheduleStore.WithLockedPR; internal/db/code_review_terminal_recovery.go:reconcileTerminalReviews; reconcileTerminalReviews; no independent authorization proof inferred.",
       "lock": "Observed transaction/lock syntax: s.WithLockedPR. This does not establish caller ownership or lock order.",
       "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
       "classification": "unfenced-needs-conversion",
@@ -2029,8 +2171,9 @@
       "evidence": [
         "internal/db/code_review_terminal_recovery.go:26",
         "Discovered: boundary-caller, boundary-definition, indirect-caller",
+        "Boundary/call candidate: internal/db/code_review_scheduling.go:CodeReviewScheduleStore.WithLockedPR",
+        "Boundary/call candidate: internal/db/code_review_terminal_recovery.go:reconcileTerminalReviews",
         "Boundary/call candidate: reconcileTerminalReviews",
-        "Boundary/call candidate: reconcileTerminalReviews -> internal/db/code_review_terminal_recovery.go:reconcileTerminalReviews",
         "Lock/transaction syntax: s.WithLockedPR"
       ]
     },
@@ -2818,6 +2961,192 @@
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: OpenPRDedupeKey",
         "Boundary/call candidate: OpenPRDedupeKey -> internal/db/jobs.go:OpenPRDedupeKey"
+      ]
+    },
+    {
+      "id": "internal/db/session_activity_phases.go:SessionActivityPhaseStore.AcknowledgeInboxBatch",
+      "source_sha256": "bccd03351a301bf44d9be97aa190ce6e4e2de323c9ba3ed697c8a74ceb87f198",
+      "operation": "legacy acknowledgement wrapper without returned phase",
+      "owner": "SessionActivityPhaseStore existing lease/range persistence; owner/canonical authority remain distinct",
+      "predicate": "Returns only the batch/error from the shared standalone acknowledgement owner; existing scoped replay can return before lease validation or Begin.",
+      "lock": "Delegates to acknowledgeInboxBatch; standalone owner controls transaction and original commit/error branches; no wrapper publication.",
+      "stale_result": "Current errors preserve original classification and return no accepted unit; any earlier staged close/ack/batch/watermark/phase writes require whole-owner rollback. Returned models or historical replay do not prove fresh allocation/epoch authority or permit new provider input.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual steering composition prerequisite removes one nested acknowledgement savepoint. Retain legacy replay, exact positive receipt and error/publication semantics while canonical acknowledgement adds shared authority.",
+      "canonical_target": "AcknowledgeInputInTx",
+      "authority": "RuntimeAuthority: exact immutable allocation/job attempt, org/session/lane admission/end epochs and current runtime lease plus exact positive input receipt. Existing lease-at-ack-time/range checks and resource IDs do not establish all canonical authority.",
+      "fence_outcome": "Strict acknowledgement result: invalid/stale lease/epoch or mismatched exact input receipt rejects the entire unit; no terminal-settlement F2 exception permits current input attach, owner release or fresh provider execution.",
+      "prerequisite_0a": "Validate immutable allocation/current epochs and exact input/provider receipt under compatible chosen locks before canonical acknowledgement. Preserve whole-owner settlement and post-success effects, convert competing writers and prove floor/drain; legacy scoped replay is not fresh lease authority.",
+      "evidence": [
+        "internal/db/session_activity_phases.go:564",
+        "Discovered: boundary-definition, indirect-caller",
+        "internal/db/session_activity_ack_transaction_test.go",
+        "internal/db/session_activity_ack_transaction_postgres_test.go",
+        "Retained agent delivery-receipt PostgreSQL late-failure and foreign/stale regressions"
+      ]
+    },
+    {
+      "id": "internal/db/session_activity_phases.go:SessionActivityPhaseStore.AcknowledgeInboxBatchAndStartPhase",
+      "source_sha256": "d8504274eede2300f7c84f0ea1c5d0ba911246e8825f9b67c973eb2563f5f468",
+      "operation": "atomic steering acknowledgement and replacement phase owner",
+      "owner": "SessionActivityPhaseStore existing lease/range persistence; owner/canonical authority remain distinct",
+      "predicate": "Exact scoped thread/current-runtime actual-clock lease; locked batch lookup; exact positive confirmed sequence set for new and replay/abandoned repair; shared acknowledgement then unchanged phase start. Retained domain checks do not validate shared epochs/allocation.",
+      "lock": "Own Begin/deferred rollback/Commit: thread -> runtime -> batch locks, private InTx acknowledgement -> unchanged phase start. Started replay and abandoned repair remain original branches; no nested savepoint or DB-store publication.",
+      "stale_result": "Current errors preserve original classification and return no accepted unit; any earlier staged close/ack/batch/watermark/phase writes require whole-owner rollback. Returned models or historical replay do not prove fresh allocation/epoch authority or permit new provider input.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual steering composition prerequisite removes one nested acknowledgement savepoint. Retain legacy replay, exact positive receipt and error/publication semantics while canonical acknowledgement adds shared authority.",
+      "canonical_target": "AcknowledgeInputInTx",
+      "authority": "RuntimeAuthority: exact immutable allocation/job attempt, org/session/lane admission/end epochs and current runtime lease plus exact positive input receipt. Existing lease-at-ack-time/range checks and resource IDs do not establish all canonical authority.",
+      "fence_outcome": "Strict acknowledgement result: invalid/stale lease/epoch or mismatched exact input receipt rejects the entire unit; no terminal-settlement F2 exception permits current input attach, owner release or fresh provider execution.",
+      "prerequisite_0a": "Validate immutable allocation/current epochs and exact input/provider receipt under compatible chosen locks before canonical acknowledgement. Preserve whole-owner settlement and post-success effects, convert competing writers and prove floor/drain; legacy scoped replay is not fresh lease authority.",
+      "evidence": [
+        "internal/db/session_activity_phases.go:576",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
+        "Boundary/call candidate: s.acknowledgeInboxBatchInTx",
+        "Boundary/call candidate: s.acknowledgeInboxBatchInTx(ctx, orgID, tx, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, at)",
+        "internal/db/session_activity_ack_transaction_test.go",
+        "internal/db/session_activity_ack_transaction_postgres_test.go",
+        "Retained agent delivery-receipt PostgreSQL late-failure and foreign/stale regressions"
+      ]
+    },
+    {
+      "id": "internal/db/session_activity_phases.go:SessionActivityPhaseStore.AcknowledgeInboxBatchWithTransition",
+      "source_sha256": "bccd03351a301bf44d9be97aa190ce6e4e2de323c9ba3ed697c8a74ceb87f198",
+      "operation": "legacy acknowledgement wrapper with exact phase transition",
+      "owner": "SessionActivityPhaseStore existing lease/range persistence; owner/canonical authority remain distinct",
+      "predicate": "Returns original batch and optional completed phase from the shared standalone owner; initial scoped replay returns no repeated phase transition.",
+      "lock": "Delegates to acknowledgeInboxBatch; retains original replay-before-Begin and owner settlement, with no wrapper publication.",
+      "stale_result": "Current errors preserve original classification and return no accepted unit; any earlier staged close/ack/batch/watermark/phase writes require whole-owner rollback. Returned models or historical replay do not prove fresh allocation/epoch authority or permit new provider input.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual steering composition prerequisite removes one nested acknowledgement savepoint. Retain legacy replay, exact positive receipt and error/publication semantics while canonical acknowledgement adds shared authority.",
+      "canonical_target": "AcknowledgeInputInTx",
+      "authority": "RuntimeAuthority: exact immutable allocation/job attempt, org/session/lane admission/end epochs and current runtime lease plus exact positive input receipt. Existing lease-at-ack-time/range checks and resource IDs do not establish all canonical authority.",
+      "fence_outcome": "Strict acknowledgement result: invalid/stale lease/epoch or mismatched exact input receipt rejects the entire unit; no terminal-settlement F2 exception permits current input attach, owner release or fresh provider execution.",
+      "prerequisite_0a": "Validate immutable allocation/current epochs and exact input/provider receipt under compatible chosen locks before canonical acknowledgement. Preserve whole-owner settlement and post-success effects, convert competing writers and prove floor/drain; legacy scoped replay is not fresh lease authority.",
+      "evidence": [
+        "internal/db/session_activity_phases.go:569",
+        "Discovered: boundary-definition, indirect-caller",
+        "internal/db/session_activity_ack_transaction_test.go",
+        "internal/db/session_activity_ack_transaction_postgres_test.go",
+        "Retained agent delivery-receipt PostgreSQL late-failure and foreign/stale regressions"
+      ]
+    },
+    {
+      "id": "internal/db/session_activity_phases.go:SessionActivityPhaseStore.acknowledgeInboxBatch",
+      "source_sha256": "e5a81fc524f387cfda5f964a1519666a8f8544f417398f1c1909d35192a9b50f",
+      "operation": "standalone acknowledgement persistence owner",
+      "owner": "SessionActivityPhaseStore existing lease/range persistence; owner/canonical authority remain distinct",
+      "predicate": "Normalizes/validates input before scoped replay read; initial replay can return old receipt without live-lease proof. Otherwise uses unchanged locked runtime/range/phase/batch/ack/watermark core.",
+      "lock": "Initial replay read before Begin; owns deferred rollback and Commit around private InTx core. Original ordinary versus concurrent-replay Commit error prefixes retained. No publication.",
+      "stale_result": "Current errors preserve original classification and return no accepted unit; any earlier staged close/ack/batch/watermark/phase writes require whole-owner rollback. Returned models or historical replay do not prove fresh allocation/epoch authority or permit new provider input.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual steering composition prerequisite removes one nested acknowledgement savepoint. Retain legacy replay, exact positive receipt and error/publication semantics while canonical acknowledgement adds shared authority.",
+      "canonical_target": "AcknowledgeInputInTx",
+      "authority": "RuntimeAuthority: exact immutable allocation/job attempt, org/session/lane admission/end epochs and current runtime lease plus exact positive input receipt. Existing lease-at-ack-time/range checks and resource IDs do not establish all canonical authority.",
+      "fence_outcome": "Strict acknowledgement result: invalid/stale lease/epoch or mismatched exact input receipt rejects the entire unit; no terminal-settlement F2 exception permits current input attach, owner release or fresh provider execution.",
+      "prerequisite_0a": "Validate immutable allocation/current epochs and exact input/provider receipt under compatible chosen locks before canonical acknowledgement. Preserve whole-owner settlement and post-success effects, convert competing writers and prove floor/drain; legacy scoped replay is not fresh lease authority.",
+      "evidence": [
+        "internal/db/session_activity_phases.go:681",
+        "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: s.acknowledgeInboxBatchInTx",
+        "Boundary/call candidate: s.acknowledgeInboxBatchInTx(ctx, orgID, tx, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, acknowledgedAt)",
+        "internal/db/session_activity_ack_transaction_test.go",
+        "internal/db/session_activity_ack_transaction_postgres_test.go",
+        "Retained agent delivery-receipt PostgreSQL late-failure and foreign/stale regressions"
+      ]
+    },
+    {
+      "id": "internal/db/session_activity_phases.go:SessionActivityPhaseStore.acknowledgeInboxBatchInTx",
+      "source_sha256": "36d8f631b9688ff052a0460dba680af119c2be4ee1c0fb574ea4ddc2332f967e",
+      "operation": "caller-owned acknowledgement, steering phase close and watermark persistence",
+      "owner": "SessionActivityPhaseStore existing lease/range persistence; owner/canonical authority remain distinct",
+      "predicate": "Existing org/session/thread/runtime token and lease-expiry-after-acknowledgement-time predicate, draining allowed; last-acked range, exact delivered count, optional exact running phase closure, batch insertion, entry acknowledgement and watermark CAS. No initial replay lookup; concurrent cursor replay retained.",
+      "lock": "Only supplied concrete pgx.Tx; runtime FOR UPDATE -> delivered count -> optional phase close -> batch insert -> entry ack -> watermark. No Begin/savepoint, settlement, retry, receiver DB fallback or publication. Owner must roll back the entire unit on any error.",
+      "stale_result": "Current errors preserve original classification and return no accepted unit; any earlier staged close/ack/batch/watermark/phase writes require whole-owner rollback. Returned models or historical replay do not prove fresh allocation/epoch authority or permit new provider input.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual steering composition prerequisite removes one nested acknowledgement savepoint. Retain legacy replay, exact positive receipt and error/publication semantics while canonical acknowledgement adds shared authority.",
+      "canonical_target": "AcknowledgeInputInTx",
+      "authority": "RuntimeAuthority: exact immutable allocation/job attempt, org/session/lane admission/end epochs and current runtime lease plus exact positive input receipt. Existing lease-at-ack-time/range checks and resource IDs do not establish all canonical authority.",
+      "fence_outcome": "Strict acknowledgement result: invalid/stale lease/epoch or mismatched exact input receipt rejects the entire unit; no terminal-settlement F2 exception permits current input attach, owner release or fresh provider execution.",
+      "prerequisite_0a": "Validate immutable allocation/current epochs and exact input/provider receipt under compatible chosen locks before canonical acknowledgement. Preserve whole-owner settlement and post-success effects, convert competing writers and prove floor/drain; legacy scoped replay is not fresh lease authority.",
+      "evidence": [
+        "internal/db/session_activity_phases.go:731",
+        "Discovered: boundary-definition",
+        "internal/db/session_activity_ack_transaction_test.go",
+        "internal/db/session_activity_ack_transaction_postgres_test.go",
+        "Retained agent delivery-receipt PostgreSQL late-failure and foreign/stale regressions"
+      ]
+    },
+    {
+      "id": "internal/services/agent/activity_phase_execution.go:activityPhaseExecution.acknowledgeAndResume",
+      "source_sha256": "9eba14d52b49ae09bac02e6c0ef5fd34563e50cb490ab8220e04cb1706d70f7e",
+      "operation": "agent confirmed-input steering boundary",
+      "owner": "Agent acknowledgement adapter; existing store owns persistence and transaction",
+      "predicate": "Requires configured runtime/lease/service and an open in-memory phase under its mutex; passes exact positive sequence list and scope to atomic acknowledgement service. Updates local phase only after successful return; maps no-transition to delivery-closed.",
+      "lock": "Holds existing execution mutex across service call; owns no DB transaction or provider launch. Store/service own durable settlement and original post-success notifications.",
+      "stale_result": "Current errors preserve original classification and return no accepted unit; any earlier staged close/ack/batch/watermark/phase writes require whole-owner rollback. Returned models or historical replay do not prove fresh allocation/epoch authority or permit new provider input.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual steering composition prerequisite removes one nested acknowledgement savepoint. Retain legacy replay, exact positive receipt and error/publication semantics while canonical acknowledgement adds shared authority.",
+      "canonical_target": "AcknowledgeInputInTx",
+      "authority": "RuntimeAuthority: exact immutable allocation/job attempt, org/session/lane admission/end epochs and current runtime lease plus exact positive input receipt. Existing lease-at-ack-time/range checks and resource IDs do not establish all canonical authority.",
+      "fence_outcome": "Strict acknowledgement result: invalid/stale lease/epoch or mismatched exact input receipt rejects the entire unit; no terminal-settlement F2 exception permits current input attach, owner release or fresh provider execution.",
+      "prerequisite_0a": "Validate immutable allocation/current epochs and exact input/provider receipt under compatible chosen locks before canonical acknowledgement. Preserve whole-owner settlement and post-success effects, convert competing writers and prove floor/drain; legacy scoped replay is not fresh lease authority.",
+      "evidence": [
+        "internal/services/agent/activity_phase_execution.go:274",
+        "Discovered: boundary-caller",
+        "Boundary/call candidate: e.service.AcknowledgeInboxBatchAndStartPhase",
+        "Boundary/call candidate: e.service.AcknowledgeInboxBatchAndStartPhase(ctx, e.orgID, e.sessionID, e.threadID, *e.runtimeID, *e.leaseToken, activePhaseID, e.turnNumber, sequenceEnd, confirmed)",
+        "internal/db/session_activity_ack_transaction_test.go",
+        "internal/db/session_activity_ack_transaction_postgres_test.go",
+        "Retained agent delivery-receipt PostgreSQL late-failure and foreign/stale regressions"
+      ]
+    },
+    {
+      "id": "internal/services/agent/activity_phases.go:ActivityPhaseService.AcknowledgeInboxBatch",
+      "source_sha256": "a6e098fa857abacb53e99f3996ccac1c7adc76c4c4c2bbe7e8c61d8738993f82",
+      "operation": "acknowledgement service publication adapter",
+      "owner": "Agent acknowledgement adapter; existing store owns persistence and transaction",
+      "predicate": "Delegates exact scoped arguments plus service clock to standalone acknowledgement with transition; publishes terminal phase only when returned and existing acknowledged-batch event on success.",
+      "lock": "Store owns transaction; service publishes only after store reports success. Scoped historical replay and repeated wakeups retain legacy semantics; notification is not commit/current-lease attestation or exactly-once delivery.",
+      "stale_result": "Current errors preserve original classification and return no accepted unit; any earlier staged close/ack/batch/watermark/phase writes require whole-owner rollback. Returned models or historical replay do not prove fresh allocation/epoch authority or permit new provider input.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual steering composition prerequisite removes one nested acknowledgement savepoint. Retain legacy replay, exact positive receipt and error/publication semantics while canonical acknowledgement adds shared authority.",
+      "canonical_target": "AcknowledgeInputInTx",
+      "authority": "RuntimeAuthority: exact immutable allocation/job attempt, org/session/lane admission/end epochs and current runtime lease plus exact positive input receipt. Existing lease-at-ack-time/range checks and resource IDs do not establish all canonical authority.",
+      "fence_outcome": "Strict acknowledgement result: invalid/stale lease/epoch or mismatched exact input receipt rejects the entire unit; no terminal-settlement F2 exception permits current input attach, owner release or fresh provider execution.",
+      "prerequisite_0a": "Validate immutable allocation/current epochs and exact input/provider receipt under compatible chosen locks before canonical acknowledgement. Preserve whole-owner settlement and post-success effects, convert competing writers and prove floor/drain; legacy scoped replay is not fresh lease authority.",
+      "evidence": [
+        "internal/services/agent/activity_phases.go:180",
+        "Discovered: boundary-caller, boundary-definition",
+        "Boundary/call candidate: s.store.AcknowledgeInboxBatchWithTransition",
+        "Boundary/call candidate: s.store.AcknowledgeInboxBatchWithTransition(ctx, orgID, sessionID, threadID, runtimeID, leaseToken, activePhaseID, sequenceEnd, s.now())",
+        "internal/db/session_activity_ack_transaction_test.go",
+        "internal/db/session_activity_ack_transaction_postgres_test.go",
+        "Retained agent delivery-receipt PostgreSQL late-failure and foreign/stale regressions"
+      ]
+    },
+    {
+      "id": "internal/services/agent/activity_phases.go:ActivityPhaseService.AcknowledgeInboxBatchAndStartPhase",
+      "source_sha256": "3df3b8e9f56dae713e97fe8747f34e8978f35dccf02a4f8d790fd0234c4343d9",
+      "operation": "atomic steering service publication adapter",
+      "owner": "Agent acknowledgement adapter; existing store owns persistence and transaction",
+      "predicate": "Delegates exact scope/runtime/lease/turn/range/positive sequences plus service clock. On successful store result retains terminal phase -> acknowledged batch -> started phase -> started batch publication order.",
+      "lock": "Existing store owns atomic transaction. Service emits no event on error and changes no settlement; replay can retain repeated metrics/wakeups. No independent DB transaction, provider launch or authority validation.",
+      "stale_result": "Current errors preserve original classification and return no accepted unit; any earlier staged close/ack/batch/watermark/phase writes require whole-owner rollback. Returned models or historical replay do not prove fresh allocation/epoch authority or permit new provider input.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual steering composition prerequisite removes one nested acknowledgement savepoint. Retain legacy replay, exact positive receipt and error/publication semantics while canonical acknowledgement adds shared authority.",
+      "canonical_target": "AcknowledgeInputInTx",
+      "authority": "RuntimeAuthority: exact immutable allocation/job attempt, org/session/lane admission/end epochs and current runtime lease plus exact positive input receipt. Existing lease-at-ack-time/range checks and resource IDs do not establish all canonical authority.",
+      "fence_outcome": "Strict acknowledgement result: invalid/stale lease/epoch or mismatched exact input receipt rejects the entire unit; no terminal-settlement F2 exception permits current input attach, owner release or fresh provider execution.",
+      "prerequisite_0a": "Validate immutable allocation/current epochs and exact input/provider receipt under compatible chosen locks before canonical acknowledgement. Preserve whole-owner settlement and post-success effects, convert competing writers and prove floor/drain; legacy scoped replay is not fresh lease authority.",
+      "evidence": [
+        "internal/services/agent/activity_phases.go:195",
+        "Discovered: boundary-caller, boundary-definition",
+        "Boundary/call candidate: s.store.AcknowledgeInboxBatchAndStartPhase",
+        "Boundary/call candidate: s.store.AcknowledgeInboxBatchAndStartPhase(ctx, orgID, sessionID, threadID, runtimeID, leaseToken, activePhaseID, turn, sequenceEnd, confirmed, s.now())",
+        "internal/db/session_activity_ack_transaction_test.go",
+        "internal/db/session_activity_ack_transaction_postgres_test.go",
+        "Retained agent delivery-receipt PostgreSQL late-failure and foreign/stale regressions"
       ]
     },
     {
@@ -4197,7 +4526,7 @@
       "operation": "generic resumable idle turn/result writer",
       "owner": "SessionStore in internal/db",
       "predicate": "Defaults nil result; delegates resource-only updateTurnCompleteRow. Starts transaction only when persisting diff or changeset head; no expected current attempt/end epoch.",
-      "lock": "Unchanged direct DBTX row helper when no authoritative diff or head; otherwise own Begin/Commit around UpdateTurnCompleteInTx. Pool-backed wrappers publish after commit; existing tx-bound automation callers can publish after savepoint release before true outer commit. Converting them to InTx with outer-owned effects remains required.",
+      "lock": "Unchanged direct DBTX row helper when no authoritative diff or head; otherwise own Begin/Commit around UpdateTurnCompleteInTx. A diff-bearing tx-bound wrapper could publish after savepoint release before true outer commit, so callers must compose InTx with outer-owned effects. The current two automation completion callbacks first clear diff/base/head via automationTurnResultDiff and therefore take the direct no-workspace-event path; they are not evidence of a reachable workspace wakeup bug.",
       "stale_result": "SQL/phase error rolls back owned transaction; matching successor resource is not rejected by a generation fence. Tx-bound caller cannot safely reuse a Begin wrapper.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: explicit caller pgx.Tx persistence-only projection; validate exact allocation/current shared epochs, retain result/diff/phase atomicity and return effects after commit. Historical own settlement never changes current result/diff/checkpoint/phase.",
@@ -6896,20 +7225,25 @@
     },
     {
       "id": "internal/services/agentcapabilities/service.go:Service.ApplyApprovedGrant",
-      "source_sha256": "25f11025970daec5021aab7462758150a091b3e48c9dbc416a360197f3ad633b",
-      "operation": "Service.ApplyApprovedGrant: indirect lifecycle caller",
+      "source_sha256": "9fb40281dccbb9889c67e27d8ad8cfad8149b0fa7ccebe9cdacd3b7bea505080",
+      "operation": "legacy standalone approved-grant validation and persistence wrapper",
       "owner": "Service in internal/services/agentcapabilities",
-      "predicate": "Syntactic boundary/callee candidates: s.approvedGrants.AppendApprovedSessionGrant; s.approvedGrants.AppendApprovedSessionGrant -> internal/db/agent_capabilities.go:AgentCapabilityPolicyStore.AppendApprovedSessionGrant; s.approvedGrants.AppendApprovedSessionGrant(ctx, in.OrgID, in.SessionID, models.AgentCapabilitySnapshotItem{ID: in.Capability, DisplayName: def.DisplayName, AccessLevel: in.AccessLevel, Risk: def.Risk, Scope: def.Scope, Config: json.RawMessage(`{}`), Source: models.AgentCapabilityGrantSourceUserApproved, GrantedAt: time.Now().UTC(), HumanInputRequestID: &in.HumanInputRequestID}); s.approvedGrants.AppendApprovedSessionGrant(ctx, in.OrgID, in.SessionID, models.AgentCapabilitySnapshotItem{ID: in.Capability, DisplayNa [excerpt; see symbol source]; no independent authorization proof inferred.",
-      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: s.approvedGrants.AppendApprovedSessionGrant; s.approvedGrants.AppendApprovedSessionGrant -> internal/db/agent_capabilities.go:AgentCapabilityPolicyStore.AppendApprovedSessionGrant; s.approvedGrants.AppendApprovedSessionGrant(ctx, in.OrgID, in.SessionID, models.AgentCapabilitySnapshotItem{ID: in.Capability, DisplayName: def.DisplayName, AccessLevel: in.AccessLevel, Risk: def.Risk, Scope: def.Scope, Config: json.RawMessage(`{}`), Source: models.AgentCapabilityGrantSourceUserApproved, GrantedAt: time.Now().UTC(), HumanInputRequestID: &in.HumanInputRequestID}); s.approvedGrants.AppendApprovedSessi [excerpt; see symbol source]",
-      "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
+      "predicate": "Preserves configured-appender check before validation, shares pure BuildApprovedGrant catalog/access/config construction, then appends the exact user-approved item with original request ID and UTC time. This standalone method is no longer the human-input answer callback.",
+      "lock": "Existing approved-grant appender owns its transaction. BuildApprovedGrant performs no policy/request/session reads or writes. Transaction-owning answer callers instead persist through their repository Tx.",
+      "stale_result": "Existing validation, appender and duplicate errors are unchanged. The standalone wrapper supplies no request readiness or canonical consent/epoch proof.",
       "classification": "unfenced-needs-conversion",
-      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "migration": "0a actual structured answers now use pure construction plus same-transaction grant persistence. This standalone method currently has no production callers and is retained for compatibility/tests; canonical consent and current shared authority remain required for any future consumer.",
       "evidence": [
         "internal/services/agentcapabilities/service.go:201",
         "Discovered: boundary-caller, indirect-caller",
+        "BuildApprovedGrant shares existing construction validation without persistence",
         "Boundary/call candidate: s.approvedGrants.AppendApprovedSessionGrant",
-        "Boundary/call candidate: s.approvedGrants.AppendApprovedSessionGrant -> internal/db/agent_capabilities.go:AgentCapabilityPolicyStore.AppendApprovedSessionGrant"
-      ]
+        "internal/services/agentcapabilities/approved_grant_test.go"
+      ],
+      "canonical_target": "AppendApprovedGrantInTx",
+      "authority": "OrdinaryAuthority: authenticated org/user and exact pending request/consent, request readiness certificate and current session/lane admission/end epochs. Current v0 resource/request checks and a constructed grant item do not establish the proposed canonical readiness or runtime authority.",
+      "fence_outcome": "AuthorizationRejected, stale/mismatched request/readiness/epoch or persistence failure must abort the whole answer/grant/claim/message/job transaction. No own-attempt stale-settlement carve-out authorizes a new grant or provider resume.",
+      "prerequisite_0a": "Preserve one concrete owner transaction and exact user-approved item while replacing legacy checkpoint/claim checks with canonical request readiness, consent and admission/end fencing; characterize and then convert legacy lock order and all competing writers before floor acceptance."
     },
     {
       "id": "internal/services/automations/goal_improvement.go:GoalImprovementService.Cancel",
@@ -8454,12 +8788,34 @@
       ]
     },
     {
+      "id": "internal/services/humaninput/db_repository.go:dbTx.AppendApprovedCapabilityGrant",
+      "source_sha256": "456ede8681c1b57d89e961e3be4308a818f8d097b3d07dcd2cbd97b829b415b8",
+      "operation": "answer-transaction capability snapshot persistence",
+      "owner": "humaninput.dbTx owning the existing concrete answer pgx.Tx",
+      "predicate": "Exact org/session and constructed grant passed unchanged to AppendApprovedSessionGrantInTx. That shared seam validates supplied transaction/isolation, locks parent in a prior statement and updates session plus linked automation snapshot atomically; it does not itself validate pending request consent.",
+      "lock": "Uses only t.tx; nil receiver database makes fallback unusable. Retains request-before-parent caller order and grant seam's parent-before-automation order; no Begin/savepoint, settlement, retry or publication.",
+      "stale_result": "Nil/typednil or unsupported isolation rejected, duplicate sentinel preserved. Any other error requires whole answer rollback, including previously staged request and snapshot work.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a real answer repository consumer of existing composable grant persistence; no separate appender or hidden context transaction.",
+      "canonical_target": "AppendApprovedGrantInTx",
+      "authority": "OrdinaryAuthority: authenticated org/user and exact pending request/consent, request readiness certificate and current session/lane admission/end epochs. Current v0 resource/request checks and a constructed grant item do not establish the proposed canonical readiness or runtime authority.",
+      "fence_outcome": "AuthorizationRejected, stale/mismatched request/readiness/epoch or persistence failure must abort the whole answer/grant/claim/message/job transaction. No own-attempt stale-settlement carve-out authorizes a new grant or provider resume.",
+      "prerequisite_0a": "Preserve one concrete owner transaction and exact user-approved item while replacing legacy checkpoint/claim checks with canonical request readiness, consent and admission/end fencing; characterize and then convert legacy lock order and all competing writers before floor acceptance.",
+      "evidence": [
+        "internal/services/humaninput/db_repository.go:97",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
+        "Boundary/call candidate: db.NewAgentCapabilityPolicyStore(nil).AppendApprovedSessionGrantInTx(ctx, orgID, t.tx, sessionID, item)",
+        "internal/services/humaninput/approved_grant_test.go",
+        "internal/services/humaninput/approved_grant_postgres_test.go"
+      ]
+    },
+    {
       "id": "internal/services/humaninput/db_repository.go:dbTx.AnswerRequest",
       "source_sha256": "ae7bad559da541b86f1ff1e77186ab43f3b4fea0eb36eeeb7d03f5fe4b75e63e",
       "operation": "structured input AnswerRequest transaction adapter",
       "owner": "dbTx in internal/services/humaninput",
       "predicate": "Delegates exact org/session/request to AnswerPending on tx-bound request store; GetRequestForUpdate currently occurs before session/thread resume claims; adapter adds no readiness/dispatch predicate.",
-      "lock": "Caller dbRepository.WithTx owns Begin/Commit; request lock -> session -> thread baseline inversion; approver can open another tx today.",
+      "lock": "Caller dbRepository.WithTx owns Begin/Commit; existing request -> parent grant -> session/thread claim order remains. Capability approval now persists in that same concrete transaction, with no independent appender or savepoint; compatible global lock-order conversion is still open.",
       "stale_result": "Store no-row propagates; outer service translates conflict. Existing caller transaction is useful but does not establish an exact bound consumer.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: reuse outer transaction with parent-first compatible no-effect DB operations; no nested grant tx or latest-request selection. No existing-job payload rebinding; failed binding rolls answer/grant/claim back.",
@@ -8479,7 +8835,7 @@
       "operation": "structured input CancelRequest transaction adapter",
       "owner": "dbTx in internal/services/humaninput",
       "predicate": "Delegates exact org/session/request to CancelPending on tx-bound request store; GetRequestForUpdate currently occurs before session/thread resume claims; adapter adds no readiness/dispatch predicate.",
-      "lock": "Caller dbRepository.WithTx owns Begin/Commit; request lock -> session -> thread baseline inversion; approver can open another tx today.",
+      "lock": "Caller dbRepository.WithTx owns Begin/Commit; cancellation retains request lock -> session -> thread baseline inversion and never approves a capability. Approved Answer grants now use their caller transaction rather than a separate appender.",
       "stale_result": "Store no-row propagates; outer service translates conflict. Existing caller transaction is useful but does not establish an exact bound consumer.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: reuse outer transaction with parent-first compatible no-effect DB operations; no nested grant tx or latest-request selection. No existing-job payload rebinding; failed binding rolls answer/grant/claim back.",
@@ -8488,7 +8844,7 @@
       "fence_outcome": "Strict typed result: invalid/stale authority rolls back the whole mutation transaction; no partial answer/grant/owner/snapshot/ack/wake. This operation does NOT have terminal-settlement F2 permission.",
       "prerequisite_0a": "0a: reuse outer transaction with parent-first compatible no-effect DB operations; no nested grant tx or latest-request selection. No existing-job payload rebinding; failed binding rolls answer/grant/claim back.",
       "evidence": [
-        "internal/services/humaninput/db_repository.go:95",
+        "internal/services/humaninput/db_repository.go:101",
         "Discovered: boundary-caller, boundary-definition",
         "Boundary/call candidate: t.requests.CancelPending"
       ]
@@ -8504,7 +8860,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "0a: preserve fallback eligibility deliberately, but move exact request/readiness/answer digest and expected epochs into parent-first domain/lane/request transaction. Claim, answer, grant and dispatch binding commit together; no late latest-request selection.",
       "evidence": [
-        "internal/services/humaninput/db_repository.go:108",
+        "internal/services/humaninput/db_repository.go:114",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: t.sessions.ClaimForResume",
         "Boundary/call candidate: t.sessions.ClaimForResume -> internal/db/session_store.go:SessionStore.ClaimForResume",
@@ -8528,7 +8884,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "0a: preserve fallback eligibility deliberately, but move exact request/readiness/answer digest and expected epochs into parent-first domain/lane/request transaction. Claim, answer, grant and dispatch binding commit together; no late latest-request selection.",
       "evidence": [
-        "internal/services/humaninput/db_repository.go:116",
+        "internal/services/humaninput/db_repository.go:122",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: t.threads.ClaimForResumeInSession",
         "Boundary/call candidate: t.threads.ClaimForResumeInSession -> internal/db/session_thread_store.go:SessionThreadStore.ClaimForResumeInSession",
@@ -8551,7 +8907,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/humaninput/db_repository.go:131",
+        "internal/services/humaninput/db_repository.go:137",
         "Discovered: boundary-caller, dispatch-reference, indirect-caller",
         "Boundary/call candidate: db.ContinueSessionDedupeKey",
         "Boundary/call candidate: db.ContinueSessionDedupeKey -> internal/db/jobs.go:ContinueSessionDedupeKey",
@@ -8561,20 +8917,46 @@
     },
     {
       "id": "internal/services/humaninput/service.go:Service.Answer",
-      "source_sha256": "8fc2e56812fa23c229c4d348d51ede9fdac7043b487bdd223bfe38f484ddc807",
-      "operation": "Service.Answer: indirect lifecycle caller",
+      "source_sha256": "78bb6004010723f191ac3ed86c13d4fb8bc36a503e3c2fc3b19998843f658ec0",
+      "operation": "structured answer, approved capability and provider-resume transaction",
       "owner": "Service in internal/services/humaninput",
-      "predicate": "AST-observed guard expressions: err != nil && !errors.Is(err, pgx.ErrNoRows) | errors.Is(err, pgx.ErrNoRows) | messageTurn = (session.CurrentTurn + 1)",
-      "lock": "Observed transaction/lock syntax: s.repo.WithTx. This does not establish caller ownership or lock order.",
-      "stale_result": "Observed guard/error branches: err != nil && !errors.Is(err, pgx.ErrNoRows); errors.Is(err, pgx.ErrNoRows); messageTurn = (session.CurrentTurn + 1). These are syntax observations, not a proven stale-result contract.",
+      "predicate": "Existing locked org/session pending request, ValidateAnswer and legacy checkpoint checks. Explicit approval of capability-request metadata builds one validated grant and persists it through the SAME Tx before existing claims/message/job. Denial, malformed/unrelated payload, nil approver and duplicate-grant retry semantics remain unchanged.",
+      "lock": "One repository-owned transaction: request lock -> answer -> approved-grant READ COMMITTED session FOR UPDATE/fresh metadata and linked automation mirror -> legacy claims -> message -> job -> owner commit, then notification. Acquisition order is unchanged; stronger session/metadata/automation locks now last through outer commit and the parent FOR UPDATE can block implicit FK KEY SHARE child inserts. No separate grant transaction; compatible competing-writer order remains open.",
+      "stale_result": "Validation/grant/claim/message/enqueue/commit error returns no accepted Result and aborts answer, snapshots, claims, message and job together. Existing duplicate grant is safe retry, not a new grant; current snapshot-ready and claims remain legacy resource checks, not immutable readiness.",
       "classification": "unfenced-needs-conversion",
-      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "migration": "0a real caller atomicity prerequisite implemented. Shared grant construction is pure and persistence is explicitly transaction-bound; canonical readiness, consent, admission and epoch enforcement remain open.",
       "evidence": [
-        "internal/services/humaninput/service.go:114",
+        "internal/services/humaninput/service.go:117",
         "Discovered: boundary-caller, indirect-caller",
-        "Boundary/call candidate: claimForProviderResume -> internal/services/humaninput/service.go:claimForProviderResume",
-        "Boundary/call candidate: tx.AnswerRequest",
-        "Lock/transaction syntax: s.repo.WithTx"
+        "Actual Answer consumes applyApprovedCapabilityGrant with the same callback Tx",
+        "internal/services/humaninput/approved_grant_test.go",
+        "internal/services/humaninput/approved_grant_postgres_test.go",
+        "Real one-connection Answer plus genuine late claim/message/enqueue/deferred-commit rollback; no claim of new readiness or floor"
+      ],
+      "canonical_target": "AdmitAnswerInTx; AppendApprovedGrantInTx",
+      "authority": "OrdinaryAuthority: authenticated org/user and exact pending request/consent, request readiness certificate and current session/lane admission/end epochs. Current v0 resource/request checks and a constructed grant item do not establish the proposed canonical readiness or runtime authority.",
+      "fence_outcome": "AuthorizationRejected, stale/mismatched request/readiness/epoch or persistence failure must abort the whole answer/grant/claim/message/job transaction. No own-attempt stale-settlement carve-out authorizes a new grant or provider resume.",
+      "prerequisite_0a": "Preserve one concrete owner transaction and exact user-approved item while replacing legacy checkpoint/claim checks with canonical request readiness, consent and admission/end fencing; characterize and then convert legacy lock order and all competing writers before floor acceptance."
+    },
+    {
+      "id": "internal/services/humaninput/service.go:Service.applyApprovedCapabilityGrant",
+      "source_sha256": "bebc115706ea6c882b587a20d04f0f0ba9cdbcb4f4f531bb0e447064b5e61ea9",
+      "operation": "validated structured-answer capability grant composition",
+      "owner": "humaninput.Service inside its Answer repository transaction",
+      "predicate": "Retains legacy approval parsing and exact capability-request payload discrimination, pure catalog construction and request/user-grant fields. Only persistence ErrCapabilityAlreadyGranted is accepted as safe retry.",
+      "lock": "Uses the existing supplied humaninput.Tx only; calls AppendApprovedCapabilityGrant, never standalone ApplyApprovedGrant or independent appender. No transaction settlement or publication.",
+      "stale_result": "Invalid construction or nonduplicate persistence error aborts the whole owner unit. Earlier answered request must roll back with all staged grant and later resume work.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual answer atomicity prerequisite implemented without new authorization/readiness/epoch semantics.",
+      "canonical_target": "AdmitAnswerInTx; AppendApprovedGrantInTx",
+      "authority": "OrdinaryAuthority: authenticated org/user and exact pending request/consent, request readiness certificate and current session/lane admission/end epochs. Current v0 resource/request checks and a constructed grant item do not establish the proposed canonical readiness or runtime authority.",
+      "fence_outcome": "AuthorizationRejected, stale/mismatched request/readiness/epoch or persistence failure must abort the whole answer/grant/claim/message/job transaction. No own-attempt stale-settlement carve-out authorizes a new grant or provider resume.",
+      "prerequisite_0a": "Preserve one concrete owner transaction and exact user-approved item while replacing legacy checkpoint/claim checks with canonical request readiness, consent and admission/end fencing; characterize and then convert legacy lock order and all competing writers before floor acceptance.",
+      "evidence": [
+        "internal/services/humaninput/service.go:185",
+        "Discovered: boundary-caller",
+        "Boundary/call candidate: tx.AppendApprovedCapabilityGrant",
+        "internal/services/humaninput/approved_grant_postgres_test.go"
       ]
     },
     {
@@ -8588,7 +8970,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/humaninput/service.go:225",
+        "internal/services/humaninput/service.go:232",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: claimForProviderResume -> internal/services/humaninput/service.go:claimForProviderResume",
         "Boundary/call candidate: tx.CancelRequest",
@@ -8606,7 +8988,7 @@
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/humaninput/service.go:326",
+        "internal/services/humaninput/service.go:333",
         "Discovered: indirect-caller",
         "Boundary/call candidate: tx.ClaimSessionForResume -> internal/services/humaninput/db_repository.go:dbTx.ClaimSessionForResume",
         "Boundary/call candidate: tx.ClaimThreadForResume -> internal/services/humaninput/db_repository.go:dbTx.ClaimThreadForResume"
@@ -10028,20 +10410,50 @@
     },
     {
       "id": "internal/worker/code_review_assessment.go:completeFullAssessment",
-      "source_sha256": "ceae2d7e10b5c9e5cc75111056fb9047ad77e3099d43049af95fa086262c702d",
-      "operation": "completeFullAssessment: indirect lifecycle caller",
-      "owner": "completeFullAssessment in internal/worker",
-      "predicate": "AST-observed guard expressions: assessment.ReviewScope != models.CodeReviewScopeFull || assessment.SessionID != legacy.SessionID || assessment.Status != models.CodeReviewAssessmentRunning && assessment.Status != models.CodeReviewAssessmentPublishing",
-      "lock": "Observed transaction/lock syntax: tx.Commit; txStarter.Begin. This does not establish caller ownership or lock order.",
-      "stale_result": "Observed guard/error branches: assessment.ReviewScope != models.CodeReviewScopeFull || assessment.SessionID != legacy.SessionID || assessment.Status != models.CodeReviewAssessmentRunning && assessment.Status != models.CodeReviewAssessmentPublishing. These are syntax observations, not a proven stale-result contract.",
+      "source_sha256": "68fb6b7dfca9f38d1ece01cfb3e9846aed67aac0d194117fd741f4f01d24b418",
+      "operation": "atomic full-assessment/legacy completion and scheduler settlement owner",
+      "owner": "completeFullAssessment in internal/worker; actual existing outer transaction owner",
+      "predicate": "Retains full scope, exact legacy session, running/publishing state, generation/input/publication and drained-owner domain predicates. Legacy completion, evidence link, immutable assessment completion, replacement retirement and explicit scheduler settlement share the existing outer transaction.",
+      "lock": "Unchanged outer Begin and full-assessment completion/owner protocol. Explicit SettleAssessmentInTx receives that exact tx, takes retained PR advisory -> repository/org ownership -> FK insert -> scheduling FOR UPDATE -> shared terminal policy -> final UPDATE, then the owner commits once.",
+      "stale_result": "Any earlier or final settlement/commit failure returns the original error and rolls back the entire owner unit, including legacy completion/evidence/assessment/replacement/callback writes. Temporary transaction-bound stores retain nil streams; no nested Begin/savepoint or new scheduling publication is introduced.",
+      "migration": "0a actual-consumer composition: replaces the nested settlement wrapper only. Domain assessment/publication/owner predicates remain unchanged; shared lifecycle admission/end epochs, immutable allocation and canonical review authority remain future work.",
+      "prerequisite_0a": "Before canonical shared session/turn projection add typed ReviewAuthority with exact immutable attempt/receipt and current epochs under chosen compatible locks/floor. Preserve original domain locks, nil-streams behavior and whole-owner rollback.",
       "classification": "unfenced-needs-conversion",
-      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future ReviewAuthority for any shared projection: exact PR/assessment/generation/input/domain owner plus immutable current allocation, admission/end epochs and attempt/receipt proof. Existing scheduler/domain predicates and transaction ownership do not establish this authority.",
+      "fence_outcome": "This 0a persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must not project current status/result/phase/ack/owner state or publish. Exact current authority and compatible lock/floor proof remain prerequisites.",
       "evidence": [
         "internal/worker/code_review_assessment.go:760",
         "Discovered: boundary-caller",
-        "Boundary/call candidate: db.NewCodeReviewRecheckStore",
         "Lock/transaction syntax: tx.Commit",
-        "Lock/transaction syntax: txStarter.Begin"
+        "Lock/transaction syntax: txStarter.Begin",
+        "internal/db/code_review_schedule_assessment_persistence_test.go",
+        "internal/db/code_review_schedule_assessment_persistence_postgres_test.go",
+        "internal/worker/code_review_assessment_settlement_wiring_test.go (actual consumer source-wiring proof)"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_assessment.go:reconcileCompletedFullAssessment",
+      "source_sha256": "3a49e5e7f042ec235e62a3ac2beb286525b9a76c677418e11c1f2d7cb3562790",
+      "operation": "atomic repair of staged full-assessment completion and scheduler settlement",
+      "owner": "reconcileCompletedFullAssessment in internal/worker; existing outer transaction owner",
+      "predicate": "Preserves absent/completed early returns, staged immutable outcome and publication receipt reconciliation before the existing owner transaction. Evidence linking, drained-owner claim when covered, assessment completion and explicit scheduler settlement compose on its same tx; no synthesis or substitution of current evidence.",
+      "lock": "Existing ThreadSendTx.Begin/full-assessment completion protocol, then SettleAssessmentInTx on that concrete tx: PR advisory -> repository/org ownership -> FK insert -> scheduling FOR UPDATE -> shared terminal policy -> final UPDATE, then one owner Commit.",
+      "stale_result": "Raw owner/settlement/commit failure rolls back the complete transaction unit. Preserved publication-state reconciliation before Begin is not claimed to become atomic with it. Temporary transaction stores remain nil-streams; no nested settlement/savepoint or new notification.",
+      "migration": "0a repair-consumer composition only. The same transaction now owns assessment completion and scheduler/request settlement without changing publication policy, domain association or choosing new canonical lifecycle locks.",
+      "prerequisite_0a": "Compose future typed ReviewAuthority before any shared projection, proving exact immutable allocation/current epochs/receipt and chosen compatible locks/floor. Retain staged-result policy, before-Begin publication reconciliation boundary and whole-owner rollback.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future ReviewAuthority for any shared projection: exact PR/assessment/generation/input/domain owner plus immutable current allocation, admission/end epochs and attempt/receipt proof. Existing scheduler/domain predicates and transaction ownership do not establish this authority.",
+      "fence_outcome": "This 0a persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must not project current status/result/phase/ack/owner state or publish. Exact current authority and compatible lock/floor proof remain prerequisites.",
+      "evidence": [
+        "internal/worker/code_review_assessment.go:512",
+        "Discovered: boundary-caller",
+        "Lock/transaction syntax: stores.ThreadSendTx.Begin",
+        "Lock/transaction syntax: tx.Commit",
+        "internal/db/code_review_schedule_assessment_persistence_test.go",
+        "internal/db/code_review_schedule_assessment_persistence_postgres_test.go",
+        "internal/worker/code_review_assessment_settlement_wiring_test.go (actual consumer source-wiring proof)"
       ]
     },
     {
@@ -10222,10 +10634,10 @@
     },
     {
       "id": "internal/worker/code_review_handler.go:newRunCodeReviewHandler",
-      "source_sha256": "bf058a8e42911ba79ea77f38868f3e99981a2f6573029c6e8a3f15c8e529889a",
+      "source_sha256": "2b962bb378102b3b8872980d2e2cfb43ab34a8992ee8e21942b59d8b393b74e0",
       "operation": "newRunCodeReviewHandler: indirect lifecycle caller",
       "owner": "newRunCodeReviewHandler in internal/worker",
-      "predicate": "AST-observed guard expressions: !hasJob || !hasLease | errors.Is(err, pgx.ErrNoRows) | existing.Status != models.CodeReviewSessionStatusCompleted && stores.CodeReviewAssessments != nil | getErr == nil && codeReviewMetadataTerminal(existing.Status) | lockToken := (jobctx.LockTokenFromContext(ctx))",
+      "predicate": "Syntactic boundary/callee candidates: internal/db/code_review_terminal_recovery.go:CodeReviewScheduleStore.ReconcileTerminalReviews; internal/worker/code_review_assessment.go:completeFullAssessment; internal/worker/code_review_assessment.go:reconcileCompletedFullAssessment; internal/worker/code_review_assessment.go:resumeStagedFullAssessment; internal/worker/code_review_handler.go:cancelActiveCodeReviewThreads; internal/worker/code_review_handler.go:completeCodeReviewAfterStableDeterministicFailure; internal/worker/code_review_handler.go:ensureCodeReviewOrchestratorThread; internal/worker/code_review_handler.go:ensureCodeReviewReviewerThreads; internal/worker/code_review_handler.go:failCodeReviewWithoutReviewerOutput; internal/worker/code_review_handler.go:harvestCodeReviewOrchestratorResult; internal/worker/code_review_handler.go:harvestCodeReviewReviewerResults; internal/worker/code_review_handler.go:reconcileCodeReviewSessionFailure; internal/worker/code_review_handler.go:reconcileCodeReviewSessionStale; internal/worker/code_review_handler.go:reconcileCodeReviewSessionSuccess; internal/worker/code_review_handler.go:registerCodeReviewDeadLetterReconciliation; internal/worker/code_review_handler.go:supersedeCodeReviewForCapturedIdentity; internal/worker/code_review_handler.go:supersedeCodeReviewForChangedHead; internal/worker/code_review_publication_recovery.go:recoverStagedFullAssessment; internal/worker/code_review_workspace.go:recoverEndedCodeReviewParent; no independent authorization proof inferred.",
       "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: cancelActiveCodeReviewThreads -> internal/worker/code_review_handler.go:cancelActiveCodeReviewThreads; cancelActiveCodeReviewThreads(ctx, stores, services, logger, job) -> internal/worker/code_review_handler.go:cancelActiveCodeReviewThreads; completeCodeReviewAfterStableDeterministicFailure -> internal/worker/code_review_handler.go:completeCodeReviewAfterStableDeterministicFailure; completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk, assessment) -> internal/worker/code_review_handler.go:completeCodeReview [excerpt; see symbol source]",
       "stale_result": "Observed guard/error branches: !hasJob || !hasLease; errors.Is(err, pgx.ErrNoRows); existing.Status != models.CodeReviewSessionStatusCompleted && stores.CodeReviewAssessments != nil; getErr == nil && codeReviewMetadataTerminal(existing.Status); lockToken := (jobctx.LockTokenFromContext(ctx)). These are syntax observations, not a proven stale-result contract.",
       "classification": "unfenced-needs-conversion",
@@ -10233,24 +10645,25 @@
       "evidence": [
         "internal/worker/code_review_handler.go:124",
         "Discovered: boundary-caller, indirect-caller",
-        "Boundary/call candidate: cancelActiveCodeReviewThreads -> internal/worker/code_review_handler.go:cancelActiveCodeReviewThreads",
-        "Boundary/call candidate: completeCodeReviewAfterStableDeterministicFailure -> internal/worker/code_review_handler.go:completeCodeReviewAfterStableDeterministicFailure",
-        "Boundary/call candidate: completeFullAssessment -> internal/worker/code_review_assessment.go:completeFullAssessment",
-        "Boundary/call candidate: db.NewCodeReviewScheduleStore",
-        "Boundary/call candidate: db.NewCodeReviewScheduleStore -> internal/db/code_review_terminal_recovery.go:CodeReviewScheduleStore.ReconcileTerminalReviews",
-        "Boundary/call candidate: ensureCodeReviewOrchestratorThread -> internal/worker/code_review_handler.go:ensureCodeReviewOrchestratorThread",
-        "Boundary/call candidate: ensureCodeReviewReviewerThreads -> internal/worker/code_review_handler.go:ensureCodeReviewReviewerThreads",
-        "Boundary/call candidate: failCodeReviewWithoutReviewerOutput -> internal/worker/code_review_handler.go:failCodeReviewWithoutReviewerOutput",
-        "Boundary/call candidate: harvestCodeReviewOrchestratorResult -> internal/worker/code_review_handler.go:harvestCodeReviewOrchestratorResult",
-        "Boundary/call candidate: harvestCodeReviewReviewerResults -> internal/worker/code_review_handler.go:harvestCodeReviewReviewerResults",
-        "Boundary/call candidate: reconcileCodeReviewSessionFailure -> internal/worker/code_review_handler.go:reconcileCodeReviewSessionFailure",
-        "Boundary/call candidate: reconcileCodeReviewSessionStale -> internal/worker/code_review_handler.go:reconcileCodeReviewSessionStale",
-        "Boundary/call candidate: reconcileCodeReviewSessionSuccess -> internal/worker/code_review_handler.go:reconcileCodeReviewSessionSuccess",
-        "Boundary/call candidate: recoverStagedFullAssessment -> internal/worker/code_review_publication_recovery.go:recoverStagedFullAssessment",
-        "Boundary/call candidate: registerCodeReviewDeadLetterReconciliation -> internal/worker/code_review_handler.go:registerCodeReviewDeadLetterReconciliation",
-        "Boundary/call candidate: resumeStagedFullAssessment -> internal/worker/code_review_assessment.go:resumeStagedFullAssessment",
-        "Boundary/call candidate: supersedeCodeReviewForCapturedIdentity -> internal/worker/code_review_handler.go:supersedeCodeReviewForCapturedIdentity",
-        "Boundary/call candidate: supersedeCodeReviewForChangedHead -> internal/worker/code_review_handler.go:supersedeCodeReviewForChangedHead"
+        "Boundary/call candidate: internal/db/code_review_terminal_recovery.go:CodeReviewScheduleStore.ReconcileTerminalReviews",
+        "Boundary/call candidate: internal/worker/code_review_assessment.go:completeFullAssessment",
+        "Boundary/call candidate: internal/worker/code_review_assessment.go:reconcileCompletedFullAssessment",
+        "Boundary/call candidate: internal/worker/code_review_assessment.go:resumeStagedFullAssessment",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:cancelActiveCodeReviewThreads",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:completeCodeReviewAfterStableDeterministicFailure",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:ensureCodeReviewOrchestratorThread",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:ensureCodeReviewReviewerThreads",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:failCodeReviewWithoutReviewerOutput",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:harvestCodeReviewOrchestratorResult",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:harvestCodeReviewReviewerResults",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:reconcileCodeReviewSessionFailure",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:reconcileCodeReviewSessionStale",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:reconcileCodeReviewSessionSuccess",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:registerCodeReviewDeadLetterReconciliation",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:supersedeCodeReviewForCapturedIdentity",
+        "Boundary/call candidate: internal/worker/code_review_handler.go:supersedeCodeReviewForChangedHead",
+        "Boundary/call candidate: internal/worker/code_review_publication_recovery.go:recoverStagedFullAssessment",
+        "Boundary/call candidate: internal/worker/code_review_workspace.go:recoverEndedCodeReviewParent"
       ]
     },
     {
@@ -10510,19 +10923,70 @@
       ]
     },
     {
+      "id": "internal/worker/code_review_recheck_handler.go:failCodeReviewRecheck",
+      "source_sha256": "56fcb962f076e0c78af7d2f69a8ee53afe2df85b2c2b474cd16e96209f666817",
+      "operation": "failCodeReviewRecheck: indirect lifecycle caller (syntax observation only)",
+      "owner": "failCodeReviewRecheck in internal/worker",
+      "predicate": "Syntactic boundary/callee candidates: internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment; no independent authorization proof inferred.",
+      "lock": "No separately proven transaction/lock contract for this indirect caller; inspect its listed callees.",
+      "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "evidence": [
+        "internal/worker/code_review_recheck_handler.go:397",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment"
+      ]
+    },
+    {
       "id": "internal/worker/code_review_recheck_handler.go:newRunCodeReviewRecheckHandler",
-      "source_sha256": "46c533ebdbec40627eeefc54c2112deb774176c764a52abaf85ce2c027547e35",
+      "source_sha256": "28314c0b4a22fc185ab40b8d6f1c91d210711adbb055c7a06105e5b239b5821e",
       "operation": "newRunCodeReviewRecheckHandler: indirect lifecycle caller",
       "owner": "newRunCodeReviewRecheckHandler in internal/worker",
-      "predicate": "AST-observed guard expressions: (a.Status == models.CodeReviewAssessmentSuperseded || a.Status == models.CodeReviewAssessmentFailed) && a.FailureDetail != nil && (strings.HasPrefix(*a.FailureDetail, \"full_review:\") || strings.HasPrefix(*a.FailureDetail, \"full_review_queued:\")) | a.Status = (models.CodeReviewAssessmentRunning) | a.Status == models.CodeReviewAssessmentCompleted || a.Status == models.CodeReviewAssessmentCancelled || a.Status == models.CodeReviewAssessmentSuperseded | a.Status == models.CodeReviewAssessmentFailed | a.Status == models.CodeReviewAssessmentPublishing || a.ResultOrigin != nil | a.Status == models.CodeReviewAssessmentReserved | a.Status == models.CodeReviewAssessmentSuperseded && a.FailureDetail != [excerpt; see symbol source]",
+      "predicate": "Syntactic boundary/callee candidates: internal/worker/code_review_recheck_handler.go:failCodeReviewRecheck; internal/worker/code_review_recheck_handler.go:registerCodeReviewRecheckDeadLetterReconciliation; internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment; stores.CodeReviewRechecks.FailTerminalJob; no independent authorization proof inferred.",
       "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: stores.CodeReviewRechecks.FailTerminalJob; stores.CodeReviewRechecks.FailTerminalJob(ctx, a.OrgID, a.ID, \"bound continuation job ended without an exact turn receipt\")",
       "stale_result": "Observed guard/error branches: (a.Status == models.CodeReviewAssessmentSuperseded || a.Status == models.CodeReviewAssessmentFailed) && a.FailureDetail != nil && (strings.HasPrefix(*a.FailureDetail, \"full_review:\") || strings.HasPrefix(*a.FailureDetail, \"full_review_queued:\")); a.Status = (models.CodeReviewAssessmentRunning); a.Status == models.CodeReviewAssessmentCompleted || a.Status == models.CodeReviewAssessmentCancelled || a.Status == models.CodeReviewAssessmentSuperseded; a.Status == models.CodeReviewAssessmentFailed; a.Status == models.CodeReviewAssessmentPublishing || a.ResultOrigin != nil; a.Status == models.CodeRev [excerpt; see symbol source]. These are syntax observations, not a proven stale-result contract.",
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
         "internal/worker/code_review_recheck_handler.go:47",
-        "Discovered: boundary-caller",
+        "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:failCodeReviewRecheck",
+        "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:registerCodeReviewRecheckDeadLetterReconciliation",
+        "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment",
         "Boundary/call candidate: stores.CodeReviewRechecks.FailTerminalJob"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_recheck_handler.go:registerCodeReviewRecheckDeadLetterReconciliation",
+      "source_sha256": "debd082622217f710682485b3499ab9dd8bfb01ee913fee6cf622174a807de24",
+      "operation": "registerCodeReviewRecheckDeadLetterReconciliation: indirect lifecycle caller (syntax observation only)",
+      "owner": "registerCodeReviewRecheckDeadLetterReconciliation in internal/worker",
+      "predicate": "Syntactic boundary/callee candidates: internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment; no independent authorization proof inferred.",
+      "lock": "No separately proven transaction/lock contract for this indirect caller; inspect its listed callees.",
+      "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "evidence": [
+        "internal/worker/code_review_recheck_handler.go:371",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_recheck_handler.go:settleCodeReviewAssessment",
+      "source_sha256": "734a3663024ef15a9ce2264bbf56a0c1dc9392a6d65a89744d67ebc50bc5d20f",
+      "operation": "settleCodeReviewAssessment: indirect lifecycle caller (syntax observation only)",
+      "owner": "settleCodeReviewAssessment in internal/worker",
+      "predicate": "Syntactic boundary/callee candidates: internal/db/code_review_schedule_assessment.go:CodeReviewScheduleStore.SettleAssessment; no independent authorization proof inferred.",
+      "lock": "No separately proven transaction/lock contract for this indirect caller; inspect its listed callees.",
+      "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "evidence": [
+        "internal/worker/code_review_recheck_handler.go:427",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: internal/db/code_review_schedule_assessment.go:CodeReviewScheduleStore.SettleAssessment"
       ]
     },
     {
@@ -10558,6 +11022,22 @@
         "internal/worker/code_review_workspace.go:205",
         "Discovered: boundary-caller",
         "Boundary/call candidate: stores.CodeReviewWorkspaces.PublishPrepared"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_workspace.go:recoverEndedCodeReviewParent",
+      "source_sha256": "84c3f012fd9a55e5443707621ef4b223f9efc3a5f0b56f12f3a64def2482af9d",
+      "operation": "recoverEndedCodeReviewParent: indirect lifecycle caller (syntax observation only)",
+      "owner": "recoverEndedCodeReviewParent in internal/worker",
+      "predicate": "Syntactic boundary/callee candidates: internal/db/code_review_ended_recovery.go:CodeReviewScheduleStore.ReconcileEndedFullReview; no independent authorization proof inferred.",
+      "lock": "No separately proven transaction/lock contract for this indirect caller; inspect its listed callees.",
+      "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "evidence": [
+        "internal/worker/code_review_workspace.go:383",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: internal/db/code_review_ended_recovery.go:CodeReviewScheduleStore.ReconcileEndedFullReview"
       ]
     },
     {
