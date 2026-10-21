@@ -22,6 +22,45 @@ type SessionPersistenceEffects struct {
 	workspaceChanged  bool
 }
 
+// UpdateResultInTx persists the existing status/result, primary changeset head
+// and optional diff snapshot using only the caller's concrete transaction. It
+// normalizes a nil result like UpdateResult and preserves its original returned
+// row, before any snapshot revision update. It never begins, settles, retries or
+// publishes. The caller must roll back the whole unit on error and may publish
+// returned effects only after confirmed commit. This is persistence, not
+// lifecycle ownership, generation or admission validation.
+func (s *SessionStore) UpdateResultInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) (models.Session, SessionPersistenceEffects, error) {
+	if nilLifecycleDependency(tx) {
+		return models.Session{}, SessionPersistenceEffects{}, fmt.Errorf("persist session result: transaction is required")
+	}
+	if result == nil {
+		result = &models.SessionResult{}
+	}
+	diffStats := computeDiffStatsForResult(result)
+	session, err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats)
+	if err != nil {
+		return models.Session{}, SessionPersistenceEffects{}, err
+	}
+	if !shouldPersistDiffSnapshot(result) {
+		return session, SessionPersistenceEffects{}, nil
+	}
+	updated, err := s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
+	if err != nil {
+		return models.Session{}, SessionPersistenceEffects{}, err
+	}
+	return session, SessionPersistenceEffects{orgID: orgID, sessionID: runID, workspaceRevision: updated, workspaceChanged: true}, nil
+}
+
+// UpdateStatusInTx applies the existing status-only projection using only tx.
+// It does not begin, settle, retry, publish or add lifecycle authority checks.
+// The caller owns whole-unit rollback and post-commit status publication.
+func (s *SessionStore) UpdateStatusInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, runID uuid.UUID, status models.SessionStatus) (models.Session, error) {
+	if nilLifecycleDependency(tx) {
+		return models.Session{}, fmt.Errorf("persist session status: transaction is required")
+	}
+	return s.updateStatusRow(ctx, tx, orgID, runID, status)
+}
+
 // UpdateResultAndCompleteActivityPhaseInTx persists the existing combined result
 // and activity-phase boundary using only the caller's concrete transaction.
 // It does not begin, settle, retry or publish the transaction. The caller must
@@ -41,21 +80,9 @@ func (s *SessionStore) UpdateResultAndCompleteActivityPhaseInTx(
 	if nilLifecycleDependency(tx) {
 		return models.SessionActivityPhase{}, models.Session{}, SessionPersistenceEffects{}, fmt.Errorf("persist session result and activity phase: transaction is required")
 	}
-	if result == nil {
-		result = &models.SessionResult{}
-	}
-	diffStats := computeDiffStatsForResult(result)
-	session, err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats)
+	session, effects, err := s.UpdateResultInTx(ctx, orgID, tx, runID, status, result)
 	if err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, SessionPersistenceEffects{}, err
-	}
-	effects := SessionPersistenceEffects{}
-	if shouldPersistDiffSnapshot(result) {
-		updated, err := s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
-		if err != nil {
-			return models.SessionActivityPhase{}, models.Session{}, SessionPersistenceEffects{}, err
-		}
-		effects = SessionPersistenceEffects{orgID: orgID, sessionID: runID, workspaceRevision: updated, workspaceChanged: true}
 	}
 	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
 	if err != nil {
@@ -81,7 +108,7 @@ func (s *SessionStore) UpdateStatusAndCompleteActivityPhaseInTx(
 	if nilLifecycleDependency(tx) {
 		return models.SessionActivityPhase{}, models.Session{}, fmt.Errorf("persist session status and activity phase: transaction is required")
 	}
-	session, err := s.updateStatusRow(ctx, tx, orgID, runID, status)
+	session, err := s.UpdateStatusInTx(ctx, orgID, tx, runID, status)
 	if err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}

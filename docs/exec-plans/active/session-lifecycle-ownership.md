@@ -911,6 +911,15 @@ the outer owner commits. Existing runtime lease, exact message/range, historical
 never-started batch and primary-tab rules are unchanged. They are not immutable
 allocation, shared admission/end epoch or new provider-launch authority.
 
+Standalone result and status projections now also expose explicit caller-owned
+transaction seams. Combined result/status plus phase persistence delegates to
+them. The plain status wrapper and result wrapper's no-head/no-snapshot direct
+path retain their original DBTX behavior; only the existing transactional result
+branch delegates. Returned session records keep the original UPDATE RETURNING
+shape, before later snapshot revisions or AFTER-trigger mirrors. Status, terminal
+stream expiry and workspace notifications retain their original order after
+confirmed commit. No new allocation, current-turn or epoch authority is implied.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1634,6 +1643,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Expose caller-owned seed/ack/activity persistence with one shared SQL
   sequence, preserving legacy wrapper behavior and proving exact outer settlement,
   late failure rollback, scope rejection and committed-seed replay protection.
+- [x] Share standalone result/status transaction persistence with existing
+  combined boundaries and the legacy transactional result path, preserving
+  direct-write fast paths, original returned records and notification order.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1994,6 +2006,26 @@ replayable; already committed/applied seeds remain rejected after their original
 phase completes. Returned batch timestamp representation retains the legacy
 input shape while its durable instant is checked independently. These are
 persistence proofs, not canonical admission/start fencing or floor acceptance.
+
+### 0a scalar result/status persistence validation
+
+Four new focused race/full-schema roots and 46 subtests passed locally on
+PostgreSQL 17.10, with no failures or skips. Reproduce using an owned PostgreSQL
+15+ server in `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+-run '^TestSessionScalarPersistence' -count=1 -parallel=1 -timeout=3m`. Retained
+combined result/phase and standalone turn/recheck regression selections also pass.
+Focused vet and whitespace checks pass.
+
+One occupied connection and guarded transaction settlement prove the explicit
+seams use only the outer transaction. Whole-row snapshots establish independent
+invisibility, exact commit/rollback and unchanged phase/publication groups.
+Foreign-tenant and deleted sessions stage no writes. A fixture-only late snapshot
+rejection verifies genuine earlier row/head writes before whole-owner rollback.
+Enabled Redis tests compare complete serialized original returned rows and exact
+status, terminal expiry, then workspace command order. Nil results, head-only and
+empty authoritative diffs retain legacy behavior; failed or uncertain commits
+produce no events. This remains persistence composition, not current allocation
+authority, canonical fencing, a deployed writer floor or production acceptance.
 
 ## Surprises & Discoveries
 
