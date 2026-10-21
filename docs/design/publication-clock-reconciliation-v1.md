@@ -1,11 +1,12 @@
 # Design: Result-free publication clock reconciliation v1
 
-> **Status:** Not Started | **Last reviewed:** 2026-10-21
+> **Status:** Partially Implemented | **Last reviewed:** 2026-10-21
 
-Draft for producer/consumer agreement. This change contains a contract and
-invented fixtures only. No reader, producer, extractor, provider query or real
-reconciliation is implemented. Inventory/materializer v1 stays unchanged.
-Contract agreement neither freezes a replay protocol nor authorizes execution.
+Producer/consumer agreement is complete. The offline 143 producer and synthetic
+semantic tests are implemented; the independent consumer and source extractor are
+not implemented here. No provider query or real reconciliation has run.
+Inventory/materializer v1 stays unchanged. Contract agreement neither freezes a
+replay protocol nor authorizes execution.
 
 ## Purpose and boundaries
 
@@ -22,7 +23,7 @@ before applying a separate effective-clock view. Unresolved/conflicting entries
 remain available for whole-PR/stack quarantine; no silent per-record drops.
 
 No database schema, migration, API route, HTTP, authentication/RBAC or policy change
-is proposed. The future producer is offline: explicit input files only, no network
+is proposed. The producer is offline: explicit input files only, no network
 fallback, live source expansion or result access. Artifact references are opaque
 fingerprints, never fetch URLs. Both holdout results stay sealed and unscored.
 
@@ -52,7 +53,7 @@ providers or arbitrary profiles need a separate agreed contract.
 
 ## Artifacts and grammar
 
-[`publication-reconciliation-v1.schema.json`](publication-reconciliation-v1.schema.json)
+[`publication-reconciliation-v1.schema.json`](future/publication-reconciliation-v1.schema.json)
 defines exact object keys, primitive types, enum vocabularies and bounds. Unknown
 fields are errors. Profile/ruleset/dataset selectors are grammatically strings;
 the fixed accepted values are enforced at authority stage 4 below. This separates
@@ -72,10 +73,10 @@ respectively `source_publication_metadata_witness`,
 `accept_publication_metadata_source`, and `publication_clock_reconciliation`.
 The original inventory has no dataset marker; its existing v1 schema is unchanged.
 
-Proposed invocation, **not implemented**:
+Implemented invocation (Python 3.11+ standard library only):
 
 ```text
-reconcile --mode historical --inventory INVENTORY --inventory-sha256 TRUSTED_SHA
+python3 -B scripts/code_review_export_reconciliation.py --mode historical --inventory INVENTORY --inventory-sha256 TRUSTED_SHA
           --witness WITNESS --source-acceptance ACCEPTANCE
           --source-acceptance-sha256 OPERATOR_ACCEPTED_SHA --output NEW_FILE
 ```
@@ -202,7 +203,7 @@ stage have the same code except stage 2, whose exact pin order is specified.
 
 | Stage | Checks, in order | Failure |
 | --- | --- | --- |
-| 1 | Bounded reads; UTF-8/JSON framing; depth; duplicate keys; exact key/type/grammar/enum sets; all numeric tokens lexical integers (no `1.0`, exponents, bool-as-int, NaN/Infinity); date/calendar/precision syntax; duplicate event/object/artifact IDs within their namespaces; per-file/array bounds; existing strict inventory-v1 validation. | `RECONCILIATION_INPUT_INVALID` |
+| 1 | Bounded reads; strict UTF-8/Unicode-scalar JSON framing (including keys/escaped text); depth; duplicate keys; exact key/type/grammar/enum sets; all numeric tokens lexical integers (no `1.0`, exponents, bool-as-int, NaN/Infinity); date/calendar/precision syntax; duplicate event/object/artifact IDs within their namespaces; per-file/array bounds; existing strict inventory-v1 validation. | `RECONCILIATION_INPUT_INVALID` |
 | 2a | Compare exact acceptance-file bytes against the trusted expected acceptance SHA. | `RECONCILIATION_SOURCE_UNACCEPTED` |
 | 2b | Compare exact original inventory bytes against the trusted expected inventory SHA. | `RECONCILIATION_INPUT_INVALID` |
 | 3 | Cross-file inventory/catalog/original-catalog pins; acceptance witness SHA; output witness/acceptance pins when verifying output; extractor revision/digest consistency; equal artifact sets/digests; dangling event/object artifact or binding references; artifact observation <= witness observation <= attestation; valid coverage intervals; contradictory known PR numbers within the original inventory for one repo UUID/review ID; combined/reference expansion bounds. | `RECONCILIATION_INPUT_INVALID` |
@@ -213,6 +214,12 @@ After stage-5 binding checks pass, compute the complete entries below and then
 perform any supplied-output comparison as the last check of stage 5. Entry
 reasons are evidence outcomes, not operation failures.
 
+All inputs to these new reconciliation readers, including the original inventory,
+must decode to Unicode scalar values. Escaped unpaired high or low surrogates in
+keys or values fail stage 1, before pins; valid surrogate pairs remain valid text.
+This reconciliation boundary does not alter the existing v1 inventory helper or
+materializer. Exact UTF-8 key hashing cannot accept a lone surrogate.
+
 Malformed hashes or malformed selectors fail stage 1. A well-formed stale trusted
 acceptance pin fails 2a, even if the inventory pin is also stale. A stale witness
 hash fails 3 before an unsupported profile at 4. Mutation fixtures refresh synthetic
@@ -221,7 +228,7 @@ source acceptance. An unavailable output path, existing output file or write/
 size failure returns `RECONCILIATION_INPUT_INVALID` with no partial publication.
 
 New metadata timestamps use the portable lexical subset of the existing
-[`timestamp`](../../../scripts/code_review_export_metadata.py) helper described
+[`timestamp`](../../scripts/code_review_export_metadata.py) helper described
 here. The reference runtime is **Python 3.11 or later**. Other implementations must
 enforce the same limits even if their native parser accepts more:
 `YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)`, uppercase T/Z, years **0001-9999**,
@@ -372,9 +379,9 @@ supplied, never reserialize an input to obtain a matching pin.
 
 ## Available source and agreement gate
 
-[Export models](../../../internal/models/code_review_export.go) retain source keys,
+[Export models](../../internal/models/code_review_export.go) retain source keys,
 provider review IDs and head/submitted-commit identity. Assessment/legacy rows and
-[`SubmitReviewResult`](../../../internal/services/codereview/github_submitter.go)
+[`SubmitReviewResult`](../../internal/services/codereview/github_submitter.go)
 do not retain a dedicated submission clock. The frozen `raw.publication_time`
 already uses retained-event resolution; `evidence.provider_submitted_at` aliases it.
 There is no alternate frozen clock to uncover by renaming fields.
@@ -391,9 +398,25 @@ to be available. If coverage is absent, preserve unknowns. Outcome-oriented muta
 human-review `observed_at` may be receipt time and is not a recovery source.
 
 Invented fixtures are in
-[`scripts/testdata/publication_reconciliation_v1`](../../../scripts/testdata/publication_reconciliation_v1).
+[`scripts/testdata/publication_reconciliation_v1`](../../scripts/testdata/publication_reconciliation_v1).
 They retain hand-declared expected outputs and concrete negative mutation recipes.
-Grammar/hash/coverage-reference checks are structural validation, **not** tests of
-an implemented reconciliation algorithm. Both readers must independently reproduce
-the expectations after agreement. Source acceptance, protocol freeze, real source
+The producer now reproduces their complete hand-declared semantic output and
+error precedence in synthetic tests. The independent consumer must still reproduce
+those expectations separately. Structural grammar/hash checks alone do not prove
+semantic agreement between two readers. Source acceptance, protocol freeze, real source
 acquisition, cohort admission and holdout access remain separate gates.
+
+
+## Producer delivery and remaining work
+
+The producer lives in [`code_review_export_reconciliation.py`](../../scripts/code_review_export_reconciliation.py).
+It validates all five stages, computes all observations, and optionally verifies
+an independently supplied sidecar through `--verify-output`. It publishes only a
+complete canonical sidecar, exclusively at a new path in an operator-owned private
+directory. See [CLI usage](../../scripts/code_review_export_reconciliation.md).
+The existing inventory, materializer and custody selection modules are unchanged.
+
+The independent consumer, reviewed source extractor, accepted historical coverage,
+real source acquisition/execution and any replay use remain outside this delivery.
+No current graph, protocol or custody decision consumes the new output. A matching
+synthetic fixture is neither historical source acceptance nor holdout permission.

@@ -32,7 +32,7 @@ custody partitioner's stricter pre-existing quarantine or admits a cohort.
 Use a fresh in-memory copy of the four baseline artifact objects for **each**
 case. These recipes prepare invented test inputs; they implement no reconciliation
 or error classifier. An independent reader must later execute the prepared inputs
-and compare the exact expected static code/stage. No real input is accepted here.
+and compare the exact expected static code/stage. No real input is accepted by these tests.
 
 1. Apply `mutations` in order. `artifact` selects the root name in `artifact_names`.
    Operations are JSON Patch `add`, `replace`, or `remove`, with RFC 6901 pointers
@@ -70,5 +70,8 @@ inventory validator, byte/hash pins, source/record/locator bindings, complete ca
 references, declared coverage shape/chronology, exact frozen strings and scenario
 expectation alignment can be checked without a reconciliation reader. Expected
 reasons/dispositions remain hand-declared until both independently implemented
-readers reproduce them after contract agreement. No real source dataset or edit
+readers reproduce them after contract agreement. The 143 producer now reproduces
+the frozen entries and static error stages in synthetic tests; the independent
+consumer remains outstanding. The expected fixture bytes remain hand-declared
+and unchanged. No real source dataset or edit
 adapter is claimed available, and no actual archive is used by these fixtures.
