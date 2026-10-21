@@ -145,11 +145,27 @@ func (s *TurnStore) FailThreadTurn(ctx context.Context, orgID, runID, lockToken,
 
 // EndAttempt runs fn in one transaction with a transaction-bound session
 // store, so the attempt's status write and its result marker commit
-// together.
+// together. The production constructor supplies a pool-backed original session
+// store; this is not an adapter for nesting TurnStore inside another transaction.
 func (s *TurnStore) EndAttempt(ctx context.Context, fn func(ctx context.Context, tx pgx.Tx, sessions agent.SessionStore) error) error {
-	return s.sessions.InTransaction(ctx, func(ctx context.Context, tx pgx.Tx, store *db.SessionStore) error {
-		return fn(ctx, tx, store)
-	})
+	var effects []turnAttemptPersistenceEffect
+	if err := s.sessions.InTransaction(ctx, func(ctx context.Context, tx pgx.Tx, store *db.SessionStore) error {
+		bound := newTurnAttemptSessions(tx, store)
+		if err := fn(ctx, tx, bound); err != nil {
+			return err
+		}
+		effects = bound.effects
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, effect := range effects {
+		if effect.status != nil {
+			s.sessions.PublishCommittedSessionStatus(ctx, effect.orgID, *effect.status)
+		}
+		s.sessions.PublishCommittedSessionPersistenceEffects(ctx, effect.orgID, effect.workspace)
+	}
+	return nil
 }
 
 func (s *TurnStore) WriteResult(ctx context.Context, tx pgx.Tx, orgID, jobID uuid.UUID, result *models.AutomationRunResult) (bool, error) {

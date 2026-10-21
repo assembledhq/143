@@ -5561,7 +5561,7 @@
     },
     {
       "id": "internal/services/agent/activity_phase_execution.go:activityPhaseExecution.persistTurnCompleteAndComplete",
-      "source_sha256": "c834ebbd215292cc216e5abf3a1954d1a86a335b15eb1982f4beb39b4c2e8976",
+      "source_sha256": "e49662883811de19a7ca28ef746b5ab7c7cb46fc850aa38a192916c5f6e53fc0",
       "operation": "complete session turn and activity phase",
       "owner": "activityPhaseExecution in internal/services/agent",
       "predicate": "Nil execution rejects; no service/phase falls back to generic UpdateTurnComplete. With phase, mutex prevents local concurrent delivery; optional atomic store writes status/result/phase together; fallback writes turn then phase separately.",
@@ -5575,7 +5575,8 @@
         "Boundary/call candidate: atomicStore.UpdateTurnCompleteAndCompleteActivityPhase",
         "Boundary/call candidate: sessions.UpdateTurnComplete",
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
-        "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete"
+        "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
+        "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete"
       ],
       "canonical_target": "ProjectTurnInTx; SettleLostAttemptInTx",
       "authority": "RuntimeAuthority: immutable allocation receipt plus CURRENT org/session/lane admission and end epochs, job/attempt lock token, runtime ID and unexpired lease; a reclaimed old lease is not current authority.",
@@ -5651,8 +5652,31 @@
       ]
     },
     {
+      "id": "internal/services/agent/automation_turn.go:Orchestrator.endAutomationAttempt",
+      "source_sha256": "d1b04f65558e4c9cdfd21af526f197d595347eda2ca52999138bd751d2e36446",
+      "operation": "automation end-attempt marker/callback/duration transaction adapter",
+      "owner": "Orchestrator domain callback adapter; production TurnStore.EndAttempt owns physical transaction and deferred effects",
+      "predicate": "Rejects absent state and preserves already-ended no-op. Builds the exact run/org/attempt/token/thread/turn/outcome/checkpoint/context marker. Within EndAttempt writes marker first, rejects a lost attempt, invokes existing session-write callback, then records nonnegative duration; marks local ended only after owner success.",
+      "lock": "Unchanged marker-first run/job locks precede parent/session persistence and duration-last. EndAttempt supplies the one concrete tx to marker and duration; reviewed callback uses the bound facade. Domain callback does not begin or settle a second transaction.",
+      "stale_result": "Marker rejection returns ErrAutomationAttemptLost; raw callback/duration/owner errors propagate and local ended stays false. Whole owner transaction rolls back staged marker/session/duration writes and discards effects, including uncertain commit. This domain adapter does not prove canonical current allocation/epochs.",
+      "migration": "0a actual owner wiring contract: preserves marker/lock ordering and business end policy while consuming deferred status/workspace effects from the verified pool-backed owner. No blanket authority promotion, new retry or durable-delivery mechanism.",
+      "prerequisite_0a": "Future ProjectTurnInTx needs typed AutomationAuthority with exact immutable allocation, current admission/end epochs and domain attempt/receipt under chosen compatible locks/floor. Preserve lost-attempt rejection, marker-first/duration-last order and original post-confirmed-commit effects.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future AutomationAuthority: exact automation generation/run/attempt and domain receipt plus immutable current allocation and current org/session/lane admission/end epochs. Callback status, resource identity, transaction ownership and opaque effects alone establish none of these.",
+      "fence_outcome": "This 0a publication/persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must skip current status/result/diff/checkpoint/phase/ack/owner changes and publication. Immutable allocation/current epochs and compatible lock/floor proof remain future.",
+      "evidence": [
+        "internal/services/agent/automation_turn.go:697",
+        "Discovered: boundary-caller",
+        "Boundary/call candidate: o.automationTurns.EndAttempt",
+        "internal/services/automations/turn_attempt_persistence_test.go",
+        "internal/services/automations/turn_attempt_persistence_postgres_test.go",
+        "internal/services/automations/turn_attempt_callers_test.go (bounded actual callback/source-wiring proof)"
+      ]
+    },
+    {
       "id": "internal/services/agent/automation_turn.go:Orchestrator.endCancelledAutomationTurn",
-      "source_sha256": "d98fde6e290bfcdfc03ee372c9337bd1a3198993f28fb908369524b289bd9f46",
+      "source_sha256": "d187f6391d44f7e8babc4b8973d784b4ac96b702962d82f734dc95d98ce6974b",
       "operation": "settle cancelled automation checkpoint/session/thread/phase",
       "owner": "Orchestrator in internal/services/agent",
       "predicate": "Optional provenance checkpoint first; installedKey only if checkpointPublished. endAutomationAttempt callback uses generic session UpdateTurnComplete; primary thread completion uses automation attempt fence; detached phase terminalization afterward.",
@@ -5665,10 +5689,12 @@
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: o.completeAutomationThreadTurn -> internal/services/agent/automation_turn.go:Orchestrator.completeAutomationThreadTurn",
         "Boundary/call candidate: o.completeAutomationThreadTurn -> internal/worker/handlers.go:completeAutomationThreadTurn",
+        "Boundary/call candidate: o.endAutomationAttempt -> internal/services/agent/automation_turn.go:Orchestrator.endAutomationAttempt",
         "Boundary/call candidate: o.publishAutomationCheckpoint -> internal/services/agent/automation_turn.go:Orchestrator.publishAutomationCheckpoint",
         "Boundary/call candidate: sessions.UpdateTurnComplete",
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
-        "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete"
+        "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
+        "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete"
       ],
       "canonical_target": "ProjectTurnInTx; SettleLostAttemptInTx; PublishCheckpointInTx",
       "authority": "AutomationAuthority: exact target/generation/run/attempt receipt and current job token, composed with shared session/lane epochs.",
@@ -5775,19 +5801,25 @@
     },
     {
       "id": "internal/services/agent/automation_turn.go:Orchestrator.releaseInheritedContainer",
-      "source_sha256": "56e8f4f42157e09fd4923b82b05355d4e8ce89c31b653170c9fd4927438d60dd",
-      "operation": "Orchestrator.releaseInheritedContainer: indirect lifecycle caller",
-      "owner": "Orchestrator in internal/services/agent",
-      "predicate": "Syntactic boundary/callee candidates: sessions.ClearContainerID -> internal/db/session_store.go:SessionStore.ClearContainerID; sessions.ClearContainerID(ctx, session.OrgID, session.ID, recorded) -> internal/db/session_store.go:SessionStore.ClearContainerID; no independent authorization proof inferred.",
-      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: sessions.ClearContainerID -> internal/db/session_store.go:SessionStore.ClearContainerID; sessions.ClearContainerID(ctx, session.OrgID, session.ID, recorded) -> internal/db/session_store.go:SessionStore.ClearContainerID",
-      "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
+      "source_sha256": "1494d319cbeb1790c16725556faa0bad1653ddf4bd45b09842234bbecdb19fef",
+      "operation": "automation inherited-container release under exact attempt and holder CAS",
+      "owner": "Orchestrator existing container-release domain adapter; pool-backed EndAttempt owns the row-clear transaction",
+      "predicate": "No recorded container returns immediately. A different recorded node is accepted only with the exact dead-target-node context. Inside EndAttempt, LockAttempt must retain the run/job attempt before ClearContainerID's org/session/expected-container CAS and preview/live-holder exclusions; no snapshot/sandbox-state mutation is added.",
+      "lock": "Existing EndAttempt transaction locks run/job first, then performs the row-only session container/node/turn-hold clear on that same bound store. Commit precedes local container/node clearing and optional physical Destroy; a known dead-node container is not destroyed locally. The fresh bound store has no publisher and collects no status/workspace effects for this callback.",
+      "stale_result": "Missing attempt or failed container CAS returns the existing error and leaves local state and provider untouched. On owner error or uncertain commit there is no local clear or destroy. After owner success, local state clears; a later Destroy error remains a warning and leaves cleanup to the reaper. No current allocation/epoch proof or atomic provider destruction is claimed.",
       "classification": "unfenced-needs-conversion",
-      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "migration": "0a direct-owner callback contract, not a newly promoted resource writer: preserves exact attempt lock, tenant/container/holder CAS, commit-before-destroy and dead-node behavior. The source-pinned inherited ClearContainerID method remains row-only; canonical whole-workspace authority is still future.",
       "evidence": [
         "internal/services/agent/automation_turn.go:798",
-        "Discovered: indirect-caller",
-        "Boundary/call candidate: sessions.ClearContainerID -> internal/db/session_store.go:SessionStore.ClearContainerID"
-      ]
+        "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: o.automationTurns.EndAttempt",
+        "Boundary/call candidate: sessions.ClearContainerID -> internal/db/session_store.go:SessionStore.ClearContainerID",
+        "internal/services/automations/turn_attempt_callers_test.go (actual row-only callback source pin)"
+      ],
+      "canonical_target": "MutateWorkspaceRevisionInTx",
+      "authority": "Future typed WorkspaceAuthority with exact current AutomationAuthority/domain attempt receipt, immutable allocation and admission/workspace epochs plus current container identity/holder exclusions. The existing LockAttempt and resource CAS are retained domain checks, not a resource-only canonical bypass.",
+      "fence_outcome": "Strict future authority/epoch/container mismatch must reject the complete workspace mutation with no successor hold/container clear or physical destruction; no stale terminal-settlement exception authorizes workspace release.",
+      "prerequisite_0a": "Compose the existing container/holder CAS with exact typed workspace/automation authority under chosen compatible parent/domain locks and floor. Preserve whole-owner rollback and commit-before-destroy; physical cleanup is not made transactional by buffering notifications."
     },
     {
       "id": "internal/services/agent/continuation_input.go:Orchestrator.recordContinuationAttempt",
@@ -5911,7 +5943,7 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.ContinueSession",
-      "source_sha256": "046e7b48b35900586f5bb93ba275f92530754185dbecd8e50c89275772a441e8",
+      "source_sha256": "8bb480d78410aadab5196963c8bb6bba3b4356f3e8868f8cf7472fd3a8578c44",
       "operation": "ordinary/specialist continuation runtime projections and retry fallbacks",
       "owner": "Orchestrator in internal/services/agent",
       "predicate": "Selected continuation/input has several preflight checks; network/auth/wrong-node/reuse/start failures write generic idle/pending/fallbackStatus; fallback depends captured session state, not durable epoch. Direct UpdateSandboxState calls use only org/session: startup advertises running, and failure paths may restore a captured sandbox state without current key/container/epoch CAS.",
@@ -5924,7 +5956,7 @@
       "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority. Availability/start/recovery mutation is strict and independently fenced. Preallocation projection has strict admission authority; F2 is only exact allocated own terminal receipt and skips stale availability.",
       "prerequisite_0a": "0a: exact dispatch/request/input and epoch validation before effects, seed/start/handoff checks, and canonical stale-aware fallback for every branch; preserve typed domain authority, no current-generation adoption. Explicitly fence each UpdateSandboxState under current availability/reference/workspace epochs; preserve original A unavailable descriptor instead of borrowing B, and skip stale startup/failure availability compensation.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:4354",
+        "internal/services/agent/orchestrator.go:4367",
         "Discovered: boundary-caller, boundary-definition, dispatch-reference, indirect-caller",
         "Boundary/call candidate: job type continue_session",
         "Boundary/call candidate: keepSessionRunningIfSiblingRuntimesActive -> internal/services/agent/thread_runtime_delivery.go:keepSessionRunningIfSiblingRuntimesActive",
@@ -5940,6 +5972,7 @@
         "Boundary/call candidate: o.codeReviewInputsPreparationFinished -> internal/services/agent/review_inputs.go:Orchestrator.codeReviewInputsPreparationFinished",
         "Boundary/call candidate: o.diagnoseAcquireHoldRaceLoss -> internal/services/agent/orchestrator.go:Orchestrator.diagnoseAcquireHoldRaceLoss",
         "Boundary/call candidate: o.drainQueuedMessages -> internal/services/agent/orchestrator.go:Orchestrator.drainQueuedMessages",
+        "Boundary/call candidate: o.endAutomationAttempt -> internal/services/agent/automation_turn.go:Orchestrator.endAutomationAttempt",
         "Boundary/call candidate: o.endClosedTargetTurn -> internal/services/agent/automation_turn.go:Orchestrator.endClosedTargetTurn",
         "Boundary/call candidate: o.ensureClaudeCodeAuth -> internal/services/agent/orchestrator.go:Orchestrator.ensureClaudeCodeAuth",
         "Boundary/call candidate: o.ensureCodexAuth -> internal/services/agent/orchestrator.go:Orchestrator.ensureCodexAuth",
@@ -5975,12 +6008,14 @@
         "Boundary/call candidate: o.sessions.UpdateTurnComplete",
         "Boundary/call candidate: o.sessions.UpdateTurnComplete -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
         "Boundary/call candidate: o.sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
+        "Boundary/call candidate: o.sessions.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete",
         "Boundary/call candidate: o.setupFreshSandboxForThread -> internal/services/agent/orchestrator.go:Orchestrator.setupFreshSandboxForThread",
         "Boundary/call candidate: o.startThreadRuntimeControl -> internal/services/agent/thread_runtime_delivery.go:Orchestrator.startThreadRuntimeControl",
         "Boundary/call candidate: o.stopWorkspaceWaitIfThreadCancelled -> internal/services/agent/orchestrator.go:Orchestrator.stopWorkspaceWaitIfThreadCancelled",
         "Boundary/call candidate: sessions.UpdateTurnComplete",
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
+        "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete",
         "Boundary/call candidate: threadRuntimeCtl.Close -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.Close",
         "Boundary/call candidate: threadRuntimeCtl.admitSeedWithoutPhase -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.admitSeedWithoutPhase"
       ]
@@ -6060,7 +6095,7 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.RunAgent",
-      "source_sha256": "25b051dc6ddba9e81071f9a4399b205ee72f4b0a2b3739af3d307df921d37314",
+      "source_sha256": "226269a07cc8fa4a2158842dfa8c353a3745348049ad419bd43e5fc452350f5e",
       "operation": "initial runtime running/success/failure projections",
       "owner": "Orchestrator in internal/services/agent",
       "predicate": "beginRuntimeControl writes running; primary thread generic running; sandbox-hold loser diagnoses preview/stale container then generic pending. Completion may generic thread result. Direct UpdateSandboxState calls use only org/session: startup advertises running, and failure paths may restore a captured sandbox state without current key/container/epoch CAS.",
@@ -6073,7 +6108,7 @@
       "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority. Availability/start/recovery mutation is strict and independently fenced. Preallocation projection has strict admission authority; F2 is only exact allocated own terminal receipt and skips stale availability.",
       "prerequisite_0a": "0a: authorize accepted initial dispatch before eval/Slack/prewarm/provider effects and at runtime allocation; all primary/sandbox-race projections use exact allocation/epoch; reject stale start, preserve losing-attempt own receipt only. Explicitly fence each UpdateSandboxState under current availability/reference/workspace epochs; preserve original A unavailable descriptor instead of borrowing B, and skip stale startup/failure availability compensation.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:3111",
+        "internal/services/agent/orchestrator.go:3120",
         "Discovered: boundary-caller, boundary-definition, indirect-caller",
         "Boundary/call candidate: keepSessionRunningIfSiblingRuntimesActive -> internal/services/agent/thread_runtime_delivery.go:keepSessionRunningIfSiblingRuntimesActive",
         "Boundary/call candidate: newSeedActivityPhaseExecution -> internal/services/agent/activity_phase_execution.go:newSeedActivityPhaseExecution",
@@ -6086,6 +6121,7 @@
         "Boundary/call candidate: o.completeAutomationThreadTurn -> internal/worker/handlers.go:completeAutomationThreadTurn",
         "Boundary/call candidate: o.diagnoseAcquireHoldRaceLoss -> internal/services/agent/orchestrator.go:Orchestrator.diagnoseAcquireHoldRaceLoss",
         "Boundary/call candidate: o.drainQueuedMessagesAfterProcessedID -> internal/services/agent/orchestrator.go:Orchestrator.drainQueuedMessagesAfterProcessedID",
+        "Boundary/call candidate: o.endAutomationAttempt -> internal/services/agent/automation_turn.go:Orchestrator.endAutomationAttempt",
         "Boundary/call candidate: o.endClosedTargetTurn -> internal/services/agent/automation_turn.go:Orchestrator.endClosedTargetTurn",
         "Boundary/call candidate: o.ensureClaudeCodeAuth -> internal/services/agent/orchestrator.go:Orchestrator.ensureClaudeCodeAuth",
         "Boundary/call candidate: o.ensureCodexAuth -> internal/services/agent/orchestrator.go:Orchestrator.ensureCodexAuth",
@@ -6121,11 +6157,13 @@
         "Boundary/call candidate: o.sessions.UpdateTurnComplete",
         "Boundary/call candidate: o.sessions.UpdateTurnComplete -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
         "Boundary/call candidate: o.sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
+        "Boundary/call candidate: o.sessions.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete",
         "Boundary/call candidate: o.startThreadRuntimeControl -> internal/services/agent/thread_runtime_delivery.go:Orchestrator.startThreadRuntimeControl",
         "Boundary/call candidate: o.unappliedThreadMessages -> internal/services/agent/continuation_input.go:Orchestrator.unappliedThreadMessages",
         "Boundary/call candidate: sessions.UpdateTurnComplete",
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
+        "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete",
         "Boundary/call candidate: threadRuntimeCtl.Close -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.Close",
         "Boundary/call candidate: threadRuntimeCtl.admitSeedWithoutPhase -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.admitSeedWithoutPhase"
       ]
@@ -6503,7 +6541,7 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.failRunWithResultAndPhaseTerminal",
-      "source_sha256": "575ba907c2e0088f52f1267aea83916f5580afaa1d66323ef54ec7b5b14a780d",
+      "source_sha256": "c182b8cbc4f5e62ea3ed9b5be238d67b647b46598f29d480ff8ef0b620393cfd",
       "operation": "runtime failure session/thread/result/phase projection",
       "owner": "Orchestrator in internal/services/agent",
       "predicate": "Updates primary terminal before session SSE; automation attempt uses endAutomationAttempt, ordinary uses activity-phase atomic interface if available or generic UpdateResult fallback.",
@@ -6516,9 +6554,10 @@
       "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority.",
       "prerequisite_0a": "0a: canonical no-effect result+phase transaction and conditional sibling projection; remove nil/unsupported production fallback. Only disposition-permitted notifications after commit.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:7649",
+        "internal/services/agent/orchestrator.go:7739",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: activityExecution.persistSessionResultAndComplete -> internal/services/agent/activity_phase_execution.go:activityPhaseExecution.persistSessionResultAndComplete",
+        "Boundary/call candidate: o.endAutomationAttempt -> internal/services/agent/automation_turn.go:Orchestrator.endAutomationAttempt",
         "Boundary/call candidate: o.sessions.UpdateResult",
         "Boundary/call candidate: o.updatePrimaryThreadTerminal -> internal/services/agent/orchestrator.go:Orchestrator.updatePrimaryThreadTerminal",
         "Boundary/call candidate: sessions.UpdateResult"
@@ -6563,7 +6602,7 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.handleCancelledSession",
-      "source_sha256": "db111dfc2f20c060ea8fb19225f203f3113d81a7738887a9d2f1c47fad736763",
+      "source_sha256": "f68ceda7f5d80f5983e2b975034436da28d48cd0a4fecc6201cbd2784780d05e",
       "operation": "cancelled runtime checkpoint and idle/cancelled projection",
       "owner": "Orchestrator in internal/services/agent",
       "predicate": "Job token obtained; snapshot then fenced PublishCheckpoint; ordinary turn-complete/activity fallback may generic cancelled, primary mirrored. Automation has endCancelledAutomationTurn.",
@@ -6576,7 +6615,7 @@
       "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority.",
       "prerequisite_0a": "0a: exact runtime/allocation/epoch at checkpoint and terminal transaction; retain automation authority and detached cleanup. Historical stale attempt cannot change shared checkpoint/turn/status.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:8985",
+        "internal/services/agent/orchestrator.go:9075",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: activityExecution.persistSessionStatusAndComplete -> internal/services/agent/activity_phase_execution.go:activityPhaseExecution.persistSessionStatusAndComplete",
         "Boundary/call candidate: o.endCancelledAutomationTurn -> internal/services/agent/automation_turn.go:Orchestrator.endCancelledAutomationTurn",
@@ -6588,12 +6627,13 @@
         "Boundary/call candidate: o.sessions.UpdateTurnComplete",
         "Boundary/call candidate: o.sessions.UpdateTurnComplete -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
         "Boundary/call candidate: o.sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
+        "Boundary/call candidate: o.sessions.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete",
         "Boundary/call candidate: o.updatePrimaryThreadTerminal -> internal/services/agent/orchestrator.go:Orchestrator.updatePrimaryThreadTerminal"
       ]
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.handleHumanInputPause",
-      "source_sha256": "76f5c6fdf39e980a5be97a55e08d46fd7d5154f30affd2c9e26051facf353404",
+      "source_sha256": "2a0c3de64150d388a85374df3671461eb0f23e304cf0262bc3642de81ad0f078",
       "operation": "post-checkpoint provider pause projection",
       "owner": "Orchestrator in internal/services/agent",
       "predicate": "Snapshot success/nonempty key and successful PublishCheckpoint are required; then UpdateSnapshotInfo and generic awaiting_input parent/thread; automation wraps endAutomationAttempt.",
@@ -6606,8 +6646,9 @@
       "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority.",
       "prerequisite_0a": "0a: atomically bind request-specific checkpoint proof and conditional pause, separate early capability request from ready state; stale proof/pause aborts activation, no answer/grant.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:9152",
+        "internal/services/agent/orchestrator.go:9242",
         "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: o.endAutomationAttempt -> internal/services/agent/automation_turn.go:Orchestrator.endAutomationAttempt",
         "Boundary/call candidate: o.failHumanInputPause -> internal/services/agent/orchestrator.go:Orchestrator.failHumanInputPause",
         "Boundary/call candidate: o.publishAutomationCheckpoint -> internal/services/agent/automation_turn.go:Orchestrator.publishAutomationCheckpoint",
         "Boundary/call candidate: o.sessionThreads.UpdateStatus",
@@ -7400,6 +7441,107 @@
       "prerequisite_0a": "0a: insert shared parent/end epoch/retained owner and workspace reservation checks in SAME target/run transaction, preserving all head/config/lifecycle decisions and exact automation_turn:run key/receipt; no generic bypass or existing-job new-input rebinding."
     },
     {
+      "id": "internal/services/automations/turn_attempt_persistence.go:newTurnAttemptSessions",
+      "source_sha256": "022036169135469b06ec4fa69ce6058f500f2ddde3f498d0861bd7a65d7e3677",
+      "operation": "construct owner-local bound-session facade without mutating original publisher",
+      "owner": "private automation attempt facade constructor; caller supplies fresh WithTx copy and concrete transaction",
+      "predicate": "Receives the fresh transaction-bound SessionStore produced by InTransaction, disables streams only on that copy, and stores the supplied concrete tx. Original pool-backed SessionStore/publisher is untouched. Constructor validates no allocation, epoch, receipt or lifecycle authority.",
+      "lock": "No SQL, Begin/savepoint, settlement, retry or publication. Three overrides consume explicit InTx persistence; inherited row-only snapshot/container behavior remains on the bound copy. Actual callback source-shape guard requires classification for newly added publishing methods.",
+      "stale_result": "Constructor itself establishes neither physical ownership nor commit/authority proof. Reviewed owner discards all facade effects on callback/marker/duration/unknown commit failure; arbitrary tx-bound original owners are outside the supported production commit claim.",
+      "migration": "0a local facade wiring only. Fresh-copy ownership and bounded actual callback method set prevent premature notifications without adding a generic transaction/effect framework.",
+      "prerequisite_0a": "Future shared projection requires typed AutomationAuthority with immutable exact allocation/current epochs/domain receipt and chosen compatible locks/floor. Keep original publisher separate from the transaction-bound copy and retain explicit whole-owner rollback/after-confirmed-commit effects.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future AutomationAuthority: exact automation generation/run/attempt and domain receipt plus immutable current allocation and current org/session/lane admission/end epochs. Callback status, resource identity, transaction ownership and opaque effects alone establish none of these.",
+      "fence_outcome": "This 0a publication/persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must skip current status/result/diff/checkpoint/phase/ack/owner changes and publication. Immutable allocation/current epochs and compatible lock/floor proof remain future.",
+      "evidence": [
+        "internal/services/automations/turn_attempt_persistence.go:35",
+        "Discovered: boundary-definition",
+        "Lock/transaction syntax: caller-supplied pgx.Tx",
+        "internal/services/automations/turn_attempt_persistence_test.go",
+        "internal/services/automations/turn_attempt_persistence_postgres_test.go",
+        "internal/services/automations/turn_attempt_callers_test.go (bounded actual callback/source-wiring proof)"
+      ]
+    },
+    {
+      "id": "internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateResult",
+      "source_sha256": "648f4df5112b1f46449b8d9d09126c3f02ae1b0e4ee217234eda0a9e44b257bf",
+      "operation": "owner-local automation attempt result persistence and ordered status/workspace effect capture",
+      "owner": "private turnAttemptSessions facade; production pool-backed TurnStore.EndAttempt owns physical transaction and publication",
+      "predicate": "Calls existing SessionStore.UpdateResultInTx with exact supplied concrete tx and preserves nil-result normalization, original returned status row and optional head/snapshot persistence. Records original status plus opaque workspace effects only on success; failed-result callback keeps existing business policy.",
+      "lock": "Existing owner locks/marker/session/duration ordering is retained. Explicit result/head/snapshot seam cannot Begin/savepoint, settle, retry, publish or fall back to pool. Only the fresh bound copy loses streams; original usable publisher is retained.",
+      "stale_result": "Raw result/head/snapshot error propagates with no accepted effects. Earlier writes require whole-owner rollback. Any callback/marker/duration/commit error, including uncertainty, discards all effects; only confirmed production owner commit permits per-call original status -> terminal expiry -> workspace publication.",
+      "migration": "0a actual failed-result callback composition fixes precommit status wakes without changing automation domain association or lifecycle authority. Latent diff effects are captured for completeness; this does not claim a successful automation workspace wake is reachable.",
+      "prerequisite_0a": "Future ProjectTurnInTx requires typed AutomationAuthority with immutable exact allocation, current admission/end epochs, domain attempt/receipt and chosen compatible locks/floor. Retain original returned-row shape, whole-owner rollback and ordered explicit effects, not durable delivery/retry.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future AutomationAuthority: exact automation generation/run/attempt and domain receipt plus immutable current allocation and current org/session/lane admission/end epochs. Callback status, resource identity, transaction ownership and opaque effects alone establish none of these.",
+      "fence_outcome": "This 0a publication/persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must skip current status/result/diff/checkpoint/phase/ack/owner changes and publication. Immutable allocation/current epochs and compatible lock/floor proof remain future.",
+      "evidence": [
+        "internal/services/automations/turn_attempt_persistence.go:51",
+        "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: s.SessionStore.UpdateResultInTx",
+        "Boundary/call candidate: s.SessionStore.UpdateResultInTx -> internal/db/session_result_persistence.go:SessionStore.UpdateResultInTx",
+        "Boundary/call candidate: s.SessionStore.UpdateResultInTx -> internal/db/session_thread_persistence.go:SessionThreadStore.UpdateResultInTx",
+        "internal/services/automations/turn_attempt_persistence_test.go",
+        "internal/services/automations/turn_attempt_persistence_postgres_test.go",
+        "internal/services/automations/turn_attempt_callers_test.go (bounded actual callback/source-wiring proof)",
+        "Actual embedded receiver is *db.SessionStore; extra thread targets are conservative method-name links, not real dispatch proof."
+      ]
+    },
+    {
+      "id": "internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateStatus",
+      "source_sha256": "db0f204807b41af68bc80f742267e0237fbf1f4821e083f226ca06e790497e30",
+      "operation": "owner-local automation attempt status persistence and deferred notification capture",
+      "owner": "private turnAttemptSessions facade; production pool-backed TurnStore.EndAttempt owns physical transaction and publication",
+      "predicate": "Uses the exact supplied concrete pgx.Tx through SessionStore.UpdateStatusInTx; preserves org/session/nondeleted row and original returned session. Records that exact status only after successful persistence. No current allocation/epoch or automation receipt validation is added here.",
+      "lock": "No Begin/savepoint, Commit/Rollback, retry, publisher or pool fallback. The facade receives the fresh transaction-bound store copy with streams disabled; original pool-backed publisher remains usable. Existing marker-before-parent/duration-last owner ordering remains unchanged.",
+      "stale_result": "Raw persistence error propagates and captures no effect. Captured status is owner-local data, not a commit receipt or authority; callback/marker/duration/commit failure, including uncertainty, discards the whole collection. Successful production owner publishes original status then terminal expiry only after physical commit.",
+      "migration": "0a actual automation callback composition: awaiting-input pause status no longer wakes readers before the retained owner commit. Existing end policy and domain locks remain; arbitrary transaction-bound EndAttempt configurations are not attested as physical owners.",
+      "prerequisite_0a": "Before canonical projection compose exact AutomationAuthority, immutable allocation/current admission/end epochs, domain attempt/receipt and chosen compatible locks/floor. Keep whole-owner rollback and post-confirmed-commit status/expiry/workspace order; no retry/outbox guarantee.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future AutomationAuthority: exact automation generation/run/attempt and domain receipt plus immutable current allocation and current org/session/lane admission/end epochs. Callback status, resource identity, transaction ownership and opaque effects alone establish none of these.",
+      "fence_outcome": "This 0a publication/persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must skip current status/result/diff/checkpoint/phase/ack/owner changes and publication. Immutable allocation/current epochs and compatible lock/floor proof remain future.",
+      "evidence": [
+        "internal/services/automations/turn_attempt_persistence.go:42",
+        "Discovered: boundary-caller, indirect-caller",
+        "Boundary/call candidate: s.SessionStore.UpdateStatusInTx",
+        "Boundary/call candidate: s.SessionStore.UpdateStatusInTx -> internal/db/session_result_persistence.go:SessionStore.UpdateStatusInTx",
+        "Boundary/call candidate: s.SessionStore.UpdateStatusInTx -> internal/db/session_thread_persistence.go:SessionThreadStore.UpdateStatusInTx",
+        "internal/services/automations/turn_attempt_persistence_test.go",
+        "internal/services/automations/turn_attempt_persistence_postgres_test.go",
+        "internal/services/automations/turn_attempt_callers_test.go (bounded actual callback/source-wiring proof)",
+        "Actual embedded receiver is *db.SessionStore; extra thread targets are conservative method-name links, not real dispatch proof."
+      ]
+    },
+    {
+      "id": "internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete",
+      "source_sha256": "ccf9d4cca7472229a7246cd12dba025d697c6fb67eeef8174cf178a0655b6b68",
+      "operation": "owner-local automation turn persistence and opaque workspace effect capture",
+      "owner": "private turnAttemptSessions facade; actual pool-backed EndAttempt owns transaction, no new lifecycle authority",
+      "predicate": "Delegates exact concrete tx to SessionStore.UpdateTurnCompleteInTx, preserving nil normalization, turn/result/agent-session/snapshot and head/authoritative empty/full-diff sequence. Captures opaque workspace effects only; no new status event. Actual successful callbacks clear diff/base/head, so their existing diff-free success emits no new event; cancellation nil result is preserved.",
+      "lock": "No nested Begin/savepoint, settlement, retry, publication or pool fallback. Original marker-before-parent/duration-last owner protocol persists; inherited row-only snapshot/container methods stay bound to the same transaction with streams disabled only on the fresh copy.",
+      "stale_result": "Any persistence failure captures no effects and requires complete owner rollback. Any later callback/marker/duration/commit error, including uncertainty, discards every collected effect. Latent full/empty/head diff callback effects may publish only after confirmed production physical commit; opaque data proves neither commit nor authority.",
+      "migration": "0a owner-local composition eliminates latent premature workspace effects without claiming a reachable successful diff-free wake. Actual callback method set is source-pinned: newly added publishing calls need explicit classification; arbitrary tx-bound EndAttempt configurations remain outside this physical-commit claim.",
+      "prerequisite_0a": "Compose future AutomationAuthority and immutable allocation/current epochs/domain receipt in ProjectTurnInTx under chosen compatible locks/floor. Preserve original turn/result semantics and zero new successful diff-free event; no retry/outbox/commit-attestation expansion.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future AutomationAuthority: exact automation generation/run/attempt and domain receipt plus immutable current allocation and current org/session/lane admission/end epochs. Callback status, resource identity, transaction ownership and opaque effects alone establish none of these.",
+      "fence_outcome": "This 0a publication/persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must skip current status/result/diff/checkpoint/phase/ack/owner changes and publication. Immutable allocation/current epochs and compatible lock/floor proof remain future.",
+      "evidence": [
+        "internal/services/automations/turn_attempt_persistence.go:60",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
+        "Boundary/call candidate: s.SessionStore.UpdateTurnCompleteInTx",
+        "Boundary/call candidate: s.SessionStore.UpdateTurnCompleteInTx -> internal/db/session_result_persistence.go:SessionStore.UpdateTurnCompleteInTx",
+        "Boundary/call candidate: s.SessionStore.UpdateTurnCompleteInTx -> internal/db/session_thread_persistence.go:SessionThreadStore.UpdateTurnCompleteInTx",
+        "internal/services/automations/turn_attempt_persistence_test.go",
+        "internal/services/automations/turn_attempt_persistence_postgres_test.go",
+        "internal/services/automations/turn_attempt_callers_test.go (bounded actual callback/source-wiring proof)",
+        "Actual embedded receiver is *db.SessionStore; extra thread targets are conservative method-name links, not real dispatch proof."
+      ]
+    },
+    {
       "id": "internal/services/automations/turn_completer.go:TurnCompleter.Complete",
       "source_sha256": "cb2ffba520e40fca4ae3c62b7212a24f52abca077d5ad0b6d41ac76ebbf49249",
       "operation": "TurnCompleter.Complete: indirect lifecycle caller",
@@ -7541,6 +7683,32 @@
         "Boundary/call candidate: s.runs.CompleteThreadTurnForAttempt -> internal/db/automation_turns.go:AutomationRunStore.CompleteThreadTurnForAttempt",
         "Lock/transaction syntax: s.pool.Begin",
         "Lock/transaction syntax: tx.Commit"
+      ]
+    },
+    {
+      "id": "internal/services/automations/turn_store.go:TurnStore.EndAttempt",
+      "source_sha256": "f0fe549ab275ae0883c1eed09d6878f9dd9a9b61945db02e88230e19894bd639",
+      "operation": "pool-backed automation attempt transaction owner with ordered postcommit session effects",
+      "owner": "TurnStore.EndAttempt in internal/services/automations; actual production constructor retains pool-backed original SessionStore",
+      "predicate": "Preserves current callback/end policy and marker-before-parent/duration-last domain protocol. Fresh WithTx copy is wrapped by the private three-method facade; only that copy has streams disabled. Original publisher survives. Actual failure/pause status effects and latent diff effects are collected in call order; successful automation callbacks remain diff-free with no new turn event.",
+      "lock": "Existing SessionStore.InTransaction owns physical Begin/Commit for the verified pool-backed production construction. Concrete supplied tx flows through reviewed status/result/turn InTx persistence plus existing row-only snapshot/container methods. No nested savepoint, new domain lock ordering or independent pool write is introduced inside reviewed callbacks.",
+      "stale_result": "Any callback/marker/duration/commit error, including uncertain commit, propagates unchanged and discards all collected effects without retry or publication. Confirmed physical commit permits per-call exact original returned status -> terminal expiry -> opaque workspace effects. This does not attest arbitrary transaction-bound TurnStore construction, durable delivery or a canonical authority fence.",
+      "migration": "0a actual owner-local publication repair only: prevents failed-result and awaiting-input status wakes before durable commit. Source-pinned callback method set requires review for newly added publishing calls; domain association, business end policy, diff-free success and row-only inherited methods remain unchanged.",
+      "prerequisite_0a": "Canonical ProjectTurnInTx still needs typed AutomationAuthority, exact immutable allocation/current admission/end epochs, domain attempt/receipt and chosen compatible locks/floor. Preserve physical-owner boundary, whole-unit rollback and confirmed-commit-only effects without retry/outbox promises.",
+      "classification": "unfenced-needs-conversion",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "Future AutomationAuthority: exact automation generation/run/attempt and domain receipt plus immutable current allocation and current org/session/lane admission/end epochs. Callback status, resource identity, transaction ownership and opaque effects alone establish none of these.",
+      "fence_outcome": "This 0a publication/persistence composition adds no canonical stale-authority fence. AuthorizationRejected must abort future shared projection; stale own-attempt handling must skip current status/result/diff/checkpoint/phase/ack/owner changes and publication. Immutable allocation/current epochs and compatible lock/floor proof remain future.",
+      "evidence": [
+        "internal/services/automations/turn_store.go:150",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller",
+        "Boundary/call candidate: newTurnAttemptSessions",
+        "Boundary/call candidate: newTurnAttemptSessions -> internal/services/automations/turn_attempt_persistence.go:newTurnAttemptSessions",
+        "Lock/transaction syntax: s.sessions.InTransaction",
+        "internal/services/automations/turn_attempt_persistence_test.go",
+        "internal/services/automations/turn_attempt_persistence_postgres_test.go",
+        "internal/services/automations/turn_attempt_callers_test.go (bounded actual callback/source-wiring proof)",
+        "cmd/server/main.go:1958 (actual pool-backed production constructor)"
       ]
     },
     {
@@ -11460,7 +11628,7 @@
     },
     {
       "id": "internal/worker/handlers.go:newContinueSessionHandler",
-      "source_sha256": "a7813dcb6f9a4a78d920ed1f3d88e68719831943d02cf9e4012a1f336de622cd",
+      "source_sha256": "20a49c04dfe6a2734dc2e7e0d8320d6cf9c79918197b09d14ec45d539012eacf",
       "operation": "continuation execution and failed-turn thread release",
       "owner": "newContinueSessionHandler in internal/worker",
       "predicate": "Parses exact purpose/recovery/specialist IDs and job tokens; error branches exclude race loser, automation owner and session-cancelled, but generic thread idle reset lacks expected attempt/epoch. ErrConcurrencyLimit (org max_concurrent_runs quota full of executing turns) is retried every 5s inside the worker retry window with registerConcurrencyLimitDeadLetter registered to settle session and thread as concurrency_timeout; the code-review recheck branch retries it after 2s without a hook. The orchestrator gate runs before any start effect, so a held continuation leaves no state to unwind.",
@@ -11473,7 +11641,7 @@
       "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority.",
       "prerequisite_0a": "0a: validate admission before all start effects and handoff, persist exact input/request binding, replace generic cleanup with exact-owned stale-aware settlement; no reselect latest request or existing-job rebinding.",
       "evidence": [
-        "internal/worker/handlers.go:9860",
+        "internal/worker/handlers.go:9862",
         "Discovered: boundary-caller, dispatch-reference, indirect-caller",
         "Boundary/call candidate: answerQueuedHumanInputForContinue",
         "Boundary/call candidate: answerQueuedHumanInputForContinue -> internal/worker/handlers.go:answerQueuedHumanInputForContinue",
@@ -11485,6 +11653,7 @@
         "Boundary/call candidate: finalizeThreadCancellationIfRequested -> internal/worker/handlers.go:finalizeThreadCancellationIfRequested",
         "Boundary/call candidate: job type continue_session",
         "Boundary/call candidate: maybeDispatchSessionExecutor -> internal/worker/session_executor_dispatch.go:maybeDispatchSessionExecutor",
+        "Boundary/call candidate: registerConcurrencyLimitDeadLetter -> internal/worker/handlers.go:registerConcurrencyLimitDeadLetter",
         "Boundary/call candidate: registerSandboxCapacityDeadLetter -> internal/worker/handlers.go:registerSandboxCapacityDeadLetter",
         "Boundary/call candidate: registerStaleSandboxDeadLetter -> internal/worker/handlers.go:registerStaleSandboxDeadLetter",
         "Boundary/call candidate: registerSystemInterruptDeadLetter -> internal/worker/handlers.go:registerSystemInterruptDeadLetter",
@@ -11503,7 +11672,7 @@
         "Boundary/call candidate: stores.SessionThreads.UpdateTurnComplete",
         "Boundary/call candidate: stores.SessionThreads.UpdateTurnComplete -> internal/db/session_store.go:SessionStore.UpdateTurnComplete",
         "Boundary/call candidate: stores.SessionThreads.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
-        "Boundary/call candidate: registerConcurrencyLimitDeadLetter -> internal/worker/handlers.go:registerConcurrencyLimitDeadLetter"
+        "Boundary/call candidate: stores.SessionThreads.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete"
       ]
     },
     {

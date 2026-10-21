@@ -967,6 +967,18 @@ and then publishes its optional event. The two worker stores still have no
 publisher, so removing their nested savepoints adds no event. This is persistence
 composition, not a new current-allocation, review-authority or epoch fence.
 
+The pool-backed automation attempt owner now captures status and workspace
+effects from its existing result/status/turn callback methods. They use explicit
+supplied-transaction persistence, and the fresh bound store's inherited methods
+have no publisher. Only a successful outer commit dispatches effects through the
+original publisher, preserving each call's returned row and status/expiry/workspace
+order. Callback, late duration and commit errors discard them without retry.
+The actual failed-result and awaiting-input status paths no longer publish before
+commit. Actual successful automation callbacks remain diff-free and gain no new
+event; arbitrary diff-bearing callbacks are separately covered as a latent case.
+This owner-local adapter is not a supported way to nest an already tx-bound
+`TurnStore` or a replacement for canonical turn authority.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1705,6 +1717,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Compose full-assessment completion and reconciliation with caller-owned
   assessment/request/scheduler settlement, retaining standalone PR event policy
   and proving whole-owner late-failure rollback without a nested savepoint.
+- [x] Defer automation attempt result/status/turn effects until its actual
+  pool-backed owner commits, preserving diff-free success and proving late
+  marker/callback/duration/commit rejection discards every staged notification.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2208,7 +2223,8 @@ A separate caller trace qualifies earlier wrapper risk notes: the two current
 automation success callbacks clear diff/base/head before `UpdateTurnComplete`, so
 they do not produce the hypothesized workspace wakeup. A diff-bearing tx-bound
 wrapper remains a latent hazard; reachable failed-result and awaiting-input status
-publication are separate owner-local follow-up work, not evidence of that wakeup.
+publication are separate owner-local paths, not evidence of that wakeup. The
+attempt-owner follow-up below now defers those reachable status effects.
 
 ### 0a full-assessment scheduler settlement composition validation
 
@@ -2239,6 +2255,34 @@ atomicity, new event, canonical shared authority or deployed floor is claimed.
 Registering the shared PR/policy vocabulary also exposes retained indirect
 callers; these remain explicitly syntax-only observations rather than newly
 approved mutation authority.
+
+### 0a automation attempt post-commit effects validation
+
+The focused automation race selection passes on PostgreSQL 17.10: four roots
+and 25 subtests, no failures or skips. Full package verification passes 74 roots
+and 186 subtests. Reproduce with an owned PostgreSQL 15+ `TEST_DATABASE_URL` and
+`go test -race -p=1 ./internal/services/automations
+-run '^TestTurnAttemptPersistence' -count=1 -timeout=3m`. Repeated
+`GOMAXPROCS=4` verification at `-parallel=8 -count=3` passes 12 roots and 75
+case executions with no skips or failures. Focused vet and whitespace pass.
+
+The actual pool-backed `EndAttempt` uses one physical transaction and rejects
+nested Begin in its head-only, empty/full diff and status paths. Enabled Redis
+command hooks observe exactly the entire committed session, marker, duration,
+changeset and snapshot graph through a pre-opened independent connection.
+Before commit, both the publisher and independent row view remain unchanged.
+Real duration SQL and deferred-commit trigger errors first validate genuine
+prior writes, then reject the whole unit with no notification. Unit commit-error
+coverage checks discard/no retry; it is not lost-network-acknowledgement recovery.
+
+The original publisher remains usable after the fresh transaction-bound copy's
+streams are cleared. Each captured status keeps its exact original UPDATE
+RETURNING record, including its pre-snapshot revision, and preserves
+status/terminal expiry/workspace order. Snapshot/container row-only callbacks
+remain inherited. A bounded syntax test pins the real callback method set and
+pool-backed constructor; a new publishing or escaped callback method requires
+explicit review. This guard does not resolve arbitrary interfaces or prove
+canonical authority. Other automation checkpoint owners remain separate work.
 
 ## Surprises & Discoveries
 
