@@ -149,6 +149,7 @@ func pullRequestSyncReasonAttribute(ctx context.Context) (PullRequestSyncReason,
 var (
 	ErrPullRequestMergeabilityPending    = errors.New("pull request mergeability is still being checked by GitHub")
 	ErrPullRequestRepositoryDisconnected = errors.New("pull request repository is disconnected")
+	ErrPullRequestHealthSyncSuperseded   = errors.New("pull request health refresh was superseded")
 	defaultMergeabilityRetryDelays       = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
 )
 
@@ -690,18 +691,27 @@ func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequest
 // a review capture still gets fresh provider inputs, checks and commit statuses.
 func (s *PRService) SyncCodeReviewPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) (CodeReviewPullRequestSnapshot, error) {
 	ctx = WithPullRequestSyncReason(ctx, PullRequestSyncReasonCodeReview)
-	var snapshot CodeReviewPullRequestSnapshot
-	err := s.syncResolvedPullRequestStateCapturing(ctx, orgID, pullRequestID, nil, false, func(details *gitHubPullRequestDetails) error {
-		if details.Head.SHA == "" {
-			return errors.New("pull request head SHA is missing")
+	// Re-resolve both the mirror and GitHub after a raced write. Never return
+	// metadata from a refresh whose matching health was discarded.
+	const maxAttempts = 3
+	for range maxAttempts {
+		var snapshot CodeReviewPullRequestSnapshot
+		err := s.syncResolvedPullRequestStateCapturing(ctx, orgID, pullRequestID, nil, false, func(details *gitHubPullRequestDetails) error {
+			if details.Head.SHA == "" {
+				return errors.New("pull request head SHA is missing")
+			}
+			snapshot = codeReviewPullRequestSnapshot(details)
+			return nil
+		})
+		if errors.Is(err, ErrPullRequestHealthSyncSuperseded) {
+			continue
 		}
-		snapshot = codeReviewPullRequestSnapshot(details)
-		return nil
-	})
-	if err != nil {
-		return CodeReviewPullRequestSnapshot{}, err
+		if err != nil {
+			return CodeReviewPullRequestSnapshot{}, err
+		}
+		return snapshot, nil
 	}
-	return snapshot, nil
+	return CodeReviewPullRequestSnapshot{}, fmt.Errorf("%w after %d attempts", ErrPullRequestHealthSyncSuperseded, maxAttempts)
 }
 
 func (s *PRService) syncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
@@ -743,6 +753,7 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 	}
 
 	owner, repoName := splitRepo(pr.GitHubRepo)
+	readStartedAt := time.Now().UTC()
 	details, err := s.fetchPullRequestDetails(ctx, token, owner, repoName, pr.GitHubPRNumber)
 	if err != nil {
 		return err
@@ -753,9 +764,9 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 		}
 	}
 
-	// Review capture consumes terminal metadata for deterministic ineligibility.
-	// Avoid adding lifecycle cleanup under the capture's publication lock;
-	// ordinary health reconciliation below still repairs stale-open mirrors.
+	// Terminal review snapshots establish deterministic ineligibility without
+	// running close cleanup under the capture's publication lock. Ordinary
+	// health reconciliation below still repairs stale-open mirrors.
 	if capture != nil && strings.EqualFold(strings.TrimSpace(details.State), "closed") {
 		return nil
 	}
@@ -774,6 +785,27 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 			Msg("self-healing PR status drift during sync; closed-event webhook was likely dropped")
 		_, err := s.applyClosedPRTransition(ctx, pr, details.Merged, details.MergedAt, details.UpdatedAt, details.MergeCommitSHA, details.Head.SHA)
 		return err
+	}
+	if strings.EqualFold(strings.TrimSpace(details.State), "open") && pr.Status == models.PullRequestStatusClosed {
+		// Repair a missed reopen before ApplyHealthSync checks the mirror's
+		// lifecycle. Order against provider observations and fence local
+		// changes since resolution, without running reopen side effects.
+		observedAt := readStartedAt
+		if details.UpdatedAt != nil && !details.UpdatedAt.IsZero() {
+			observedAt = details.UpdatedAt.UTC()
+		}
+		accepted, err := s.pullRequests.ReopenIfUnchanged(ctx, orgID, pullRequestID, pr.UpdatedAt, observedAt)
+		if err != nil {
+			return fmt.Errorf("reconcile open pull request lifecycle: %w", err)
+		}
+		if !accepted {
+			s.logger.Debug().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("skipping superseded pull request reopen repair")
+			if capture != nil {
+				return ErrPullRequestHealthSyncSuperseded
+			}
+			return nil
+		}
+		s.logger.Warn().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Msg("self-healing closed PR mirror after GitHub reported it open")
 	}
 
 	checkRuns, err := s.listCheckRunsForRef(ctx, token, owner, repoName, details.Head.SHA)
@@ -891,13 +923,13 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 
 	mergeStateIndeterminate, testsIndeterminate := detectIndeterminateSignals(details.Mergeable, details.MergeableState, checkRuns, commitStatuses)
 	if mergeStateIndeterminate || testsIndeterminate {
-		if prior != nil && shouldSkipIndeterminateSnapshotWrite(mergeStateIndeterminate, testsIndeterminate, details.Head.SHA, summary.FailingTestCount, *prior) {
+		if prior != nil && shouldSkipIndeterminateSnapshotWrite(mergeStateIndeterminate, testsIndeterminate, details.Head.SHA, details.Base.SHA, summary.FailingTestCount, *prior) {
 			s.logger.Debug().
 				Str("pull_request_id", pullRequestID.String()).
 				Str("head_sha", details.Head.SHA).
 				Bool("merge_state_indeterminate", mergeStateIndeterminate).
 				Bool("tests_indeterminate", testsIndeterminate).
-				Msg("skipping pull request health snapshot write; GitHub data still indeterminate on same head SHA")
+				Msg("skipping pull request health snapshot write; GitHub data still indeterminate on same revision")
 			if mergeStateIndeterminate {
 				return ErrPullRequestMergeabilityPending
 			}
@@ -919,6 +951,9 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 	}
 	if !applied {
 		s.logger.Info().Str("org_id", orgID.String()).Str("pull_request_id", pullRequestID.String()).Int64("check_state_version", checkStateVersion).Msg("skipping superseded pull request health sync")
+		if capture != nil {
+			return ErrPullRequestHealthSyncSuperseded
+		}
 		return nil
 	}
 

@@ -288,6 +288,29 @@ func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 	return err
 }
 
+// ReopenIfUnchanged repairs a stale closed mirror using provider lifecycle
+// ordering. A local close or merge committed during the provider read wins,
+// including events whose provider timestamps have the same second precision.
+func (s *PullRequestStore) ReopenIfUnchanged(ctx context.Context, orgID, id uuid.UUID, expectedUpdatedAt, observedAt time.Time) (bool, error) {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin pull request reopen: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	insights := NewCodeReviewInsightStore(tx)
+	accepted, err := insights.recordPullRequestLifecycleIfUnchanged(ctx, orgID, id, false, nil, false, observedAt, &expectedUpdatedAt)
+	if err != nil || !accepted {
+		return false, err
+	}
+	if err := insights.projectPullRequestDecisions(ctx, orgID, id); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit pull request reopen: %w", err)
+	}
+	return true, nil
+}
+
 // UpdateMergedStatus records the provider's authoritative merge time rather
 // than the time at which a delayed webhook or reconciliation was processed.
 func (s *PullRequestStore) UpdateMergedStatus(ctx context.Context, orgID, id uuid.UUID, mergedAt time.Time) error {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,6 +26,128 @@ func (f codeReviewSnapshotRoundTripFunc) RoundTrip(r *http.Request) (*http.Respo
 	return f(r)
 }
 
+func TestSyncCodeReviewPullRequestStateRetriesSupersededHealth(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                          string
+		attempts, skips               int
+		closed, background, exhausted bool
+		reopenRejected                bool
+	}{
+		{name: "raced health write is refreshed before returning a snapshot", attempts: 2, skips: 1},
+		{name: "newer close becomes deterministic ineligibility", attempts: 2, skips: 1, closed: true},
+		{name: "newer close fences a stale reopen", attempts: 2, skips: 1, closed: true, reopenRejected: true},
+		{name: "persistent races stop after three fresh reads", attempts: 3, skips: 3, exhausted: true},
+		{name: "background refresh still skips superseded work", attempts: 1, skips: 1, background: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create isolated refresh race fixture")
+			t.Cleanup(mock.Close)
+			orgID, prID := uuid.New(), uuid.New()
+			now := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC)
+			identity := pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}
+			for attempt := range tt.attempts {
+				prRow := newPRTestRow(prID, nil, orgID, "acme/web", now, nil)
+				if tt.reopenRejected && attempt == 0 {
+					prRow[8] = models.PullRequestStatusClosed
+				}
+				mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(prRow...))
+				mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "acme/web"}).
+					WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(uuid.New(), orgID, uuid.New(), int64(1), "acme/web", "main", false, nil, nil, "https://github.com/acme/web.git", int64(123), "active", nil, nil, []byte(`{}`), now, now))
+				expectReserveCheckStateVersion(mock, orgID, prID, int64(attempt))
+				if tt.reopenRejected && attempt == 0 {
+					mock.ExpectBegin()
+					mock.ExpectExec("WITH lifecycle AS.*UPDATE pull_requests.*pull_request.updated_at = @expected_updated_at").WithArgs(pgx.NamedArgs{
+						"org_id": orgID, "pull_request_id": prID, "merged": false, "merged_at": (*time.Time)(nil), "terminal": false,
+						"observed_at": pgxmock.AnyArg(), "expected_updated_at": now,
+						"merged_status": models.PullRequestStatusMerged, "closed_status": models.PullRequestStatusClosed, "open_status": models.PullRequestStatusOpen,
+					}).WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+					mock.ExpectRollback()
+					continue
+				}
+				if tt.closed && attempt == tt.attempts-1 {
+					continue
+				}
+				if attempt >= tt.skips {
+					expectCodeReviewSnapshotHealthWrite(mock, orgID, prID, int64(attempt))
+					continue
+				}
+				mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").WithArgs(identity).WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT COALESCE.*FROM pull_requests.*FOR UPDATE").WithArgs(identity).
+					WillReturnRows(pgxmock.NewRows([]string{"head_sha", "base_sha", "status"}).AddRow("webhook-head", "base-current", models.PullRequestStatusOpen))
+				mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").WithArgs(identity).WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
+				mock.ExpectRollback()
+			}
+			requests := map[string]int{}
+			service := &PRService{
+				tokenProvider: &Service{cache: map[int64]*cachedToken{123: {Token: "synthetic-token", ExpiresAt: time.Now().Add(time.Hour)}}},
+				pullRequests:  db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), logger: zerolog.New(io.Discard),
+				baseURL: "https://github.test",
+				httpClient: &http.Client{Transport: codeReviewSnapshotRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+					var payload string
+					switch {
+					case strings.HasSuffix(r.URL.Path, "/pulls/42"):
+						requests["pull"]++
+						state := "open"
+						if tt.closed && requests["pull"] == tt.attempts {
+							state = "closed"
+						}
+						payload = `{"number":42,"state":"` + state + `","head":{"sha":"head-current"},"base":{"sha":"base-current"},"mergeable":true,"mergeable_state":"clean"}`
+					case strings.HasSuffix(r.URL.Path, "/check-runs"):
+						requests["checks"]++
+						payload = `{"check_runs":[{"id":1,"name":"unit tests","status":"completed","conclusion":"success","app":{"slug":"github-actions"}}]}`
+					case strings.HasSuffix(r.URL.Path, "/status"):
+						requests["statuses"]++
+						payload = `{"statuses":[]}`
+					default:
+						t.Errorf("unexpected provider route %s", r.URL.Path)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(payload))}, nil
+				})},
+			}
+			var actual CodeReviewPullRequestSnapshot
+			if tt.background {
+				err = service.syncPullRequestState(context.Background(), orgID, prID)
+			} else {
+				actual, err = service.SyncCodeReviewPullRequestState(context.Background(), orgID, prID)
+			}
+			expected := CodeReviewPullRequestSnapshot{}
+			if tt.exhausted {
+				require.ErrorIs(t, err, ErrPullRequestHealthSyncSuperseded, "exhausted capture must report a raced refresh rather than expose stale health")
+			} else {
+				require.NoError(t, err, "successful refresh or terminal metadata should resolve the bounded retry")
+				if !tt.background {
+					state := "open"
+					if tt.closed {
+						state = "closed"
+					}
+					expected = CodeReviewPullRequestSnapshot{Number: 42, State: state, HeadSHA: "head-current", BaseSHA: "base-current"}
+				}
+			}
+			require.Equal(t, expected, actual, "only an applied refresh or terminal provider response may supply capture metadata")
+			healthReads := tt.attempts
+			if tt.closed {
+				healthReads--
+			}
+			if tt.reopenRejected {
+				healthReads--
+			}
+			expectedRequests := map[string]int{"pull": tt.attempts}
+			if healthReads > 0 {
+				expectedRequests["checks"], expectedRequests["statuses"] = healthReads, healthReads
+			}
+			require.Equal(t, expectedRequests, requests, "retry budget must bound provider calls and stop fetching checks once closed")
+			require.NoError(t, mock.ExpectationsWereMet(), "every retry must resolve a fresh mirror and preserve skipped health writes")
+		})
+	}
+}
+
 func TestSyncCodeReviewPullRequestStateReusesAuthoritativeResponse(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -38,6 +161,7 @@ func TestSyncCodeReviewPullRequestStateReusesAuthoritativeResponse(t *testing.T)
 		expectedError    bool
 	}{
 		{name: "fresh snapshot and complete health share one PR read", state: "open", expectedRequests: map[string]int{"pull": 1, "checks": 1, "statuses": 1}},
+		{name: "open GitHub PR repairs closed mirror before refreshing its base", state: "open", storedStatus: models.PullRequestStatusClosed, expectedRequests: map[string]int{"pull": 1, "checks": 1, "statuses": 1}},
 		{name: "closed PR does not retry null mergeability or run lifecycle cleanup", state: "closed", expectedRequests: map[string]int{"pull": 1}},
 		{name: "merged PR with stale-open mirror stays ineligible without lifecycle cleanup", state: "closed", merged: true, expectedRequests: map[string]int{"pull": 1}},
 		{name: "already closed PR stays ineligible without inaccessible checks", state: "closed", storedStatus: models.PullRequestStatusClosed, failRoute: "checks", expectedRequests: map[string]int{"pull": 1}},
@@ -65,6 +189,15 @@ func TestSyncCodeReviewPullRequestStateReusesAuthoritativeResponse(t *testing.T)
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "acme/web"}).
 				WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(uuid.New(), orgID, uuid.New(), int64(1), "acme/web", "main", false, nil, nil, "https://github.com/acme/web.git", int64(123), "active", nil, nil, []byte(`{}`), now, now))
 			expectReserveCheckStateVersion(mock, orgID, prID, 0)
+			if tt.state == "open" && tt.storedStatus == models.PullRequestStatusClosed {
+				mock.ExpectBegin()
+				mock.ExpectExec("WITH lifecycle AS.*INSERT INTO code_review_pull_request_lifecycle_observations.*UPDATE pull_requests.*pull_request.status = 'closed'.*pull_request.updated_at = @expected_updated_at").WithArgs(pgx.NamedArgs{
+					"org_id": orgID, "pull_request_id": prID, "merged": false, "merged_at": (*time.Time)(nil), "terminal": false, "observed_at": now, "expected_updated_at": now,
+					"merged_status": models.PullRequestStatusMerged, "closed_status": models.PullRequestStatusClosed, "open_status": models.PullRequestStatusOpen,
+				}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				mock.ExpectQuery("SELECT session_id FROM code_review_session_metadata").WithArgs(orgID, prID).WillReturnRows(pgxmock.NewRows([]string{"session_id"}))
+				mock.ExpectCommit()
+			}
 			if !tt.expectedError && tt.state == "open" {
 				expectCodeReviewSnapshotHealthWrite(mock, orgID, prID)
 			}
@@ -110,7 +243,7 @@ func TestSyncCodeReviewPullRequestStateReusesAuthoritativeResponse(t *testing.T)
 						mergeable = nil
 						mergeState = "unknown"
 					}
-					payload = map[string]any{"number": expected.Number, "html_url": expected.HTMLURL, "state": expected.State, "draft": expected.IsDraft, "title": expected.Title, "body": expected.Body, "merged": tt.merged,
+					payload = map[string]any{"number": expected.Number, "html_url": expected.HTMLURL, "state": expected.State, "draft": expected.IsDraft, "title": expected.Title, "body": expected.Body, "merged": tt.merged, "updated_at": now,
 						"user": map[string]any{"login": expected.AuthorLogin}, "head": map[string]any{"sha": head, "ref": expected.HeadRef, "repo": map[string]any{"fork": true}},
 						"base": map[string]any{"sha": expected.BaseSHA, "ref": expected.BaseRef}, "mergeable": mergeable, "mergeable_state": mergeState}
 				case "checks":
@@ -170,7 +303,11 @@ func TestSyncCodeReviewPullRequestStateReusesAuthoritativeResponse(t *testing.T)
 	}
 }
 
-func expectCodeReviewSnapshotHealthWrite(mock pgxmock.PgxPoolIface, orgID, prID uuid.UUID) {
+func expectCodeReviewSnapshotHealthWrite(mock pgxmock.PgxPoolIface, orgID, prID uuid.UUID, versions ...int64) {
+	var checkStateVersion int64
+	if len(versions) > 0 {
+		checkStateVersion = versions[0]
+	}
 	identity := pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}
 	mock.ExpectQuery("SELECT .+ FROM pull_request_health_current").WithArgs(identity).WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns))
 	expectCheckStateReconciliation(mock, orgID, prID, "head-current", 1)
@@ -187,7 +324,7 @@ func expectCodeReviewSnapshotHealthWrite(mock pgxmock.PgxPoolIface, orgID, prID 
 	mock.ExpectExec("INSERT INTO pull_request_health_current").WithArgs(pgx.NamedArgs{
 		"pull_request_id": prID, "org_id": orgID, "version": int64(1), "head_sha": "head-current", "base_sha": "base-current",
 		"summary_json": pgxmock.AnyArg(), "summary_preview_json": pgxmock.AnyArg(), "enrichment_status": models.PullRequestHealthEnrichmentStatusNotRequested,
-		"enriched_at": (*time.Time)(nil), "check_state_version": int64(0), "created_at": pgxmock.AnyArg(), "updated_at": pgxmock.AnyArg(),
+		"enriched_at": (*time.Time)(nil), "check_state_version": checkStateVersion, "created_at": pgxmock.AnyArg(), "updated_at": pgxmock.AnyArg(),
 	}).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	mock.ExpectExec("UPDATE pull_requests").WithArgs(pgx.NamedArgs{
 		"pull_request_id": prID, "org_id": orgID, "head_sha": "head-current", "base_sha": "base-current",

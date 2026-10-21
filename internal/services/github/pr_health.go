@@ -41,9 +41,9 @@ func detectIndeterminateSignals(mergeable *bool, githubState string, checkRuns [
 }
 
 // shouldSkipIndeterminateSnapshotWrite returns true when persisting the new
-// summary would regress prior actionable state on the same head SHA. It
+// summary would regress prior actionable state on the same revision. It
 // fires only if (a) GitHub's signals are still being computed, (b) the prior
-// snapshot is for the same head SHA, and (c) the regression would erase a
+// snapshot has the same head and base SHAs, and (c) the regression would erase a
 // prior conflict signal or drop a prior failing-test count while reruns are
 // still in flight.
 //
@@ -59,14 +59,14 @@ func detectIndeterminateSignals(mergeable *bool, githubState string, checkRuns [
 // off and back on as reruns complete one by one.
 func shouldSkipIndeterminateSnapshotWrite(
 	mergeStateIndeterminate, testsIndeterminate bool,
-	newHeadSHA string,
+	newHeadSHA, newBaseSHA string,
 	newFailingTestCount int,
 	prior models.PullRequestHealthCurrent,
 ) bool {
 	if !mergeStateIndeterminate && !testsIndeterminate {
 		return false
 	}
-	if prior.HeadSHA != newHeadSHA {
+	if prior.HeadSHA != newHeadSHA || prior.BaseSHA != newBaseSHA {
 		return false
 	}
 	var priorSummary models.PullRequestHealthSummary
