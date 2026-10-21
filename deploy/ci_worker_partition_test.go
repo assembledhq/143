@@ -172,7 +172,7 @@ else:
 			otherArgs = append(otherArgs, "-timeout="+tt.otherTimeout)
 			boundedArgs := func(pkg, profile string) []string {
 				args := []string{"test"}
-				if pkg == "./internal/db" {
+				if pkg == "./internal/db" || pkg == "./internal/worker" {
 					args = append(args, "-json")
 				}
 				args = append(args, pkg, "-coverpkg=./internal/...", "-coverprofile="+profile, "-covermode="+tt.mode)
