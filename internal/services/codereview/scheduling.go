@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -207,6 +208,27 @@ func (s *Service) RequestScheduledReview(ctx context.Context, req ScheduleReques
 	return ScheduleRequestResult{RequestID: req.RequestID, SessionID: sessionID, Disposition: disposition, Schedule: state}, err
 }
 
+// scheduledSessionStore retains the transaction-scoped store's existing reads
+// and row-only updates, but creation must not enter its transaction-owning wrapper.
+type scheduledSessionStore struct {
+	*db.SessionStore
+	tx pgx.Tx
+}
+
+func (s *scheduledSessionStore) Create(ctx context.Context, session *models.Session) error {
+	if s == nil || s.tx == nil {
+		return errors.New("scheduled session create: nil transaction")
+	}
+	value := reflect.ValueOf(s.tx)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return errors.New("scheduled session create: nil transaction")
+		}
+	}
+	return s.SessionStore.CreateInTx(ctx, s.tx, session)
+}
+
 func (s *Service) transactionalService(tx pgx.Tx) *Service {
 	scoped := *s
 	scoped.scheduling = nil
@@ -214,7 +236,7 @@ func (s *Service) transactionalService(tx pgx.Tx) *Service {
 	metadata := db.NewCodeReviewStore(tx)
 	scoped.metadata = metadata
 	scoped.policies = metadata
-	scoped.sessions = db.NewSessionStore(tx)
+	scoped.sessions = &scheduledSessionStore{SessionStore: db.NewSessionStore(tx), tx: tx}
 	scoped.jobs = db.NewJobStore(tx)
 	scoped.pullRequests = db.NewPullRequestStore(tx)
 	// Notifications before commit are unsafe; polling recovers session updates.

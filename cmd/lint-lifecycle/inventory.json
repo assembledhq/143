@@ -122,7 +122,7 @@
     },
     {
       "id": "internal/api/handlers/eval.go:EvalHandler.StartBatch",
-      "source_sha256": "ff0293c8aed97e5d92b1d0d1cc2024f8e5458bdffe5b8b748842d34fb8ac93b4",
+      "source_sha256": "a4fbef6cb79d8c62111bdc49bf8d6b4563069632781c6180365dc0152c9e16b2",
       "operation": "EvalHandler.StartBatch: dispatch producer/consumer",
       "owner": "EvalHandler in internal/api/handlers",
       "predicate": "Syntactic boundary/callee candidates: job type run_agent; txRunStore.Create; txRunStore.Create(ctx, &run); no independent authorization proof inferred.",
@@ -137,6 +137,7 @@
         "Boundary/call candidate: job type run_agent",
         "Boundary/call candidate: txJobStore.Enqueue",
         "Boundary/call candidate: txRunStore.Create",
+        "Boundary/call candidate: txSessionStore.CreateInTx",
         "Lock/transaction syntax: h.txStarter.Begin",
         "Lock/transaction syntax: tx.Commit"
       ]
@@ -159,7 +160,7 @@
     },
     {
       "id": "internal/api/handlers/eval.go:EvalHandler.StartRun",
-      "source_sha256": "c4f3894268850ec52573d994cfe291c3edbcd03f576351aed0f331fd78b541fb",
+      "source_sha256": "943d3a5bc3cb0e8ca5c37fabf58152042ccbef78f5d5dd39f4db493739df3ffe",
       "operation": "EvalHandler.StartRun: dispatch producer/consumer",
       "owner": "EvalHandler in internal/api/handlers",
       "predicate": "AST-observed guard expressions: errors.Is(err, pgx.ErrNoRows)",
@@ -174,13 +175,14 @@
         "Boundary/call candidate: job type run_agent",
         "Boundary/call candidate: txJobStore.Enqueue",
         "Boundary/call candidate: txRunStore.Create",
+        "Boundary/call candidate: txSessionStore.CreateInTx",
         "Lock/transaction syntax: h.txStarter.Begin",
         "Lock/transaction syntax: tx.Commit"
       ]
     },
     {
       "id": "internal/api/handlers/eval.go:EvalHandler.bootstrapSessionBacked",
-      "source_sha256": "024f560f45e7e3add456f49dbf2e683c2b0bda42c063bfcd7bc7b7a97a6d67cf",
+      "source_sha256": "13000e630e86c88bb2ec34f11071e88c33a41110f3a299afbdbcc8046689c185",
       "operation": "EvalHandler.bootstrapSessionBacked: dispatch producer/consumer",
       "owner": "EvalHandler in internal/api/handlers",
       "predicate": "Syntactic boundary/callee candidates: job type run_agent; no independent authorization proof inferred.",
@@ -194,6 +196,7 @@
         "Boundary/call candidate: db.RunAgentDedupeKey",
         "Boundary/call candidate: job type run_agent",
         "Boundary/call candidate: txJobStore.Enqueue",
+        "Boundary/call candidate: txSessionStore.CreateInTx",
         "Lock/transaction syntax: h.txStarter.Begin",
         "Lock/transaction syntax: tx.Commit"
       ]
@@ -216,7 +219,7 @@
     },
     {
       "id": "internal/api/handlers/internal_issues.go:InternalIssueHandler.dispatchSession",
-      "source_sha256": "63aa57572e637496fd92c9ff9e70ea5fa082c4d800689a393912f7f216fa1d88",
+      "source_sha256": "08b81d4d2add223e8ca86e59ebc62e9efc68072f59241f14ac34edcc9faf932d",
       "operation": "InternalIssueHandler.dispatchSession: dispatch producer/consumer",
       "owner": "InternalIssueHandler in internal/api/handlers",
       "predicate": "Syntactic boundary/callee candidates: job type run_agent; no independent authorization proof inferred.",
@@ -229,6 +232,7 @@
         "Discovered: boundary-caller, dispatch-reference",
         "Boundary/call candidate: db.RunAgentDedupeKey",
         "Boundary/call candidate: h.jobStore.Enqueue",
+        "Boundary/call candidate: h.sessionStore.Create",
         "Boundary/call candidate: job type run_agent"
       ]
     },
@@ -8070,6 +8074,30 @@
         "internal/services/codereview/scheduling.go:225",
         "Discovered: indirect-caller",
         "Boundary/call candidate: s.refreshSchedule -> internal/services/codereview/scheduling.go:Service.refreshSchedule"
+      ]
+    },
+    {
+      "id": "internal/services/codereview/scheduling.go:scheduledSessionStore.Create",
+      "source_sha256": "794e0fb2c7e7340f8e6e92e108a46a10696f09865f47844537c6fb635b15b035",
+      "operation": "caller-owned scheduled full-review session creation",
+      "owner": "private scheduledSessionStore adapter; actual ReconcileSchedule WithLockedPR callback owns admission transaction",
+      "predicate": "Rejects nil receiver, nil and typed-nil concrete pgx.Tx, then invokes existing SessionStore.CreateInTx with that exact tx and supplied session. Preserves original SQL/defaults, caller-record mutation, primary-thread review/read-only modes, schema-triggered primary changeset and optional context behavior. No current allocation, shared epoch or new readiness/authority validation.",
+      "lock": "Adapter cannot Begin/savepoint, Commit/Rollback, retry, publish or fall back to a pool. transactionalService binds a fresh nil-streams db.SessionStore(tx): inherited GetByID/UpdateStatus/UpdateFailure stay on the same tx. Actual scheduler WithLockedPR callback owns session, primary thread, changeset, metadata, controller job, request and final scheduling state together under existing PR/worker-lease protocol.",
+      "stale_result": "Raw create/thread/context or later admission/final-state/commit errors propagate unchanged; caller must roll back the complete owner unit, including earlier staged session/thread/changeset/request/job writes. Original supplied-record mutations on partial failure remain unchanged and do not prove durable creation. No independent publish/replay occurs.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a actual scheduled-creation composition replaces only the nested creation wrapper. Standalone SessionStore.Create and service port remain unchanged; nil-streams inherited methods and exact transactionalService binding are pinned by focused source/behavior tests. This is not new canonical review admission or active lifecycle authority.",
+      "canonical_target": "AdmitReviewTurnInTx",
+      "authority": "Future ReviewAuthority: exact PR/request/assessment or legacy full-review domain association and receipt plus immutable current allocation and current org/session/lane admission/end epochs. Existing scheduling/worker-lease predicates and supplied transaction alone establish none of that shared authority.",
+      "fence_outcome": "No canonical stale-authority fence is added by this persistence adapter. Future AuthorizationRejected must abort admission/shared projection; stale own-attempt handling cannot create new execution, overwrite current shared session/thread/schedule state or publish.",
+      "prerequisite_0a": "Compose typed ReviewAuthority, immutable current allocation, shared admission/end epochs, domain receipt and chosen compatible locks/floor in AdmitReviewTurnInTx before canonical activation. Preserve actual outer-owner atomicity, inherited row-only operations, original defaults/record mutations and no inner settlement/publication/fallback.",
+      "evidence": [
+        "internal/services/codereview/scheduling.go:218",
+        "Discovered: boundary-caller",
+        "Boundary/call candidate: s.SessionStore.CreateInTx",
+        "internal/services/codereview/scheduled_session_store_test.go",
+        "internal/services/codereview/scheduled_session_store_postgres_test.go",
+        "Actual ReconcileSchedule full-schema success, late final-state failure and commit-failure tests use a one-connection owner plus a pre-opened independent physical observer.",
+        "transactionalService fresh nil-streams adapter binding is pinned by TestScheduledSessionStoreWiring; discovery does not type-resolve composite-literal interface bindings."
       ]
     },
     {
