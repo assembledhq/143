@@ -2,330 +2,375 @@
 
 > **Status:** Not Started | **Last reviewed:** 2026-10-21
 
-Draft for agreement between independent producer and replay readers. This change
-contains a contract and invented fixtures only. No producer, verifier, provider
-query, reconciliation over real inputs, or change to inventory/materializer v1 is
-implemented. Approval of this document does not freeze a replay protocol.
+Draft for producer/consumer agreement. This change contains a contract and
+invented fixtures only. No reader, producer, extractor, provider query or real
+reconciliation is implemented. Inventory/materializer v1 stays unchanged.
+Contract agreement neither freezes a replay protocol nor authorizes execution.
 
 ## Purpose and boundaries
 
-Fill an unavailable source-publication clock only from an accepted, inspectable,
-result-free witness of an authoritative submission or publication-edit event.
-Preserve every original observation, its fingerprints, and its acquisition cutoff.
-Do not compute cohort membership, order, partitions, denominators, scores, or
-opportunity verdicts. Missing event evidence means unknown, never unpublished.
+Reconstruct an unavailable source-publication clock only from a verified original
+submission event. **Publication edits cannot supply recovered clocks in v1.**
+Retain edits, incomplete evidence and contradictions as explicit uncertainty.
+Unknown never means proven unpublished. Export evidence without calculating
+cohort membership, ordering, partitions, denominators, scores or verdicts.
 
-The original inventory and selected-record `record_metadata` comparison stay
-unchanged. A parent first verifies original payload metadata against that original
-inventory; only then may it apply this separately pinned sidecar under an agreed
-policy. An unresolved/conflicting observation must remain visible to whole-PR/
-stack quarantine. It cannot disappear through a per-record filter.
+Every original observation, locator, fingerprint and acquisition cutoff survives.
+Independent acquisitions remain independent snapshots. The consumer must verify
+original selected-record `record_metadata` equality against the original inventory
+before applying a separate effective-clock view. Unresolved/conflicting entries
+remain available for whole-PR/stack quarantine; no silent per-record drops.
 
-No database schema, migration, API route, authentication/RBAC, policy, or HTTP
-behavior changes are proposed. The future producer is offline. All input paths
-are operator-supplied; artifact references are opaque hashes, never fetch URLs.
-No network, live state lookup, source expansion, or result access is implicit.
+No database schema, migration, API route, HTTP, authentication/RBAC or policy change
+is proposed. The future producer is offline: explicit input files only, no network
+fallback, live source expansion or result access. Artifact references are opaque
+fingerprints, never fetch URLs. Both holdout results stay sealed and unscored.
 
-## Three separate trust decisions
+## Trust decisions and fixed profile
 
-1. **Integrity:** exact supplied file bytes, including trailing LF, match hashes;
-   strict JSON, schema, cross-file bindings and original fingerprints agree.
-2. **Evidence acceptance:** an operator separately accepts a fixed, reviewed
-   source profile and pinned extractor/source artifacts. The consumer receives
-   the acceptance-file SHA through its trusted invocation context. Neither a
-   caller-generated `matched` flag nor an arbitrary profile name establishes
-   authority. An extractor must not generate or approve its own acceptance file.
-3. **Execution authorization:** permission to read archives, queries, results or
-   holdouts comes from the human/workflow, not these files. Source acceptance
-   confers no execution authorization. This draft authorizes no real execution.
+1. **Integrity:** strict grammar, exact supplied file bytes, trusted expected
+   hashes and cross-file bindings agree. Hashes include the trailing LF.
+2. **Source acceptance:** an independent operator accepts a reviewed extractor
+   revision/file digest, fixed source profile, repository map, exact witness and
+   source coverage. The expected acceptance-file hash arrives through a trusted
+   invocation context; an extractor cannot accept its own output. A profile name
+   or caller-supplied `matched` flag grants no authority.
+3. **Execution authorization:** permission to query, read archives/results or use
+   holdouts comes from the human/workflow. Acceptance grants no such permission.
 
-No signing service or new signature mechanism is introduced. A file hash cannot
-prove historical truth. The consumer relies explicitly on the accepted operator
-attestation that a reviewed extractor faithfully projected an authenticated
-historical source. A consumer that cannot inspect the sealed original cannot
-independently recheck the original provider authentication/body extraction; this
-limitation is retained, not hidden behind a hash.
+No signing service is introduced. A hash proves integrity, not historical truth.
+An inspectable metadata witness lets both readers recompute the same bindings;
+the operator still attests faithful projection of authenticated original sources
+and coverage. A consumer unable to inspect the sealed original cannot independently
+recheck its authentication, body extraction or completeness. This limitation is
+explicit. No proof-complete source or edit adapter is asserted to exist.
 
-## Exact artifacts
+The only supported ruleset is `source-publication-clock/v1`; the only profile is
+`publication-event-metadata/v1`. This profile is **GitHub-only**. Provider numeric
+IDs are positive signed-int64 GitHub IDs, and review identity is immutable. Other
+providers or arbitrary profiles need a separate agreed contract.
 
-The normative grammar is
-[`publication-reconciliation-v1.schema.json`](publication-reconciliation-v1.schema.json).
-Its `$defs` define the exact key sets below; unknown fields are errors. The
-semantic checks in this document are additional requirements, not JSON Schema
-features. Inventory input remains the existing strict schema v1.
+## Artifacts and grammar
 
-| Artifact | Purpose and required binding |
+[`publication-reconciliation-v1.schema.json`](publication-reconciliation-v1.schema.json)
+defines exact object keys, primitive types, enum vocabularies and bounds. Unknown
+fields are errors. Profile/ruleset/dataset selectors are grammatically strings;
+the fixed accepted values are enforced at authority stage 4 below. This separates
+well-formed unsupported authority from malformed input. Semantic checks below are
+mandatory in addition to JSON Schema; `format` annotation alone is insufficient.
+
+| Artifact | Contract |
 | --- | --- |
-| `inventory.json` | Original strict v1 inventory; separately pinned exact bytes. |
-| `metadata-witness.json` | Result-free source events, object observations, artifact provenance and a binding for every original locator. Pins inventory/catalog/original-catalog hashes. |
-| `source-acceptance.json` | Operator acceptance of this exact witness, extractor revision/digest, source profile, repository mapping and artifact bases. Its exact SHA is supplied independently by the trusted caller. |
-| `reconciliation.json` | Producer output, independently recomputed by parent from the three inputs. Contains no caller-authoritative conclusion. |
+| `inventory.json` | Original strict schema v1; independently pinned exact bytes. |
+| `metadata-witness.json` | Result-free events, object observations, source provenance and a binding for every original locator. |
+| `source-acceptance.json` | Independently pinned operator acceptance of the exact witness, extractor, repository map, source artifacts and coverage. |
+| `reconciliation.json` | Complete deterministic output; consumer recomputes it from the preceding inputs and compares exact canonical bytes. |
 
-Illustrative future invocation, **not implemented**:
+Every new artifact has `schema_version:1`, `purpose`, `dataset_kind`, `ruleset`,
+`inventory_sha256`, `catalog_sha256`, and `original_catalog_sha256`. Purposes are
+respectively `source_publication_metadata_witness`,
+`accept_publication_metadata_source`, and `publication_clock_reconciliation`.
+The original inventory has no dataset marker; its existing v1 schema is unchanged.
+
+Proposed invocation, **not implemented**:
 
 ```text
-reconcile --mode historical --inventory INVENTORY --inventory-sha256 SHA256
+reconcile --mode historical --inventory INVENTORY --inventory-sha256 TRUSTED_SHA
           --witness WITNESS --source-acceptance ACCEPTANCE
-          --source-acceptance-sha256 OPERATOR_ACCEPTED_SHA256 --output NEW_FILE
+          --source-acceptance-sha256 OPERATOR_ACCEPTED_SHA --output NEW_FILE
 ```
 
-The trusted caller must obtain expected hashes from the accepted handoff, rather
-than calculate them from untrusted files just to satisfy the flags. `historical`
-mode rejects any `synthetic` artifact. Synthetic mode is only for invented tests.
+Expected hashes come from an accepted handoff, not untrusted files hashed just to
+satisfy flags. Historical mode requires `historical` in every marked artifact;
+synthetic mode requires `synthetic` in every marked artifact. Reject either
+cross-mode direction. The synthetic fixture pin confers no historical authority.
 
-### Source acceptance
+### Acceptance, repositories and coverage
 
-Exact root fields are `schema_version`, `purpose`, `dataset_kind`, `ruleset`,
-`inventory_sha256`, `catalog_sha256`, `original_catalog_sha256`, `witness_sha256`,
-`source_profile`, `extractor_revision`, `extractor_code_sha256`,
-`repository_bindings`, `artifacts`, and `operator_attestation`.
+Acceptance adds `witness_sha256`, `source_profile`, `extractor_revision`,
+`extractor_code_sha256`, `repository_bindings`, `artifacts`, and
+`operator_attestation`. Pin a full reviewed Git SHA and exact extractor file hash.
+The attestation has `attestor_id`, `attested_at`, `verification_receipt_sha256`,
+`permitted_use:"publication_clock_reconstruction_only"`,
+`confers_execution_authorization:false`, and
+`limitation:"operator_attested_projection_original_not_reverified_by_consumer"`.
+Receipt hashes are opaque acceptance evidence, not permission tokens.
 
-The only v1 profile is `publication-event-metadata/v1`. Its semantics are fixed
-below; another string is not a plug-in. Pin a reviewed full Git revision and
-extractor file digest. Each repository binding maps one original repository UUID
-to one immutable provider repository ID; duplicate/contradictory maps fail.
-Repository display names and current PR heads are not identity substitutes.
+The repository map is a total **bijection onto its declared provider IDs**: its
+UUID set equals the inventory acquisition-filter repository UUID set, and no UUID
+or provider ID repeats. No missing, extra, contradictory or many-to-one maps.
+Display names/current heads are not identity substitutes. Every event, object and
+coverage identity must belong to a complete original repo/PR/review group. Two
+known PR numbers for the same provider repo/review ID are contradictory authority.
+All these failures are `RECONCILIATION_SOURCE_UNACCEPTED` (stage 4).
 
-Each accepted artifact supplies its ID/hash, an accepted basis and an opaque
-verification-receipt hash. These must match the witness artifact set exactly.
-The attestation records an operator ID, attestation time, a verification receipt,
-permitted purpose, `confers_execution_authorization:false`, and the explicit
-limitation `operator_attested_projection_original_not_reverified_by_consumer`.
-The receipt is an evidence-acceptance reference, not a permission token.
+Each accepted artifact has `artifact_id`, `sha256`, `basis`,
+`verification_receipt_sha256`, and nullable `coverage`. IDs/hashes must equal the
+witness artifact set. Basis/origin combinations are exactly:
 
-| Accepted basis | Required artifact origin | Permitted witness facts |
-| --- | --- | --- |
-| `authenticated_provider_submission` | `provider_submission_event` | `review_submitted` + `provider_submitted_at`; exact publication key derived from that authenticated event's output marker or an authoritative event-linked publisher identity record. |
-| `verified_historical_publication_edit` | `publisher_edit_event` | `review_body_edited` + `provider_edit_event_at`; requires an authoritative historical edit event linked to the exact publication. An object's old submission clock, HTTP receipt time or generic `updated_at` is insufficient. No currently available adapter for this basis is asserted. |
-| `provider_object_metadata_only` | `provider_review_object` | Candidate object identities/timestamps only. Cannot authorize a matched source clock. |
-
-Acceptance of an unsupported/unreviewed extractor or unverified event source is
-not allowed merely because the file has a valid digest. The operator must review
-that source/profile mapping before supplying its trusted expected hash.
-
-### Metadata witness
-
-Exact root fields are `schema_version`, `purpose`, `dataset_kind`, `ruleset`,
-`inventory_sha256`, `catalog_sha256`, `original_catalog_sha256`, `source_profile`,
-`extractor_revision`, `extractor_code_sha256`, `observed_at`, `artifacts`, `events`,
-`object_observations`, and `bindings`.
-
-An artifact has `artifact_id`, `sha256`, `origin_kind`, and `observed_at`. Only
-opaque source fingerprints and result-free provenance are included. No original
-body, review state, decision, label, finding, policy, coverage/safeguard count,
-free-text note, URL, credential or exception is allowed anywhere in the grammar.
-
-An event has `event_id`, `artifact_id`, `provider_repository_id`, `pr_number`,
-`provider_review_id`, `commit_sha`, `publication_key_sha256`, `event_kind`,
-`clock_kind`, `event_time`, and `publication_link_basis`. The link basis is
-`provider_event_output_marker` or `publisher_event_exact_publication_key`.
-The exact source publication key is SHA-256 hashed as its exact UTF-8 bytes:
-no trimming, case folding or normalization. A trimmed marker preimage cannot
-prove a different untrimmed key; the keys/digests must agree exactly.
-
-The extractor must prove the key-to-event link from the accepted historical
-source. It cannot copy a desired key from inventory onto a bare review-object
-clock. A signed/accepted assertion of `matched:true` is not an event or link.
-
-An object observation has only its ID, artifact ID, immutable provider repository/
-PR/review identity, commit SHA and nullable object submission time. It deliberately
-has no publication key. It may guide later lookup; it never supplies a matched
-source-publication clock, including when its timestamp happens to be plausible.
-
-Every binding contains the original five-field locator, `record_sha256`,
-`source_sha256`, `event_ids` and `object_observation_ids`. It covers one original
-observation, not a session, head or deduplicated PR. Independent acquisitions may
-share source identities and event references; their original locators, exact
-fingerprints and cutoffs remain separate. No missing/extra binding is allowed.
-
-## Proof checks, in order
-
-1. Bound file reads, validate strict JSON and exact key/type/enum sets, and reject
-   duplicate keys, bool-as-int values, duplicate IDs, dangling references and
-   nonfinite numbers before publishing output. Verify trusted acceptance/inventory
-   pins and all cross-file hashes; acceptance must name the exact witness.
-2. Validate the original v1 inventory. Match context pins, dataset mode, fixed
-   profile, extractor revision/digest, artifact sets/bases and trusted repository
-   mappings. Unknown profiles, foreign repository scopes or contradictory maps
-   fail the entire operation. No source or network fallback is attempted.
-3. Require exactly one witness binding and exactly one output entry for every
-   inventory locator, with identical original locator/source/record hashes.
-   Missing, extra, duplicate or falsely fingerprinted bindings fail the operation.
-4. Independently recompute each entry. Do not trust the producer's disposition,
-   clock, reason list or selected event. Independently derive the full candidate
-   event/object set for each original immutable repository + PR number + review
-   ID from the witness. Binding reference lists must equal those complete sets;
-   a caller cannot omit an unfavorable event. Missing original provider/PR
-   identity requires empty candidate sets and remains unresolved. Events/objects
-   outside all original identity groups fail as out-of-scope input. Reasons form
-   a sorted, unique union over every candidate; no favorable event can conceal
-   contradictory/invalid candidates.
-5. For a source clock to match, require an accepted authoritative event basis,
-   allowed event/clock pair, exact immutable repository + scoped PR number +
-   review ID, exact publication-key digest, and exact assessment-time head SHA.
-   If retained `submitted_commit_sha` exists, it must equal that head as well.
-   Missing identity/head/key/creation time stays unresolved. No completion or
-   creation time can stand in for the provider's event clock.
-6. Require `source.created_at <= event_time <= original_acquisition.acquired_at`
-   for **each observation**. An event retrieved later may be used only as
-   explicitly later-observed reconstruction within those original bounds; the
-   acquisition cutoff is never widened. Provider capture/receipt/attestation
-   time is not the event clock. Require event time at or before its artifact's
-   observation time; otherwise retain `event_after_source_observation`. Artifact
-   observation must be at or before witness observation, which must be at or
-   before the operator attestation. Never round a higher-precision timestamp into a
-   match; accept at most microseconds (extra fractional digits must be zero).
-7. A provider review identity is reused when it maps to distinct publication-key
-   digests in inventory or the supplied witness. **Conservative v1 leaves every
-   missing-clock entry for that identity unresolved**, even if distinct events
-   could plausibly disambiguate it. A future relaxation requires a new agreed
-   ruleset; `submitted_at` from an old object is never reused for a later output.
-   Conflicting original observations of one source identity also stay unresolved;
-   compare every original observation field except `locator`, including opaque
-   fingerprints. Different acquisition cutoffs alone are not a source conflict.
-8. Candidates that pass every per-event identity, authority and chronology check
-   must agree on one exact UTC instant, even before the global reuse/source-conflict
-   checks. Different event times stay unresolved: no earliest/latest choice.
-   Equal redeliveries may corroborate the same clock, while every original event
-   reference and every source observation remains present.
-9. An existing frozen clock is copied byte-for-byte into `original_publication_time`
-   and is never overwritten. No authoritative event and no conflicting original
-   observation: `preserve_frozen`. Valid
-   corroborating events at the same instant: also `preserve_frozen`. Conflicting
-   or invalid bound authoritative evidence, or conflicting original observation
-   fingerprints: `frozen_conflict`, with no recovered
-   clock. Bare object metadata cannot override or contradict a source clock.
-10. Emit canonical output only after full validation. Both readers recompute
-    the same complete output and require exact equality; an arbitrary supplied
-    sidecar or `matched` flag cannot establish evidence.
-
-The chronology checks do not filter to a replay date window. This artifact
-exports evidence and explicit uncertainty; cohort admission remains parent-owned.
-
-## Output and failure behavior
-
-Exact root fields: `schema_version`, `purpose`, `dataset_kind`, `ruleset`,
-`inventory_sha256`, `catalog_sha256`, `original_catalog_sha256`, `witness_sha256`,
-`source_acceptance_sha256`, `entries`.
-
-Each entry has `locator`, `record_sha256`, `source_sha256`,
-`original_publication_time`, `disposition`, `reconciled_publication_time`,
-`event_ids`, `object_observation_ids`, and `reasons`.
-
-| Disposition | Reconciled clock | Meaning |
-| --- | --- | --- |
-| `matched_event` | Canonical UTC event time | Original clock absent; all event proof checks pass. This is explicitly reconstructed evidence. |
-| `unresolved` | null | Missing, unmatched, reused, invalid or conflicting evidence. Absence is not proof of non-publication. |
-| `preserve_frozen` | null | Retain the original clock; do not rewrite or normalize its stored spelling. |
-| `frozen_conflict` | null | Original clock remains intact but new authoritative evidence cannot safely corroborate it; quarantine the whole affected group. |
-
-Reasons are the exact schema enum; no free-text reasons or result-derived values.
-For missing original clocks, `no_authoritative_event` applies when no event is
-bound (object observations do not count). Any missing-identity reasons also remain.
-For existing frozen clocks, suppress `no_authoritative_event`; if event references
-exist, run all their proof checks and refuse contradictions as `frozen_conflict`.
-`frozen_clock_conflict` additionally records a valid candidate at a different
-instant. Quarantine requirements apply to both `unresolved` and `frozen_conflict`;
-the parent cannot silently drop those entries and select the remaining PR rows.
-
-The reason vocabulary has these deterministic triggers. Take the union for each
-entry; do not stop at its first failed check. For a frozen clock with no bound
-events, only `conflicting_original_observations` applies; missing fields, bare
-object observations and later identity reuse do not revise an existing clock.
-When events are bound to a frozen clock, run every applicable check below.
-
-| Reason | Trigger |
+| Basis | Witness artifact origin |
 | --- | --- |
-| `missing_provider_review_id` | Original positive provider review ID is absent. |
-| `missing_pr_identity` | Original PR number or pull-request UUID is absent. |
-| `missing_publication_key` | Original exact publication key is absent. |
-| `missing_head_sha` | Original head SHA is absent. |
-| `missing_source_created_at` | Original source creation time is absent. |
-| `submitted_head_mismatch` | Original non-null submitted commit differs from original non-null head. |
-| `no_authoritative_event` | No event candidates are bound to a missing-clock entry. A bare object is insufficient. |
-| `source_not_authoritative` | A candidate's accepted artifact basis/origin or event/clock pair does not match the authority table. |
-| `provider_identity_mismatch` | Defensive identity check fails; a conforming full-candidate binding cannot produce this. A supplied reference outside the derived set is a whole-operation binding error. |
-| `publication_key_mismatch` | Candidate key digest differs from the digest of an available original key. |
-| `event_head_mismatch` | Candidate commit differs from an available original head. |
-| `before_source_creation` | Candidate event precedes an available original creation time, including when another candidate check also fails. |
-| `after_acquisition_boundary` | Candidate event exceeds this observation's original acquisition cutoff. |
-| `event_after_source_observation` | Candidate event exceeds its source artifact observation time. |
-| `reused_provider_review` | The original immutable provider repo/PR/review identity has more than one distinct non-null key digest across inventory plus witness. |
-| `conflicting_event_times` | Candidates passing every per-event check disagree on the UTC instant. Global reuse/source conflicts do not hide this check. |
-| `conflicting_original_observations` | Observations of the same original source identity differ in any non-locator field. |
-| `frozen_clock_conflict` | A candidate passing every per-event check differs from the existing frozen instant. |
+| `authenticated_provider_submission` | `provider_submission_event` |
+| `verified_historical_publication_edit` | `publisher_edit_event` |
+| `provider_object_metadata_only` | `provider_review_object` |
 
-An absent field does not create a comparison-mismatch reason for that field.
-All numeric fields must be lexical integers; floats such as `1.0` and booleans
-are invalid even when a JSON Schema implementation accepts numeric equality.
-Malformed fields fail input validation rather than becoming absent. Missing PR
-identity gives empty candidate sets even if a provider review ID alone matches.
-For an original frozen clock, a nonempty reason set means `frozen_conflict`;
-otherwise preserve its exact original spelling. For a missing clock, a nonempty
-reason set means `unresolved`; an empty set requires at least one validated event
-and produces `matched_event`.
+A different combination is an authority-stage failure for the whole operation.
+Object-only artifacts must have null coverage; they cannot assert event coverage.
+For event artifacts, null coverage is allowed but proves no completeness.
 
-Input/acceptance/fingerprint failures return static codes
-`RECONCILIATION_INPUT_INVALID`, `RECONCILIATION_SOURCE_UNACCEPTED` or
-`RECONCILIATION_BINDING_MISMATCH`, without values, paths or exceptions. No partial
-output, record truncation or overwrite is allowed. Proposed limits: 256 MiB per
-metadata input and output artifact, 100,000 original observations/bindings, 200,000
-event/object observations combined, 4,096 artifact references, and 1,000,000 total
-candidate references across all bindings. Readers index candidates by identity
-and enforce the reference/byte bounds before expanding output. Limit failures are whole-operation
-failures. Output is an exclusive atomic file, mode 0600 in a private directory.
+Non-null coverage has `identities` (repo/PR/review triples), `from` (timestamp or
+null), `until` (timestamp), and `projection` (`complete` or `partial`). It declares
+a **closed** source coverage interval. Null `from` means the entire lifetime of
+each named provider review identity, including events before this source row was
+created. A finite `from` does not prove lifetime completeness. Coverage is a
+completeness claim, not a filter: all supplied observations remain visible even
+outside that interval. Require finite `from <= until <= artifact.observed_at`.
 
-Entries sort by the existing locator key: acquisition ID, page SHA, zero-based
-record index, source identity. Candidate IDs and reason sets sort by ASCII. Hashes
-are lowercase hex. New clocks render exactly `YYYY-MM-DDTHH:MM:SS.ffffffZ`;
-original strings remain untouched. Canonical generated JSON uses sorted ASCII
-keys, compact separators, ASCII escaping, no floats, and a trailing LF. Hash all
-exact bytes including that LF. Consumers hash witnesses as supplied; do not
-reserialize inputs just to obtain a matching hash.
+The operator attests that `complete` projects every original submission or edit
+in that identity/interval for the artifact's basis, including same-key re-renders,
+redeliveries and contrary keys/heads/clocks. Missing, unprojectable or unverified
+history requires `partial`/null coverage; it must not be silently omitted from a
+complete projection. A positive event alone never proves full coverage.
 
-## Available source and smallest later access path
+A missing original clock can match only when **both event classes** have accepted
+complete lifetime coverage through `witness.observed_at`: at least one submission
+artifact and one edit artifact must cover that exact identity with null `from`
+and `until >= witness.observed_at`. Each artifact observation must be at or before
+witness observation, so a covering artifact necessarily attests that same cutoff.
+This intentionally strict coherent-cutoff requirement may be unavailable in real
+sources; do not widen it using later observation/receipt times. Otherwise retain
+`source_coverage_incomplete`. The reader checks declared coverage; faithfulness to
+the original remains an explicitly accepted operator claim, not independent proof
+from the absence of rows in the witness. No events still means unknown.
 
-The [export models](../../../internal/models/code_review_export.go) retain source
-publication keys, provider review IDs and head/submitted-commit identity.
-Assessment/legacy rows and
+### Witness facts and exact authority tuples
+
+Witness adds `source_profile`, `extractor_revision`, `extractor_code_sha256`,
+`observed_at`, `artifacts`, `events`, `object_observations`, and `bindings`.
+Each artifact has `artifact_id`, `sha256`, `origin_kind`, `observed_at`.
+No original body, review state, decision, label, finding, policy, safeguard count,
+free-text note, URL, credential or exception is allowed in these artifacts.
+
+Each event has `event_id`, `artifact_id`, `provider_repository_id`, `pr_number`,
+`provider_review_id`, `commit_sha`, `publication_key_sha256`, `event_kind`,
+`clock_kind`, `event_time`, and `publication_link_basis`. The exact tuples below
+are exhaustive. A well-formed event using known vocabulary but absent from this
+table contributes per-entry `source_not_authoritative`; it is never a clock match.
+Unknown vocabulary is malformed input (stage 1). Basis/origin mismatch remains
+a whole-operation stage-4 failure, as defined above.
+
+| Basis | Origin | Event kind | Clock kind | Link basis | Clock eligibility |
+| --- | --- | --- | --- | --- | --- |
+| `authenticated_provider_submission` | `provider_submission_event` | `review_submitted` | `provider_submitted_at` | `provider_event_output_marker` | Submission candidate |
+| `authenticated_provider_submission` | `provider_submission_event` | `review_submitted` | `provider_submitted_at` | `publisher_event_exact_publication_key` | Submission candidate |
+| `verified_historical_publication_edit` | `publisher_edit_event` | `review_body_edited` | `provider_edit_event_at` | `provider_event_output_marker` | Conflict evidence only |
+| `verified_historical_publication_edit` | `publisher_edit_event` | `review_body_edited` | `provider_edit_event_at` | `publisher_event_exact_publication_key` | Conflict evidence only |
+
+For submissions, `commit_sha` is the commit retained by that original provider
+submission. For edits it is the original provider review commit, **not** an
+assessment head copied into an edit receipt. An edit cannot establish a new
+submission commit. Every bound `review_body_edited` event contributes
+`edit_basis_not_supported_v1`, even a same-key re-render or same-instant event.
+Thus omitting the original submission cannot turn an edit into a v1 match; lack
+of complete lifetime coverage also blocks a submission-only partial witness.
+
+Hash the exact source publication key's UTF-8 bytes, without trimming/case folding.
+The accepted extractor must prove the key-to-event link from the original event
+marker or an authoritative event-linked publisher record. It cannot copy a wanted
+inventory key onto an object's old `submitted_at`. Existing markers hash trimmed
+keys: a different untrimmed source key remains unmatched. Distinct exact digests
+trigger conservative reuse ambiguity, including whitespace variants; the reason
+is an ambiguity indicator, not a claim that a new publication actually occurred.
+
+Each object observation has `observation_id`, `artifact_id`, immutable repo/PR/
+review IDs, `commit_sha`, and nullable `object_submitted_at`. It has no source key.
+An object clock never supplies or contradicts a source-publication clock.
+
+Bindings contain the original five-field `locator`, `record_sha256`,
+`source_sha256`, `event_ids` and `object_observation_ids`. Require exactly one per
+original observation; never deduplicate by session, PR, head or review ID.
+
+## Deterministic validation and error precedence
+
+Both readers execute the following numbered stages. The **first failing stage**
+wins. A later-stage failure cannot change that code. No values, paths or exception
+text enter errors; use only the three static codes. Independent failures in one
+stage have the same code except stage 2, whose exact pin order is specified.
+
+| Stage | Checks, in order | Failure |
+| --- | --- | --- |
+| 1 | Bounded reads; UTF-8/JSON framing; depth; duplicate keys; exact key/type/grammar/enum sets; all numeric tokens lexical integers (no `1.0`, exponents, bool-as-int, NaN/Infinity); date/calendar/precision syntax; duplicate event/object/artifact IDs within their namespaces; per-file/array bounds; existing strict inventory-v1 validation. | `RECONCILIATION_INPUT_INVALID` |
+| 2a | Compare exact acceptance-file bytes against the trusted expected acceptance SHA. | `RECONCILIATION_SOURCE_UNACCEPTED` |
+| 2b | Compare exact original inventory bytes against the trusted expected inventory SHA. | `RECONCILIATION_INPUT_INVALID` |
+| 3 | Cross-file inventory/catalog/original-catalog pins; acceptance witness SHA; output witness/acceptance pins when verifying output; extractor revision/digest consistency; equal artifact sets/digests; dangling event/object artifact or binding references; artifact observation <= witness observation <= attestation; valid coverage intervals; combined/reference expansion bounds. | `RECONCILIATION_INPUT_INVALID` |
+| 4 | Fixed supported profile/ruleset/dataset and requested mode in all marked inputs; total/injective trusted repository map; in-scope event/object/coverage identities; consistent review-to-PR identity; accepted basis/origin pairing; object-only coverage is null. | `RECONCILIATION_SOURCE_UNACCEPTED` |
+| 5 | Exact original-locator coverage (no extra, omitted or duplicate locators), original source/record fingerprints; complete candidate reference sets; exact canonical recomputed output equality, including frozen strings. | `RECONCILIATION_BINDING_MISMATCH` |
+
+After stage-5 binding checks pass, compute the complete entries below and then
+perform any supplied-output comparison as the last check of stage 5. Entry
+reasons are evidence outcomes, not operation failures.
+
+Malformed hashes or malformed selectors fail stage 1. A well-formed stale trusted
+acceptance pin fails 2a, even if the inventory pin is also stale. A stale witness
+hash fails 3 before an unsupported profile at 4. Mutation fixtures refresh synthetic
+pins when isolating later stages; doing so is test preparation, never historical
+source acceptance. An unavailable output path, existing output file or write/
+size failure returns `RECONCILIATION_INPUT_INVALID` with no partial publication.
+
+Timestamp grammar is exactly the existing
+[`timestamp`](../../../scripts/code_review_export_metadata.py) contract:
+`YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)`, uppercase T/Z, valid calendar,
+no leap seconds, 1-9 fractional digits, and digits after the sixth must all be zero.
+Require an actual timezone offset and normalize to UTC only for instant comparison.
+Reject malformed/high-precision values, never truncate/round. The JSON Schema
+has the full lexical pattern; both readers must also perform calendar/offset
+validation with the existing helper or exactly equivalent semantics. Original
+frozen strings keep their spelling. New clocks use exactly six digits and Z.
+
+## Per-observation computation
+
+1. Derive all candidate events/objects sharing the original mapped provider repo,
+   PR number and review ID. A missing PR number, pull-request UUID or review ID
+   requires empty candidates. A binding must equal these full sets, never a
+   favorable subset. All original observations and every candidate reference stay.
+2. Compare observations of one `source_identity` using **only** the exact fields
+   below, by original JSON value equality (no normalization). Any difference gives
+   `conflicting_original_observations`. These are source-derived evidence; a
+   different opaque source fingerprint conservatively signals changed source data.
+
+```text
+source_kind, source_id, source_sha256, repository_id, pull_request_id, session_id,
+metadata_id, assessment_id, source_assessment_id, previous_assessment_id,
+previous_published_assessment_id, superseded_by_assessment_id,
+superseded_by_session_id, generation, provider_review_id, publication_key,
+head_sha, base_sha, base_ref, submitted_commit_sha, created_at, completed_at,
+superseded_at
+```
+
+Exclude `locator`, `record_sha256`, `publication_time`, its availability/provenance,
+`repository_full_name`, `repository_name_availability`, `pr_number`, `legacy_alias_ids`
+and `stack_availability`. Record hashes, retained provider observations, frozen
+clocks and mirror-derived annotations may legitimately differ across acquisitions.
+They still retain their own exact fingerprints; exclusion never rewrites them.
+This reconciler comparison is a separate overlay. It cannot clear the custody
+partitioner's stricter pre-existing conflicting-observation quarantine, admit a
+record/group, change original metadata equality, or alter the replay protocol.
+If two **non-null** original clocks for one source identity differ by UTC instant,
+add `conflicting_original_clocks`. Null versus known is not itself a conflict;
+a later known clock is never copied to an earlier missing observation.
+
+3. Collect exact non-null key digests across inventory plus witness by mapped
+   provider repo + review ID. More than one digest means `reused_provider_review`.
+   An inventory row missing PR number/UUID still contributes its key to this
+   conservative repo/review ambiguity check, but cannot acquire candidates or a
+   clock. Do not cross repositories. Objects have no key and contribute none.
+4. Check each bound event independently. Union all applicable reasons, even when
+   another check fails. An absent original field gives its missing reason, not a
+   comparison-mismatch reason. Candidate time must be at or after original source
+   creation, at or before **this observation's** acquisition cutoff, and at or
+   before its artifact observation. Cutoff comparison is inclusive. Later retrieval
+   permits explicitly reconstructed evidence, never a widened acquisition cutoff.
+5. An eligible submission has an exact authority tuple, matching key/head,
+   retained submitted commit equal to head if present, all required original
+   fields, and all per-event chronology checks. Distinct eligible submission times
+   give `conflicting_event_times` before global reuse/source/coverage checks.
+   Equal redeliveries corroborate without losing any event reference.
+6. Frozen path: copy original clock unchanged. Always check global source/clocks
+   conflicts and reuse, **even with no bound events**. If events exist, also union
+   all missing-field/event reasons and any valid submission at a different instant
+   (`frozen_clock_conflict`). Do not add `no_authoritative_event` or coverage reasons
+   on this path: absent/partial new evidence does not refute an existing clock.
+   Any resulting reason means `frozen_conflict`; otherwise `preserve_frozen`.
+   Same-instant corroboration preserves only when **all** checks are empty; other-
+   key, edit or invalid evidence still causes conflict. Adding a corroborating event
+   cannot erase an existing reuse conflict. Object observations have no effect.
+7. Missing-clock path: union original missing-field/submitted-commit reasons,
+   global conflicts/reuse, every event reason, and coverage failure (evaluate
+   coverage when original repo/PR/review identity and creation time are available).
+   If no events are bound, add `no_authoritative_event`. A nonempty reason set is
+   `unresolved`; empty reasons require eligible submissions at one instant plus
+   complete lifetime coverage of both event classes, producing `matched_event`.
+
+## Output, reasons and bounds
+
+Output adds `witness_sha256`, `source_acceptance_sha256`, and `entries`. Each entry
+has `locator`, `record_sha256`, `source_sha256`, `original_publication_time`,
+`disposition`, `reconciled_publication_time`, `event_ids`, `object_observation_ids`,
+and sorted unique `reasons`.
+
+| Disposition | Reconciled time | Original time | Reasons |
+| --- | --- | --- | --- |
+| `matched_event` | Canonical eligible submission time | null | empty |
+| `unresolved` | null | null | nonempty |
+| `preserve_frozen` | null | Exact original string | empty |
+| `frozen_conflict` | null | Exact original string | nonempty; whole-group quarantine |
+
+| Reason | Exact trigger |
+| --- | --- |
+| `missing_provider_review_id` | Original positive review ID absent. |
+| `missing_pr_identity` | Original PR number or pull-request UUID absent. |
+| `missing_publication_key` | Original exact source key absent. |
+| `missing_head_sha` | Original assessment-time head absent. |
+| `missing_source_created_at` | Original source creation time absent. |
+| `submitted_head_mismatch` | Non-null submitted commit and head differ. |
+| `no_authoritative_event` | Missing clock and empty event candidate list; objects do not count. |
+| `source_not_authoritative` | Known-vocabulary event tuple is absent from the exhaustive authority table. |
+| `publication_key_mismatch` | Candidate digest differs from an available original key's exact UTF-8 digest. |
+| `event_head_mismatch` | Candidate provider commit differs from an available original head. |
+| `before_source_creation` | Candidate event precedes an available original creation instant. |
+| `after_acquisition_boundary` | Candidate event exceeds this observation's original cutoff. |
+| `event_after_source_observation` | Candidate event exceeds its artifact observation instant. |
+| `edit_basis_not_supported_v1` | Any bound `review_body_edited` event, including same-key edits. |
+| `source_coverage_incomplete` | Missing clock, complete original identity/creation, and either event class lacks complete lifetime coverage through witness cutoff. |
+| `reused_provider_review` | Multiple exact non-null key digests for mapped provider repo/review ID; conservative ambiguity, not proof of actual reuse. |
+| `conflicting_event_times` | Eligible submission candidates disagree on UTC instant. |
+| `conflicting_original_observations` | Same source identity differs in the exact source-comparison field set. |
+| `conflicting_original_clocks` | Same source identity has different non-null original UTC clock instants. |
+| `frozen_clock_conflict` | Eligible submission differs from this original frozen instant. |
+
+Unresolved/frozen-conflict entries must remain in whole-PR/stack quarantine. Do not
+filter them away or infer publication absence. Chronology checks admit no replay
+cohort; parent owns eventual selection and all result normalization.
+
+Limits: 256 MiB per metadata input/output artifact, depth 64, 100,000 original
+observations/bindings, 200,000 combined event/object observations, 4,096 source
+artifacts, 256 repository bindings, 1,000,000 total coverage identity references
+and 1,000,000 total event/object references across bindings. Fail the whole
+operation on overflow, including output expansion; no truncation/record dropping.
+Index by identity before expansion. No DB queries are added or existing acquisition
+row/byte/query limits relaxed. Output is atomic/exclusive, mode 0600 in a private
+directory; never overwrite an output or expose a partially written file.
+
+Entries use the existing locator sort: acquisition ID, page SHA, zero-based record
+index, source identity. ID/reason arrays sort by ASCII, hashes are lowercase hex.
+Generated JSON uses sorted ASCII keys, compact separators, ASCII escaping, no
+floats, trailing LF. Compare exact canonical output bytes; hash input bytes as
+supplied, never reserialize an input to obtain a matching pin.
+
+## Available source and agreement gate
+
+[Export models](../../../internal/models/code_review_export.go) retain source keys,
+provider review IDs and head/submitted-commit identity. Assessment/legacy rows and
 [`SubmitReviewResult`](../../../internal/services/codereview/github_submitter.go)
-do not retain a dedicated provider submission clock. `raw.publication_time` already
-uses the conservative retained-event resolver; `evidence.provider_submitted_at`
-is its alias. There is no alternate frozen clock to uncover by renaming fields.
+do not retain a dedicated submission clock. The frozen `raw.publication_time`
+already uses retained-event resolution; `evidence.provider_submitted_at` aliases it.
+There is no alternate frozen clock to uncover by renaming fields.
 
-The smallest existing **complete-evidence source** is an authenticated retained
-submitted-review event with its original publication marker and timestamp,
-projected by a reviewed machine-only extractor into metadata. The current frozen
-resolver already consumes such retained matches, so extracting the same events
-cannot be assumed to recover additional unavailable clocks.
+An authenticated retained submission event with its original marker is the
+smallest positive event source already available in code. The current resolver
+already consumes such matches. Re-extraction may recover nothing, and such an
+event alone does **not** establish complete source history required by this draft.
+Bare provider object IDs/commit/`submitted_at` are lookup candidates only; existing
+clients also return bodies/state and must not run in agent context as-is. Later
+metadata-only access needs reviewed field allowlists, source coverage and separate
+human authorization. No complete submission+edit history dataset/adapter is known
+to be available. If coverage is absent, preserve unknowns. Outcome-oriented mutable
+human-review `observed_at` may be receipt time and is not a recovery source.
 
-A provider review-object metadata export can provide IDs, commit and submission
-time as lookup candidates, but cannot prove which publication/body edit that
-clock dates. Existing clients also return review body/state and must not be used
-in agent context as-is. A future metadata-only provider query needs its own
-reviewed field allowlist/access scope. Reused-object/edit cases still need an
-actual historical publication-event archive or exact timestamped publisher-event
-ledger. No such proof-complete metadata-only dataset or edit adapter is asserted
-to exist. If it cannot be supplied, retain unknowns rather than relax this proof.
-
-The outcome-oriented human-review `observed_at` projection is unsuitable: it can
-fall back to observation time, is mutable/state-filtered, and lacks exact source
-publication-key/head linkage. It is not a publication-clock recovery source.
-
-## Invented fixtures and agreement gate
-
-The fixture directory is
+Invented fixtures are in
 [`scripts/testdata/publication_reconciliation_v1`](../../../scripts/testdata/publication_reconciliation_v1).
-All identities, clocks, provenance and source fingerprints are invented. The
-fixture acceptance is explicitly synthetic and grants no historical authority.
-It includes matched submission/edit events, a bare object clock, missing identity,
-wrong key/head, invalid lifecycle bounds, conflicting times, reused review IDs,
-a retained frozen clock, and independent acquisition cutoffs. Expected output is
-hand-declared data, not generated by a reconciliation implementation.
-
-Before either reader is implemented, agree on: the operator-attestation trust
-boundary and fixed source profile; conservative v1 reuse rule; frozen-conflict
-quarantine behavior; canonical bytes; and exact fixture/schema vocabulary. The
-parent implementation must retain its original `record_metadata` check. Changes
-to this contract or later acceptance of a real source are separate from protocol
-freeze and holdout access.
+They retain hand-declared expected outputs and concrete negative mutation recipes.
+Grammar/hash/coverage-reference checks are structural validation, **not** tests of
+an implemented reconciliation algorithm. Both readers must independently reproduce
+the expectations after agreement. Source acceptance, protocol freeze, real source
+acquisition, cohort admission and holdout access remain separate gates.
