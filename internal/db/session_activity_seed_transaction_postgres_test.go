@@ -166,8 +166,10 @@ func TestSeedActivityTransactionFullSchemaPostgres(t *testing.T) {
 					retry, err := pool.Begin(ctx)
 					require.NoError(t, err, "begin a fresh outer unit after discarding the successful first attempt")
 					defer func() { _ = retry.Rollback(context.Background()) }()
-					_, _, err = callSeedActivityInTx(ctx, NewSessionActivityPhaseStore(nil), retry, fixture)
+					retryPhase, retryBatch, err := callSeedActivityInTx(ctx, NewSessionActivityPhaseStore(nil), retry, fixture)
 					require.NoError(t, err, "a rolled-back seed remains replayable rather than falsely recorded as applied")
+					require.NotNil(t, retryBatch, "a retried seed must return its own exact inbox attribution, not only a successful error code")
+					requireSeedActivityTransactionPostgresRows(t, ctx, retry, fixture, retryPhase, *retryBatch, seedCount)
 					require.NoError(t, retry.Rollback(ctx), "discard this retry proof without leaving another provider phase")
 				}
 				return

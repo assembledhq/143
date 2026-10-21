@@ -397,6 +397,13 @@ func TestThreadPersistenceCommittedEffects(t *testing.T) {
 				require.NoError(t, json.Unmarshal(logs.Bytes(), &record), "best-effort post-commit failures must remain observable through structured logs")
 				require.Equal(t, "warn", record["level"], "notification failures must warn without rejecting already committed work")
 			}
+			if outcome == "foreign organization" {
+				var record map[string]any
+				require.NoError(t, json.Unmarshal(logs.Bytes(), &record), "foreign effects must be rejected explicitly rather than reaching an unexpected reload whose error is swallowed")
+				require.Equal(t, map[string]any{"level": "error", "org_id": orgID.String(), "effects_org_id": fixture.orgID.String(), "message": "refusing to publish thread persistence effects for another organization"}, record, "reject the exact foreign effect identity before any database or stream access")
+			} else if outcome == "zero effects" {
+				require.Empty(t, logs.String(), "zero effects must return without even an unexpected reload warning")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "post-commit publication must perform only the expected tenant-scoped current-state reload")
 		})
 	}
