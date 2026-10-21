@@ -240,8 +240,10 @@ The original inventory still uses its unchanged v1 validator/helper, and copied
 `original_publication_time` is an exception to the new lexical subset: accept its
 existing validated v1 spelling and validate it with the v1 helper at stage 1.
 Its instant comparisons use the v1 helper; byte-for-byte equality with the original
-field is checked at stage 5. Never rewrite/reject an otherwise valid original
-merely because the new-fact grammar is stricter.
+field is checked at stage 5. For portability, v1 offsets normalize as
+`sign × (hours × 60 + minutes)` minutes; their magnitude must be below 24 hours,
+and the resulting UTC instant must remain in years 0001-9999. Never rewrite/reject
+an otherwise valid original merely because the new-fact grammar is stricter.
 
 ## Per-observation computation
 
