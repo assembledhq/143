@@ -238,6 +238,27 @@ func requireSessionPersistencePostgresValues(t *testing.T, ctx context.Context, 
 	}
 }
 
+const sessionPersistenceDatabaseCleanupTimeout = time.Minute
+
+// Cleanup must mark failure without FailNow: a fatal assertion during a
+// parent's cleanup can skip Go's named test report after parallel subtests.
+type sessionPersistenceCleanupReporter interface {
+	Helper()
+	Errorf(string, ...any)
+}
+
+func dropSessionPersistencePostgresDatabase(t sessionPersistenceCleanupReporter, admin DBTX, databaseName string) {
+	t.Helper()
+	// Full-schema database removal shares the server with other parallel
+	// fixtures. Give it its own bounded budget, independent of test work, while
+	// retaining ordinary DROP so an owned-connection leak remains a failure.
+	ctx, cancel := context.WithTimeout(context.Background(), sessionPersistenceDatabaseCleanupTimeout)
+	defer cancel()
+	if _, err := admin.Exec(ctx, "DROP DATABASE "+pgx.Identifier{databaseName}.Sanitize()); err != nil {
+		t.Errorf("drop only the generated fixture after owned connections close, without forced termination: %v", err)
+	}
+}
+
 func newSessionPersistencePostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	raw := os.Getenv("TEST_DATABASE_URL")
@@ -251,7 +272,9 @@ func newSessionPersistencePostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		require.NoError(t, admin.Close(ctx), "close this fixture's administrator connection")
+		if err := admin.Close(ctx); err != nil {
+			t.Errorf("close this fixture's administrator connection: %v", err)
+		}
 	})
 	var serverVersion int
 	require.NoError(t, admin.QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&serverVersion), "read the actual server version before creating a fixture")
@@ -261,10 +284,7 @@ func newSessionPersistencePostgresPool(t *testing.T) *pgxpool.Pool {
 	_, err = admin.Exec(ctx, "CREATE DATABASE "+identifier)
 	require.NoError(t, err, "create only this test's independently generated database")
 	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, err := admin.Exec(ctx, "DROP DATABASE "+identifier)
-		require.NoError(t, err, "drop only the generated fixture after owned connections close, without forced termination")
+		dropSessionPersistencePostgresDatabase(t, admin, name)
 	})
 	target, err := url.Parse(raw)
 	require.True(t, err == nil, "parse the fixture URI without publishing its connection details")
@@ -281,8 +301,12 @@ func newSessionPersistencePostgresPool(t *testing.T) *pgxpool.Pool {
 	require.True(t, err == nil, "open the real migration driver only on the generated fixture")
 	t.Cleanup(func() {
 		sourceErr, databaseErr := migration.Close()
-		require.NoError(t, sourceErr, "close the complete migration source before fixture cleanup")
-		require.NoError(t, databaseErr, "close the migration connection before fixture cleanup")
+		if sourceErr != nil {
+			t.Errorf("close the complete migration source before fixture cleanup: %v", sourceErr)
+		}
+		if databaseErr != nil {
+			t.Errorf("close the migration connection before fixture cleanup: %v", databaseErr)
+		}
 	})
 	require.NoError(t, migration.Up(), "apply the entire real production schema before exercising persistence composition")
 	pool, err := pgxpool.New(ctx, isolated)
