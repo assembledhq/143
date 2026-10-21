@@ -126,6 +126,14 @@ writer-version marker. This does not label `demo-seed`'s separate embedded
 migrator, `backfill-usage`, `wait-postgres` or manual SQL. Schema behavior,
 writer authority and every deployment/activation gate remain unchanged.
 
+Demo-seed check mode now removes native `dbname`/`database` query overrides when
+selecting its generated temporary database, for both pgx and lib/pq. Malformed
+query parameters fail before it opens a connection. Unsupported case variants
+retain the drivers' rejection behavior. A full-schema check against a disposable
+source database verifies that its original rows and catalog remain unchanged and
+that the temporary sibling is removed. This target-isolation repair adds no
+writer attribution, observer or lifecycle authority.
+
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
 current tree rather than treating line numbers as permanent identities.
@@ -1525,6 +1533,8 @@ revision; it must not reinterpret new durable records or trigger replay.
   full-schema census aggregation, command wiring and packaged build metadata.
 - [x] Validate migration-only operator attribution through the actual command
   and PostgreSQL driver, including target/options, up/down and packaging behavior.
+- [x] Isolate demo-seed check-mode writes from database-name query overrides,
+  with both native-driver target checks and a full-schema source-preservation test.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence

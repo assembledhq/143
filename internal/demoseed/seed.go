@@ -92,7 +92,18 @@ func ReplaceDatabaseName(databaseURL, dbName string) (string, error) {
 	if dbName == "" {
 		return "", fmt.Errorf("database name is required")
 	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return "", fmt.Errorf("parse database URL query: %w", err)
+	}
+	// Both pgx and the migration driver's lib/pq parser must select the
+	// generated sibling, not a database override retained from the source URL.
+	// Keep unsupported case variants for the drivers' normal rejection.
+	query.Del("dbname")
+	query.Del("database")
 	parsed.Path = "/" + dbName
+	parsed.RawPath = ""
+	parsed.RawQuery = query.Encode()
 	return parsed.String(), nil
 }
 
