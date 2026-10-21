@@ -541,7 +541,7 @@ def publish(output, payload):
     require(path.name not in ("", ".", ".."))
     temporary = ".reconciliation-" + uuid.uuid4().hex
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    created = False
+    created, linked, cleanup_pending = False, False, False
     try:
         info = os.fstat(directory)
         require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0)
@@ -552,12 +552,21 @@ def publish(output, payload):
             stream.flush()
             os.fsync(stream.fileno())
         os.link(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+        linked = True
     finally:
         try:
             if created:
-                os.unlink(temporary, dir_fd=directory)
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except OSError:
+                    if not linked:
+                        raise
+                    cleanup_pending = True
+            if linked:
+                os.fsync(directory)
         finally:
             os.close(directory)
+    return cleanup_pending
 
 
 class Parser(argparse.ArgumentParser):
@@ -566,7 +575,7 @@ class Parser(argparse.ArgumentParser):
 
 
 def main(argv=None):
-    parser = Parser(description=__doc__)
+    parser = Parser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--mode", required=True)
     for name in ("inventory", "witness", "source-acceptance", "output"):
         parser.add_argument("--" + name, type=Path, required=True)
@@ -581,11 +590,12 @@ def main(argv=None):
         payload = reconcile(inventory_raw, witness_raw, acceptance_raw, inventory_sha256=args.inventory_sha256,
                             source_acceptance_sha256=args.source_acceptance_sha256, mode=args.mode, output_raw=output_raw)
         with stage(1):
-            publish(args.output, payload)
+            cleanup_pending = publish(args.output, payload)
     except ReconciliationError as error:
         print(error.code, file=sys.stderr)
         return 1
-    print("reconciliation published; no source acquisition or replay action")
+    print("reconciliation published; temporary cleanup pending" if cleanup_pending else
+          "reconciliation published; no source acquisition or replay action")
     return 0
 
 

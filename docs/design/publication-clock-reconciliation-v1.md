@@ -203,7 +203,7 @@ stage have the same code except stage 2, whose exact pin order is specified.
 
 | Stage | Checks, in order | Failure |
 | --- | --- | --- |
-| 1 | Bounded reads; UTF-8/JSON framing; depth; duplicate keys; exact key/type/grammar/enum sets; all numeric tokens lexical integers (no `1.0`, exponents, bool-as-int, NaN/Infinity); date/calendar/precision syntax; duplicate event/object/artifact IDs within their namespaces; per-file/array bounds; existing strict inventory-v1 validation. | `RECONCILIATION_INPUT_INVALID` |
+| 1 | Bounded reads; strict UTF-8/Unicode-scalar JSON framing (including keys/escaped text); depth; duplicate keys; exact key/type/grammar/enum sets; all numeric tokens lexical integers (no `1.0`, exponents, bool-as-int, NaN/Infinity); date/calendar/precision syntax; duplicate event/object/artifact IDs within their namespaces; per-file/array bounds; existing strict inventory-v1 validation. | `RECONCILIATION_INPUT_INVALID` |
 | 2a | Compare exact acceptance-file bytes against the trusted expected acceptance SHA. | `RECONCILIATION_SOURCE_UNACCEPTED` |
 | 2b | Compare exact original inventory bytes against the trusted expected inventory SHA. | `RECONCILIATION_INPUT_INVALID` |
 | 3 | Cross-file inventory/catalog/original-catalog pins; acceptance witness SHA; output witness/acceptance pins when verifying output; extractor revision/digest consistency; equal artifact sets/digests; dangling event/object artifact or binding references; artifact observation <= witness observation <= attestation; valid coverage intervals; contradictory known PR numbers within the original inventory for one repo UUID/review ID; combined/reference expansion bounds. | `RECONCILIATION_INPUT_INVALID` |
@@ -213,6 +213,12 @@ stage have the same code except stage 2, whose exact pin order is specified.
 After stage-5 binding checks pass, compute the complete entries below and then
 perform any supplied-output comparison as the last check of stage 5. Entry
 reasons are evidence outcomes, not operation failures.
+
+All inputs to these new reconciliation readers, including the original inventory,
+must decode to Unicode scalar values. Escaped unpaired high or low surrogates in
+keys or values fail stage 1, before pins; valid surrogate pairs remain valid text.
+This reconciliation boundary does not alter the existing v1 inventory helper or
+materializer. Exact UTF-8 key hashing cannot accept a lone surrogate.
 
 Malformed hashes or malformed selectors fail stage 1. A well-formed stale trusted
 acceptance pin fails 2a, even if the inventory pin is also stale. A stale witness

@@ -9,7 +9,10 @@ standard library are sufficient.
 The [agreed contract](../docs/design/publication-clock-reconciliation-v1.md) and
 [JSON Schema](../docs/design/future/publication-reconciliation-v1.schema.json)
 define the complete inputs, source authority, five validation stages and output.
-All original observations remain; distinct acquisitions retain their own cutoffs.
+All inputs, including inventory, require strict UTF-8 and Unicode-scalar keys and
+values; escaped lone surrogates fail stage 1 and valid pairs survive. The original
+v1 helper and materializer are unchanged. All original observations remain;
+distinct acquisitions retain their own cutoffs.
 No absence of evidence establishes an unpublished review.
 
 For the **invented fixture only**, create a private output directory and run:
@@ -44,9 +47,22 @@ The output directory must exist, be owned by the invoking operator, and grant no
 group/other access. Output is mode 0600 and becomes visible only after completion.
 Existing files, directories and symlinks are never overwritten. A retry requires
 a fresh output path; if an output exists, verify its exact bytes separately. Input
-files must be regular, singly linked files with no symlink leaf or parent.
+files must be regular and singly linked. The leaf and immediate parent directory
+must not be symlinks; ancestor components are resolved by the OS. This also applies
+to the output parent. On macOS a symlink such as `/tmp` cannot itself be the output
+parent; use a private subdirectory created by `mktemp -d`.
 All metadata input/output sizes, reference expansion and array bounds remain as
 specified in the contract; an overflow fails the operation without truncation.
+
+The final directory entry is synced after linking and temporary-file cleanup.
+If cleanup fails after the complete output has been linked, exit 0 instead prints
+`reconciliation published; temporary cleanup pending`. The complete output is
+retained; the operator must remove the leftover private temporary link before
+using readers that require singly linked input. A directory-sync failure returns
+an input/IO error; a complete final file may already exist, so verify it before
+retrying at a fresh path. Abrupt termination can leave a private hidden
+`.reconciliation-*` file. There is no automatic sweep that could delete another
+active writer's file. Final output paths never expose a partially written file.
 
 Exit 0 prints a static publication confirmation. Exit 1 prints exactly one static
 code to stderr, without input values, paths or parser exceptions:
@@ -60,7 +76,8 @@ code to stderr, without input values, paths or parser exceptions:
 The importable `reconcile(inventory_raw, witness_raw, acceptance_raw, *, mode,
 inventory_sha256, source_acceptance_sha256, output_raw=None)` returns canonical
 sidecar bytes or `ReconciliationError` with `code` and numeric `stage` attributes.
-The CLI exposes only the static code. It hashes exact input bytes, including LF;
+The CLI accepts only the exact documented flag names and exposes only the static
+error code. It hashes exact input bytes, including LF;
 input order/spacing may change integrity pins but cannot choose different events.
 The optional output must itself be canonical with a trailing LF.
 

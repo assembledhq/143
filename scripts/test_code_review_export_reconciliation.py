@@ -80,6 +80,15 @@ def mutate(values, operation):
         parent[key] = value
 
 
+def cli_arguments(output):
+    manifest = json.loads((FIXTURES / "fixture-manifest.json").read_bytes())
+    return ["--mode", "synthetic", "--inventory", str(FIXTURES / NAMES["inventory"]),
+            "--witness", str(FIXTURES / NAMES["witness"]), "--source-acceptance", str(FIXTURES / NAMES["acceptance"]),
+            "--inventory-sha256", manifest["artifacts"][NAMES["inventory"]],
+            "--source-acceptance-sha256", manifest["expected_source_acceptance_sha256"],
+            "--output", str(output), "--verify-output", str(FIXTURES / NAMES["output"])]
+
+
 class ReconciliationTest(unittest.TestCase):
     def test_frozen_expected_entries_and_exact_canonical_output(self):
         raw = {key: (FIXTURES / name).read_bytes() for key, name in NAMES.items()}
@@ -177,7 +186,7 @@ class ReconciliationTest(unittest.TestCase):
                                 reconciled_publication_time="2026-07-15T01:00:00.000000Z" if not reasons else None)
                 self.assertEqual(expected, actual, "one observation's earlier cutoff must not borrow a later acquisition boundary")
 
-    def test_bound_expansion_and_output_size_fail_whole_operation(self):
+    def test_aggregate_bounds_and_output_size_fail_whole_operation(self):
         raw = {key: (FIXTURES / name).read_bytes() for key, name in NAMES.items()}
         tests = [("MAX_REFERENCES", 1, 3), ("MAX_FACTS", 1, 3)]
         for name, bound, expected_stage in tests:
@@ -298,15 +307,186 @@ class ReconciliationTest(unittest.TestCase):
                     run(repin(values), source_acceptance_sha256="0" * 64)
                 self.assertEqual((producer.INPUT_INVALID, 1), (error.exception.code, error.exception.stage), "grammar must win over stale acceptance without leaking results")
 
+    def test_canonical_time_from_offsets_and_fractional_events(self):
+        tests = [
+            ("2026-07-15T03:00:00+02:00", "2026-07-15T01:00:00.000000Z"),
+            ("2026-07-15T01:00:00.5Z", "2026-07-15T01:00:00.500000Z"),
+            ("2026-07-15T01:00:00.123456000Z", "2026-07-15T01:00:00.123456Z"),
+        ]
+        for event_time, expected_time in tests:
+            with self.subTest(event_time=event_time):
+                values = fixtures()
+                values["witness"]["events"][0]["event_time"] = event_time
+                values["output"]["entries"][0]["reconciled_publication_time"] = expected_time
+                raw = repin(values)
+                self.assertEqual(raw["output"], run(raw), "canonical recovered times must normalize instants without rounding")
+
+    def test_supplied_output_metadata_uses_earlier_validation_stages(self):
+        tests = [
+            ("witness_sha256", "0" * 64, producer.INPUT_INVALID, 3),
+            ("source_acceptance_sha256", "0" * 64, producer.INPUT_INVALID, 3),
+            ("dataset_kind", "historical", producer.SOURCE_UNACCEPTED, 4),
+            ("ruleset", "unsupported-rules/v1", producer.SOURCE_UNACCEPTED, 4),
+            ("decision", "SYNTHETIC_FORBIDDEN_RESULT", producer.INPUT_INVALID, 1),
+        ]
+        for field, value, code, expected_stage in tests:
+            with self.subTest(field=field):
+                raw = repin(fixtures())
+                output = json.loads(raw["output"])
+                output[field] = value
+                raw["output"] = encode(output)
+                with self.assertRaises(producer.ReconciliationError) as error:
+                    run(raw)
+                self.assertEqual((code, expected_stage), (error.exception.code, error.exception.stage),
+                                 "a supplied sidecar's structural trust checks precede its semantic byte comparison")
+
+    def test_submission_on_object_artifact_cannot_recover_a_clock(self):
+        values = fixtures()
+        object_artifact = next(a["artifact_id"] for a in values["acceptance"]["artifacts"] if a["basis"] == "provider_object_metadata_only")
+        values["witness"]["events"][0]["artifact_id"] = object_artifact
+        values["output"]["entries"][0].update(disposition="unresolved", reconciled_publication_time=None,
+                                                reasons=["source_not_authoritative"])
+        values["output"]["entries"][40]["reasons"] = ["after_acquisition_boundary", "source_not_authoritative"]
+        raw = repin(values)
+        self.assertEqual(raw["output"], run(raw), "object-only authority fails on both the current and earlier acquisition observations")
+
+    def test_equivalent_offset_coverage_cutoff_preserves_complete_lifetime(self):
+        values = fixtures()
+        values["acceptance"]["artifacts"][0]["coverage"]["until"] = "2026-10-21T14:00:00+02:00"
+        raw = repin(values)
+        self.assertEqual(raw["output"], run(raw), "coverage cutoff equality must compare UTC instants, not timestamp spellings")
+
+    def test_cli_requires_exact_flag_names(self):
+        tests = [("--source-acceptance-sha256", "--source-acceptance-sha"),
+                 ("--inventory-sha256", "--inventory-sha"), ("--verify-output", "--verify")]
+        for full, prefix in tests:
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output.json"
+                args = [prefix if value == full else value for value in cli_arguments(output)]
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    result = producer.main(args)
+                self.assertEqual((1, "", "RECONCILIATION_INPUT_INVALID\n"), (result, stdout.getvalue(), stderr.getvalue()),
+                                 "abbreviated trust or verification flags must not silently enable an invocation")
+                self.assertEqual([], list(Path(directory).iterdir()), "rejected syntax cannot publish output")
+
+    def test_publication_syncs_the_final_directory_after_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.json"
+            real_sync, calls = os.fsync, []
+            def sync(fd):
+                kind = "directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+                calls.append(kind)
+                if kind == "directory":
+                    self.assertEqual([output], list(Path(directory).iterdir()), "directory sync must persist final link creation and temporary unlink")
+                return real_sync(fd)
+            with patch.object(producer.os, "fsync", side_effect=sync):
+                self.assertFalse(producer.publish(output, b"invented"), "normal publication needs no cleanup warning")
+            self.assertEqual(["file", "directory"], calls, "both payload and final directory entry must be synced")
+
+    def test_cli_reports_success_when_only_post_link_cleanup_is_pending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.json"
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch.object(producer.os, "unlink", side_effect=OSError("SYNTHETIC_PRIVATE_ERROR")):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    result = producer.main(cli_arguments(output))
+            self.assertEqual((0, "reconciliation published; temporary cleanup pending\n", ""),
+                             (result, stdout.getvalue(), stderr.getvalue()), "a complete published output must not be reported as an unpublished failure")
+            self.assertEqual((FIXTURES / NAMES["output"]).read_bytes(), output.read_bytes(), "the warned output must still contain all exact canonical bytes")
+            temporary = [p for p in Path(directory).iterdir() if p.name.startswith(".reconciliation-")]
+            self.assertEqual(1, len(temporary), "only this writer's private temporary link may await cleanup")
+            self.assertEqual(0o600, stat.S_IMODE(temporary[0].stat().st_mode), "cleanup-pending data must remain private")
+            temporary[0].unlink()
+            self.assertEqual(1, output.stat().st_nlink, "explicit synthetic cleanup restores a singly linked final output")
+
+    def test_abrupt_writer_exit_leaves_only_a_private_temporary_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.json"
+            code = ("import os,sys;sys.path.insert(0,sys.argv[1]);import code_review_export_reconciliation as p;"
+                    "p.os.link=lambda *a,**k:os._exit(75);p.publish(sys.argv[2],b'invented')")
+            result = subprocess.run([sys.executable, "-B", "-c", code, str(SCRIPT.parent), str(output)], capture_output=True, check=False)
+            self.assertEqual((75, b"", b""), (result.returncode, result.stdout, result.stderr), "synthetic abrupt termination must happen before final publication")
+            temporary = list(Path(directory).iterdir())
+            self.assertFalse(output.exists(), "abrupt termination cannot expose an incomplete final output")
+            self.assertEqual(1, len(temporary), "uncatchable exits leave a documented private temporary file")
+            self.assertTrue(temporary[0].name.startswith(".reconciliation-"), "temporary file must stay in the reserved private namespace")
+            self.assertEqual(0o600, stat.S_IMODE(temporary[0].stat().st_mode), "an abandoned temporary payload must remain private")
+
+    def test_unpaired_surrogates_in_keys_and_values_fail_before_pins(self):
+        for surrogate in ("\ud800", "\udfff"):
+            for artifact in NAMES:
+                for place in ("key", "value"):
+                    with self.subTest(surrogate=ord(surrogate), artifact=artifact, place=place):
+                        values = fixtures()
+                        if place == "key":
+                            values[artifact][surrogate] = "invented"
+                        elif artifact == "inventory":
+                            values[artifact]["observations"][0]["publication_key"] = surrogate
+                        elif artifact == "witness":
+                            values[artifact]["artifacts"][0]["artifact_id"] = surrogate
+                        elif artifact == "acceptance":
+                            values[artifact]["operator_attestation"]["attestor_id"] = surrogate
+                        else:
+                            values[artifact]["entries"][0]["event_ids"] = [surrogate]
+                        with self.assertRaises(producer.ReconciliationError) as error:
+                            run(repin(values), source_acceptance_sha256="0" * 64)
+                        self.assertEqual((producer.INPUT_INVALID, 1), (error.exception.code, error.exception.stage),
+                                         "unpaired high or low surrogates cannot reach source acceptance or UTF-8 hashing")
+
+    def test_valid_paired_unicode_survives_and_hashes_as_exact_utf8(self):
+        values = fixtures()
+        key = "invented-\U0001f600-publication"
+        values["inventory"]["observations"][24]["publication_key"] = key
+        for event in values["witness"]["events"]:
+            if event["event_id"] in ("event-21", "event-22"):
+                event["publication_key_sha256"] = sha(key.encode("utf-8"))
+        raw = repin(values)
+        self.assertIn(b"\\ud83d\\ude00", raw["inventory"], "the test must exercise an escaped surrogate pair")
+        self.assertEqual(raw["output"], run(raw), "valid paired text must retain exact UTF-8 key matching and publication evidence")
+        with producer.stage(1):
+            decoded = producer.load(encode({key: key}))
+        self.assertEqual({key: key}, decoded, "framing must preserve valid paired characters in keys as well as values")
+
+    def test_per_array_stage_one_caps_precede_candidate_expansion(self):
+        tests = [("bindings", 100001), ("events", 200001), ("object_observations", 200001), ("artifacts", 4097)]
+        for field, count in tests:
+            with self.subTest(field=field):
+                witness = fixtures()["witness"]
+                witness[field] = [witness[field][0]] * count
+                with self.assertRaises(producer.ReconciliationError) as error:
+                    with producer.stage(1):
+                        producer.validate_witness(witness)
+                self.assertEqual((producer.INPUT_INVALID, 1), (error.exception.code, error.exception.stage),
+                                 "each array has its contract cap independently of stage-3 aggregate limits")
+        acceptance = fixtures()["acceptance"]
+        acceptance["repository_bindings"] *= 257
+        with self.assertRaises(producer.ReconciliationError) as error:
+            with producer.stage(1):
+                producer.validate_acceptance(acceptance)
+        self.assertEqual((producer.INPUT_INVALID, 1), (error.exception.code, error.exception.stage), "repository-map array cap is a grammar limit")
+
+    def test_directory_sync_failure_reports_io_error_and_preserves_complete_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output.json"
+            real_sync = os.fsync
+            def sync(fd):
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("SYNTHETIC_PRIVATE_ERROR")
+                return real_sync(fd)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with patch.object(producer.os, "fsync", side_effect=sync):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    result = producer.main(cli_arguments(output))
+            self.assertEqual((1, "", "RECONCILIATION_INPUT_INVALID\n"), (result, stdout.getvalue(), stderr.getvalue()),
+                             "unconfirmed directory durability must remain an IO failure with a static code")
+            self.assertEqual((FIXTURES / NAMES["output"]).read_bytes(), output.read_bytes(), "post-link IO failure may leave only a complete final payload")
+            self.assertEqual([output], list(Path(directory).iterdir()), "a directory-sync error cannot leave a partial published payload")
+
     def test_cli_private_atomic_exclusive_publication(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "sidecar.json"
-            manifest = json.loads((FIXTURES / "fixture-manifest.json").read_bytes())
-            command = [sys.executable, "-B", str(SCRIPT), "--mode", "synthetic",
-                       "--inventory", str(FIXTURES / NAMES["inventory"]), "--witness", str(FIXTURES / NAMES["witness"]),
-                       "--source-acceptance", str(FIXTURES / NAMES["acceptance"]), "--inventory-sha256", manifest["artifacts"][NAMES["inventory"]],
-                       "--source-acceptance-sha256", manifest["expected_source_acceptance_sha256"], "--output", str(output),
-                       "--verify-output", str(FIXTURES / NAMES["output"])]
+            command = [sys.executable, "-B", str(SCRIPT), *cli_arguments(output)]
             result = subprocess.run(command, capture_output=True, check=False)
             self.assertEqual((0, b""), (result.returncode, result.stderr), "synthetic CLI must produce one complete sidecar")
             self.assertEqual((FIXTURES / NAMES["output"]).read_bytes(), output.read_bytes(), "CLI output must equal independent expected bytes")
