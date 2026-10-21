@@ -2802,12 +2802,12 @@
     },
     {
       "id": "internal/db/session_activity_seed.go:SessionActivityPhaseStore.StartSeedPhase",
-      "source_sha256": "6106bc4d6a4cb3a6c73e1bd605a6a7ffe2a71600fe4672b10daaae7a78c7f5a8",
-      "operation": "atomically admit exact provider seed and activity phase",
+      "source_sha256": "f1076135c2455c21095e680cc1937f76b1ac3480bf86e83f7215f6640e60b5e3",
+      "operation": "legacy seed/ack and activity-phase transaction wrapper",
       "owner": "SessionActivityPhaseStore in internal/db",
       "predicate": "Exact scoped user-message IDs; thread/runtime token and unexpired lease; legacy primary-tab scope; recover only proven never-started old batches.",
-      "lock": "Own transaction: thread -> runtime -> historical batches -> entries/phase; ordering must join compatibility graph.",
-      "stale_result": "Conflict/missing proof rolls back seed/watermark/phase. Existing runtime lease is not an end/admission-generation authorization.",
+      "lock": "Unchanged pre-Begin validation/time normalization, owned Begin/deferred rollback/Commit around StartSeedPhaseInTx. Legacy thread/runtime/historical-batch/entry/phase order remains inside the seam.",
+      "stale_result": "Any persistence or commit error returns zero phase and nil batch; owned unit rolls back. Current lease/message/range checks remain legacy proofs, not shared allocation/admission/end authority.",
       "classification": "fenced-specialist",
       "migration": "0a: retain existing exact runtime/lease/message/task-set and delivered-uncertainty predicates; compose shared admission/end epochs and exact input binding in caller pgx.Tx. Failed/foreign proof aborts; no provider start/seed/delivery/ack or new-input job rebinding.",
       "canonical_target": "ClaimSeedInTx",
@@ -2816,11 +2816,32 @@
       "prerequisite_0a": "0a: retain existing exact runtime/lease/message/task-set and delivered-uncertainty predicates; compose shared admission/end epochs and exact input binding in caller pgx.Tx. Failed/foreign proof aborts; no provider start/seed/delivery/ack or new-input job rebinding.",
       "evidence": [
         "internal/db/session_activity_seed.go:18",
-        "Discovered: boundary-definition",
-        "Lock/transaction syntax: FOR UPDATE",
-        "Lock/transaction syntax: FOR UPDATE OF b",
-        "Lock/transaction syntax: s.db.Begin",
-        "Lock/transaction syntax: tx.Commit"
+        "Delegates one unchanged seed/ack/phase/watermark sequence to explicit StartSeedPhaseInTx",
+        "Original begin and commit error wrappers and pre-Begin validation retained",
+        "internal/db/session_activity_seed_transaction_test.go",
+        "internal/db/session_activity_seed_transaction_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_activity_seed.go:SessionActivityPhaseStore.StartSeedPhaseInTx",
+      "source_sha256": "d3100203e5352d817d4a03eca047265ee3ce696ec9ba4cf9679ea34e75a98904",
+      "operation": "caller-owned legacy provider seed/ack and activity-phase persistence",
+      "owner": "SessionActivityPhaseStore persistence and existing lease/range checks; caller owns settlement and canonical authority",
+      "predicate": "Exact scoped user-message IDs; thread/runtime token and unexpired lease; legacy primary-tab scope; recover only proven never-started old batches.",
+      "lock": "Concrete caller pgx.Tx only. Unchanged thread then runtime then ordered historical batches and entries/phase, including transitive startActivityPhaseTx; no Begin/savepoint, Commit/Rollback, retry, pool fallback or publication.",
+      "stale_result": "Nil/typed-nil transaction or invalid input returns no records before access; scope/lease/range/phase failures return zero phase and nil batch and require whole caller rollback, including earlier messages/ack writes. Successful models are staged until outer commit and are not provider-launch or shared-generation authority.",
+      "classification": "fenced-specialist",
+      "migration": "0a composable seed persistence prerequisite; existing wrapper is the concrete consumer. Preserve exact legacy message/range/lease/uncertainty predicates while canonical ClaimSeedInTx adds immutable allocation and shared admission/end/input binding under compatible locks.",
+      "canonical_target": "ClaimSeedInTx",
+      "authority": "RuntimeAuthority: immutable allocation receipt plus CURRENT org/session/lane admission and end epochs, job/attempt lock token, runtime ID and unexpired lease; a reclaimed old lease is not current authority.",
+      "fence_outcome": "Strict typed result/error: authorization rejection, stale epoch or mismatched receipt rolls back the entire operation. No terminal stale-settlement carve-out applies.",
+      "prerequisite_0a": "Compose exact immutable allocation/job/input-dispatch binding and current parent/lane/end epochs before claiming provider seed or acknowledgment. Keep no stale-settlement carve-out, compatible lock order and outer-only settlement; new helper alone establishes no floor.",
+      "evidence": [
+        "internal/db/session_activity_seed.go:51",
+        "All retained seed SQL plus transitive startActivityPhaseTx uses explicit caller pgx.Tx",
+        "Legacy wrapper owns settlement and retains returned phase/batch shape",
+        "internal/db/session_activity_seed_transaction_test.go",
+        "internal/db/session_activity_seed_transaction_postgres_test.go"
       ]
     },
     {

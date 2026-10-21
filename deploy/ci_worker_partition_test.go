@@ -121,6 +121,7 @@ else:
 			env := []string{
 				"PATH=" + bin + ":/usr/bin:/bin",
 				"HOME=" + directory,
+				"RUNNER_TEMP=" + t.TempDir(),
 				"GITHUB_EVENT_NAME=" + tt.event,
 				"MOCK_GO_LOG=" + logPath,
 				"PYTHONDONTWRITEBYTECODE=1",
@@ -170,7 +171,11 @@ else:
 			otherArgs = append(otherArgs, tt.race...)
 			otherArgs = append(otherArgs, "-timeout="+tt.otherTimeout)
 			boundedArgs := func(pkg, profile string) []string {
-				args := []string{"test", pkg, "-coverpkg=./internal/...", "-coverprofile=" + profile, "-covermode=" + tt.mode}
+				args := []string{"test"}
+				if pkg == "./internal/db" {
+					args = append(args, "-json")
+				}
+				args = append(args, pkg, "-coverpkg=./internal/...", "-coverprofile="+profile, "-covermode="+tt.mode)
 				args = append(args, tt.race...)
 				return append(args, "-timeout="+tt.boundedTimeout)
 			}
