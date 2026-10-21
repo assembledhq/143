@@ -18,6 +18,7 @@ import (
 type recoveryTransactionRecorder struct {
 	TxStarter
 	begins         atomic.Int64
+	beforeBegin    func(context.Context) error
 	sessionLocked  chan struct{}
 	precheckSQL    string
 	precheckArgs   []any
@@ -32,6 +33,11 @@ func (s *recoveryTransactionRecorder) QueryRow(ctx context.Context, sql string, 
 
 func (s *recoveryTransactionRecorder) Begin(ctx context.Context) (pgx.Tx, error) {
 	s.begins.Add(1)
+	if s.beforeBegin != nil {
+		if err := s.beforeBegin(ctx); err != nil {
+			return nil, err
+		}
+	}
 	tx, err := s.TxStarter.Begin(ctx)
 	if err != nil {
 		return tx, err
@@ -260,26 +266,29 @@ func TestIncompleteReviewWorkspaceRecoveryRenewalRacePostgres(t *testing.T) {
 				_, err = tx.Exec(ctx, `UPDATE `+tt.table+` SET lease_expires_at=now()+interval '5 minutes' WHERE id=$1`, id)
 			}
 			require.NoError(t, err, "live owner renewal should remain uncommitted during the race")
-			done := make(chan struct{})
-			var recovered bool
-			var recoveryErr error
-			go func() {
-				recovered, recoveryErr = NewSessionStore(f.pool).RecoverIncompleteCodeReviewWorkspace(ctx, f.org, f.params)
-				close(done)
-			}()
-			select {
-			case <-done:
-				t.Fatal("recovery must serialize behind the owner's lease update")
-			case <-time.After(40 * time.Millisecond):
-			}
-			require.NoError(t, tx.Commit(ctx), "owner renewal should win the row lock race")
-			select {
-			case <-done:
-			case <-time.After(3 * time.Second):
-				t.Fatal("recovery should finish after ownership commits")
-			}
+
+			const stateSQL = `SELECT jsonb_build_object(
+ 'session',(SELECT to_jsonb(s) FROM sessions s WHERE s.org_id=$1 AND s.id=$2),
+ 'jobs',(SELECT jsonb_agg(to_jsonb(j) ORDER BY j.id) FROM jobs j WHERE j.org_id=$1),
+ 'executors',(SELECT jsonb_agg(to_jsonb(e) ORDER BY e.id) FROM session_executors e WHERE e.org_id=$1),
+ 'runtimes',(SELECT jsonb_agg(to_jsonb(r) ORDER BY r.id) FROM thread_runtimes r WHERE r.org_id=$1),
+ 'holders',(SELECT jsonb_agg(to_jsonb(h) ORDER BY h.id) FROM session_sandbox_holders h WHERE h.org_id=$1))`
+			var expectedState string
+			require.NoError(t, tx.QueryRow(ctx, stateSQL, f.org, f.session).Scan(&expectedState), "capture workspace and ownership state including the owner's uncommitted renewal")
+
+			// Begin is reached only after the real precheck observes lost ownership.
+			// Commit before recovery takes locks so its transactional recheck must see
+			// the renewal, without racing the production lock timeout. Actual lock
+			// contention is covered separately by LocksAreBoundedPostgres.
+			recorder := &recoveryTransactionRecorder{TxStarter: f.pool, beforeBegin: tx.Commit}
+			recovered, recoveryErr := NewSessionStore(recorder).RecoverIncompleteCodeReviewWorkspace(ctx, f.org, f.params)
 			require.NoError(t, recoveryErr, "renewal race should resolve without a database error")
+			require.Equal(t, int64(1), recorder.begins.Load(), "the stale precheck must reach exactly one recovery transaction")
+			require.NotEmpty(t, recorder.candidatesSQL, "recovery must revalidate ownership after locking the candidate jobs")
 			require.False(t, recovered, "renewed ownership must prevent clearing the live workspace")
+			var actualState string
+			require.NoError(t, f.pool.QueryRow(ctx, stateSQL, f.org, f.session).Scan(&actualState), "read fixture state after recovery declines the renewed owner")
+			require.Equal(t, expectedState, actualState, "recovery must preserve the renewed workspace and every ownership record exactly")
 		})
 	}
 }
