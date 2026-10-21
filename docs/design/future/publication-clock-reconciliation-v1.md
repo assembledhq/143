@@ -100,9 +100,12 @@ The repository map is a total **bijection onto its declared provider IDs**: its
 UUID set equals the inventory acquisition-filter repository UUID set, and no UUID
 or provider ID repeats. No missing, extra, contradictory or many-to-one maps.
 Display names/current heads are not identity substitutes. Every event, object and
-coverage identity must belong to a complete original repo/PR/review group. Two
-known PR numbers for the same provider repo/review ID are contradictory authority.
-All these failures are `RECONCILIATION_SOURCE_UNACCEPTED` (stage 4).
+coverage identity must belong to a complete original repo/PR/review group. These
+source/map failures are `RECONCILIATION_SOURCE_UNACCEPTED` (stage 4). Distinct known
+PR numbers for one `(repository_id, provider_review_id)` already inside the
+original inventory are instead bad original input: `RECONCILIATION_INPUT_INVALID`
+at stage 3. Contradictory newly supplied source identities remain stage-4 authority
+failures. A missing PR number does not itself contradict a known number.
 
 Each accepted artifact has `artifact_id`, `sha256`, `basis`,
 `verification_receipt_sha256`, and nullable `coverage`. IDs/hashes must equal the
@@ -202,7 +205,7 @@ stage have the same code except stage 2, whose exact pin order is specified.
 | 1 | Bounded reads; UTF-8/JSON framing; depth; duplicate keys; exact key/type/grammar/enum sets; all numeric tokens lexical integers (no `1.0`, exponents, bool-as-int, NaN/Infinity); date/calendar/precision syntax; duplicate event/object/artifact IDs within their namespaces; per-file/array bounds; existing strict inventory-v1 validation. | `RECONCILIATION_INPUT_INVALID` |
 | 2a | Compare exact acceptance-file bytes against the trusted expected acceptance SHA. | `RECONCILIATION_SOURCE_UNACCEPTED` |
 | 2b | Compare exact original inventory bytes against the trusted expected inventory SHA. | `RECONCILIATION_INPUT_INVALID` |
-| 3 | Cross-file inventory/catalog/original-catalog pins; acceptance witness SHA; output witness/acceptance pins when verifying output; extractor revision/digest consistency; equal artifact sets/digests; dangling event/object artifact or binding references; artifact observation <= witness observation <= attestation; valid coverage intervals; combined/reference expansion bounds. | `RECONCILIATION_INPUT_INVALID` |
+| 3 | Cross-file inventory/catalog/original-catalog pins; acceptance witness SHA; output witness/acceptance pins when verifying output; extractor revision/digest consistency; equal artifact sets/digests; dangling event/object artifact or binding references; artifact observation <= witness observation <= attestation; valid coverage intervals; contradictory known PR numbers within the original inventory for one repo UUID/review ID; combined/reference expansion bounds. | `RECONCILIATION_INPUT_INVALID` |
 | 4 | Fixed supported profile/ruleset/dataset and requested mode in all marked inputs; total/injective trusted repository map; in-scope event/object/coverage identities; consistent review-to-PR identity; accepted basis/origin pairing; object-only coverage is null. | `RECONCILIATION_SOURCE_UNACCEPTED` |
 | 5 | Exact original-locator coverage (no extra, omitted or duplicate locators), original source/record fingerprints; complete candidate reference sets; exact canonical recomputed output equality, including frozen strings. | `RECONCILIATION_BINDING_MISMATCH` |
 
@@ -217,15 +220,28 @@ pins when isolating later stages; doing so is test preparation, never historical
 source acceptance. An unavailable output path, existing output file or write/
 size failure returns `RECONCILIATION_INPUT_INVALID` with no partial publication.
 
-Timestamp grammar is exactly the existing
-[`timestamp`](../../../scripts/code_review_export_metadata.py) contract:
-`YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)`, uppercase T/Z, valid calendar,
-no leap seconds, 1-9 fractional digits, and digits after the sixth must all be zero.
-Require an actual timezone offset and normalize to UTC only for instant comparison.
-Reject malformed/high-precision values, never truncate/round. The JSON Schema
-has the full lexical pattern; both readers must also perform calendar/offset
-validation with the existing helper or exactly equivalent semantics. Original
-frozen strings keep their spelling. New clocks use exactly six digits and Z.
+New metadata timestamps use the portable lexical subset of the existing
+[`timestamp`](../../../scripts/code_review_export_metadata.py) helper described
+here. The reference runtime is **Python 3.11 or later**. Other implementations must
+enforce the same limits even if their native parser accepts more:
+`YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)`, uppercase T/Z, years **0001-9999**,
+valid calendar dates, time hour 00-23, minute/second 00-59, no leap seconds,
+offset hour **00-23** and offset minute **00-59**. Both signed-zero offsets are UTC.
+Fraction length is 1-9; digits after the sixth must all be zero. Normalize to UTC
+only for comparisons, and require the normalized value also to remain within
+years 0001-9999. Reject overflow, malformed values or nonzero higher precision at
+stage 1; never truncate or round. New clocks render exactly six digits and Z.
+
+The JSON Schema enforces these lexical bounds. Both readers must additionally
+validate calendar and UTC-range semantics. With Python, apply the new lexical
+guard **before** calling the existing helper; the helper alone can normalize
+out-of-range offset minutes. Optional format annotations do not replace this.
+The original inventory still uses its unchanged v1 validator/helper, and copied
+`original_publication_time` is an exception to the new lexical subset: accept its
+existing validated v1 spelling and validate it with the v1 helper at stage 1.
+Its instant comparisons use the v1 helper; byte-for-byte equality with the original
+field is checked at stage 5. Never rewrite/reject an otherwise valid original
+merely because the new-fact grammar is stricter.
 
 ## Per-observation computation
 
@@ -273,12 +289,17 @@ a later known clock is never copied to an earlier missing observation.
 5. An eligible submission has an exact authority tuple, matching key/head,
    retained submitted commit equal to head if present, all required original
    fields, and all per-event chronology checks. Distinct eligible submission times
-   give `conflicting_event_times` before global reuse/source/coverage checks.
-   Equal redeliveries corroborate without losing any event reference.
-6. Frozen path: copy original clock unchanged. Always check global source/clocks
-   conflicts and reuse, **even with no bound events**. If events exist, also union
-   all missing-field/event reasons and any valid submission at a different instant
-   (`frozen_clock_conflict`). Do not add `no_authoritative_event` or coverage reasons
+   give `conflicting_event_times` on **both frozen and missing-clock paths**,
+   before global reuse/source/coverage checks. Equal redeliveries corroborate
+   without losing any event reference.
+6. Frozen path: copy original clock unchanged. Always check original
+   `submitted_head_mismatch`, global source/clocks conflicts and reuse, **even with
+   no bound events**. If events exist, also union all original missing-field,
+   submitted-commit and per-event reasons, `conflicting_event_times` from step 5,
+   and any eligible submission at a different instant (`frozen_clock_conflict`).
+   A submitted-head contradiction makes a submission ineligible, so that candidate
+   alone adds `submitted_head_mismatch`, not `frozen_clock_conflict`.
+   Do not add `no_authoritative_event` or coverage reasons
    on this path: absent/partial new evidence does not refute an existing clock.
    Any resulting reason means `frozen_conflict`; otherwise `preserve_frozen`.
    Same-instant corroboration preserves only when **all** checks are empty; other-
@@ -323,7 +344,7 @@ and sorted unique `reasons`.
 | `edit_basis_not_supported_v1` | Any bound `review_body_edited` event, including same-key edits. |
 | `source_coverage_incomplete` | Missing clock, complete original identity/creation, and either event class lacks complete lifetime coverage through witness cutoff. |
 | `reused_provider_review` | Multiple exact non-null key digests for mapped provider repo/review ID; conservative ambiguity, not proof of actual reuse. |
-| `conflicting_event_times` | Eligible submission candidates disagree on UTC instant. |
+| `conflicting_event_times` | Eligible submission candidates disagree on UTC instant, on both frozen and missing-clock paths. |
 | `conflicting_original_observations` | Same source identity differs in the exact source-comparison field set. |
 | `conflicting_original_clocks` | Same source identity has different non-null original UTC clock instants. |
 | `frozen_clock_conflict` | Eligible submission differs from this original frozen instant. |

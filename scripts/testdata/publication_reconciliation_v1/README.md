@@ -21,7 +21,8 @@ nor grant execution permission. Existing inventory/materializer v1 stays unchang
 The scenarios cover submission corroboration/redelivery, edit refusal, absent or
 partial lifetime history, invalid authority tuples, missing identities/head/key/
 creation, chronology failures, reuse including a missing-PR observation, frozen
-corroboration/invalid evidence/reuse/edit/conflicts, changed opaque source evidence,
+corroboration/submitted-head contradictions/conflicting times/invalid evidence/
+reuse/edit/conflicts, changed opaque source evidence,
 and legitimate acquisition-derived hash/clock differences. Bare object timestamps
 cannot match or refute a frozen clock. Clock reconciliation never clears the
 custody partitioner's stricter pre-existing quarantine or admits a cohort.
@@ -59,7 +60,8 @@ and compare the exact expected static code/stage. No real input is accepted here
 Raw duplicate-key/float/overflow cases are intentionally not valid JSON Schema
 inputs. Calendar tests must invoke the normative timestamp helper; optional
 format checking does not replace it. Integer-token/precision requirements remain
-additional to JSON Schema.
+additional to JSON Schema. New facts use Python 3.11+ reference semantics and the
+portable year/offset grammar; copied original clocks retain validated v1 spelling.
 
 ## Validation limits
 
