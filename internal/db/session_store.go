@@ -1562,66 +1562,12 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 // Returns false when the session is not owned by provenance.GenerationID
 // or the lock fence rejects the write.
 func (s *SessionStore) PublishCheckpointWithProvenance(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, stopReason models.RuntimeStopReason, provenance models.CheckpointProvenance) (bool, error) {
-	if strings.TrimSpace(snapshotKey) == "" {
-		return false, fmt.Errorf("publish checkpoint with provenance: snapshot key is required")
-	}
-	if provenance.GenerationID == uuid.Nil {
-		return false, fmt.Errorf("publish checkpoint with provenance: generation is required")
-	}
-	args := pgx.NamedArgs{
-		"id":                     sessionID,
-		"org_id":                 orgID,
-		"generation_id":          provenance.GenerationID,
-		"agent_session_id":       agentSessionID,
-		"snapshot_key":           snapshotKey,
-		"checkpoint_kind":        string(kind),
-		"checkpoint_capability":  string(capability),
-		"checkpoint_size_bytes":  sizeBytes,
-		"checkpointed_at":        checkpointedAt.UTC(),
-		"checkpoint_error":       nil,
-		"runtime_stop_reason":    string(stopReason),
-		"checkpoint_head_sha":    nullIfEmpty(provenance.HeadSHA),
-		"dependency_fingerprint": provenance.DependencyFingerprint,
-		"review_complete":        provenance.ReviewComplete && kind == models.CheckpointKindTurnComplete,
-	}
-	query := `WITH published AS (` + publishCheckpointUpdate + `
-		  AND s.automation_owner_generation_id = @generation_id`
-	if lockToken != uuid.Nil {
-		query += publishCheckpointJobFence
-		args["lock_token"] = lockToken
-	}
-	query += `
-			RETURNING s.id, s.org_id, s.workspace_revision, s.workspace_revision_updated_at
-		), provenance AS (
-			UPDATE automation_target_sessions g
-			SET checkpoint_snapshot_key = @snapshot_key,
-			    checkpoint_head_sha = @checkpoint_head_sha,
-			    checkpoint_dependency_fingerprint = @dependency_fingerprint,
-			    checkpoint_review_complete = @review_complete,
-			    updated_at = now()
-			FROM published p
-			WHERE g.id = @generation_id AND g.org_id = p.org_id AND g.session_id = p.id
-			RETURNING g.id
-		)
-		SELECT p.workspace_revision, p.workspace_revision_updated_at
-		FROM published p
-		JOIN provenance g ON true`
-	rows, err := s.db.Query(ctx, query, args)
+	published, effects, err := s.publishCheckpointWithProvenanceRow(ctx, s.db, orgID, sessionID, lockToken, agentSessionID, snapshotKey, kind, capability, sizeBytes, checkpointedAt, stopReason, provenance)
 	if err != nil {
-		return false, fmt.Errorf("publish checkpoint with provenance: %w", err)
+		return false, err
 	}
-	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
-		Revision  int64
-		UpdatedAt time.Time
-	}])
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("collect published checkpoint with provenance: %w", err)
-	}
-	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, row.Revision, row.UpdatedAt, "checkpoint")
-	return true, nil
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
+	return published, nil
 }
 
 func nullIfEmpty(v string) *string {

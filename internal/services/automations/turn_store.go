@@ -91,13 +91,14 @@ func (s *TurnStore) PublishCheckpointWithProvenance(ctx context.Context, orgID, 
 	if err != nil || !owned {
 		return false, err
 	}
-	published, err := s.sessions.WithTx(tx).PublishCheckpointWithProvenance(ctx, orgID, sessionID, lockToken, agentSessionID, snapshotKey, kind, capability, sizeBytes, checkpointedAt, stopReason, provenance)
+	published, effects, err := s.sessions.PublishCheckpointWithProvenanceInTx(ctx, orgID, tx, sessionID, lockToken, agentSessionID, snapshotKey, kind, capability, sizeBytes, checkpointedAt, stopReason, provenance)
 	if err != nil || !published {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, err
 	}
+	s.sessions.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
 	return true, nil
 }
 

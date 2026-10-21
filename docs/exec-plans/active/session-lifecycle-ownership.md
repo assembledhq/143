@@ -939,7 +939,8 @@ The handler adapter only constructs the item; it cannot independently commit a
 grant. The standalone grant service retains its configuration error and duplicate
 behavior and currently has no production callers; it remains for compatibility
 and tests. Answer's pure construction does not require that standalone appender;
-production wiring still configures it. This version-0 atomicity prerequisite preserves existing pending-request,
+production wiring still configures it. This version-0 atomicity prerequisite
+preserves existing pending-request,
 approval parsing, checkpoint and resume policy, including the request-before-parent
 lock order. It is not the canonical `AdmitAnswerInTx`/`AppendApprovedGrantInTx`
 authority operation, and cannot activate readiness enforcement or a writer floor.
@@ -986,6 +987,21 @@ methods remain unchanged. The scoped store is still fresh and publisherless.
 The real scheduler therefore persists its session, primary thread/changeset,
 review metadata, request, controller job and PR state without a creation savepoint.
 This removes nested settlement; it does not add canonical review admission.
+
+Automation checkpoint publication now persists the unchanged checkpoint and
+generation-provenance statement through a concrete supplied-transaction seam.
+The real attempt-locked owner dispatches the captured checkpoint event only after
+its outer commit, through the original publisher. Existing diff effects retain
+their `diff_snapshot` reason; checkpoint effects retain `checkpoint` and the
+original returned revision/time. The standalone DBTX wrapper keeps its existing
+single-statement behavior and immediate notification policy.
+
+The legacy CTE can update the session before finding no matching provenance row,
+then return false. The seam returns no effect and requires whole-owner rollback
+on false as well as error; the automation owner already does that. Standalone
+autocommit's historical false-with-mutation behavior is explicitly characterized,
+not silently repaired here. No active-generation predicate, final-pause/readiness
+proof, upload obligation, new authority or compatibility floor is added.
 
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
@@ -1731,6 +1747,9 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Compose actual scheduled review creation with its existing PR owner via
   `CreateInTx`, retaining standalone/inherited behavior and proving whole-admission
   rollback after a genuine late scheduling-write failure.
+- [x] Defer automation checkpoint events until the attempt-locked owner commits,
+  sharing unchanged provenance SQL with the standalone wrapper and documenting
+  its historical false-with-mutation edge and required caller rollback.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2293,7 +2312,7 @@ status/terminal expiry/workspace order. Snapshot/container row-only callbacks
 remain inherited. A bounded syntax test pins the real callback method set and
 pool-backed constructor; a new publishing or escaped callback method requires
 explicit review. This guard does not resolve arbitrary interfaces or prove
-canonical authority. Other automation checkpoint owners remain separate work.
+canonical authority. The separate checkpoint owner is converted below.
 
 ### 0a scheduled review creation composition validation
 
@@ -2322,6 +2341,38 @@ behavior. Source tests pin the private adapter's single override and exact
 transaction-scoped binding. The syntax scanner now recognizes explicit embedded
 `SessionStore` creation receivers without globally selecting unrelated `Create`
 methods; the current root is explicitly inventoried, not lifecycle authority.
+
+### 0a automation checkpoint post-commit effects validation
+
+Repeated race verification passes on PostgreSQL 17.10 using an owned PostgreSQL
+15+ `TEST_DATABASE_URL`. With `GOMAXPROCS=4`, run `go test -race -p=1
+./internal/db ./internal/services/automations
+-run '^TestCheckpointPersistence|^TestTurnAttemptPersistence' -count=3 -timeout=3m`:
+30 root executions and 255 subtest executions pass, with no failures or skips.
+The six new checkpoint roots alone, selected with `-run '^TestCheckpointPersistence'
+-parallel=8 -count=5`, pass 30 roots/300 cases. Focused vet and whitespace pass.
+
+Unit tests compare exact SQL/arguments, errors, UTC conversion, checkpoint kinds,
+nullable provenance and original effect payloads in both standalone and supplied
+transaction modes. Nil/typed-nil, invalid key/generation, no row, collection
+failure, tenant refusal and optional notification failure remain explicit.
+Blank private effect reasons preserve all previous diff-snapshot notifications.
+
+Seventeen full-schema cases exercise the real automation owner, direct seam and
+standalone wrapper with an occupied one-connection owner and nested-Begin trap.
+A pre-opened physical observer verifies exact session/generation/run/target/thread/
+job invisibility and settlement. Genuine late provenance SQL and deferred-commit
+errors first validate earlier writes, then reject the complete owner without an
+event. Lease, tenant, generation and historical retired-generation cases preserve
+existing policy. Both the supplied-tx rollback and standalone autocommit forms of
+the missing-provenance false edge are tested; false is not proof of no writes.
+
+The actual owner call sequence is source-pinned through successful commit before
+effect publication. A commit error discards effects and is never retried; unit
+error injection does not establish whether a lost network acknowledgement left
+durable writes. Resolving such uncertainty still needs the later receipt protocol.
+Legacy wrappers invoked through arbitrary tx-bound stores remain outside this
+owner-specific physical-commit guarantee.
 
 ## Surprises & Discoveries
 
