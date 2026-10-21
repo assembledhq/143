@@ -108,3 +108,23 @@ func TestNewPoolConfigApplicationName(t *testing.T) {
 		})
 	}
 }
+
+func TestNewPoolConfigApplicationNameAliases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, application string
+		expected          map[string]string
+	}{
+		{name: "opt-in replaces all case aliases", application: "143:operator:dev", expected: map[string]string{"application_name": "143:operator:dev", "options": "-c application_name=synthetic-option -c idle_in_transaction_session_timeout=25000", "lock_timeout": "3s"}},
+		{name: "empty option preserves aliases", expected: map[string]string{"application_name": "synthetic-canonical", "APPLICATION_NAME": "synthetic-uppercase", "Application_Name": "synthetic-mixed", "options": "-c application_name=synthetic-option -c idle_in_transaction_session_timeout=25000", "lock_timeout": "3s"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg, err := NewPoolConfig("postgres://synthetic@localhost/synthetic?application_name=synthetic-canonical&APPLICATION_NAME=synthetic-uppercase&Application_Name=synthetic-mixed&options=-c+application_name%3Dsynthetic-option+-c+idle_in_transaction_session_timeout%3D25000&lock_timeout=3s&pool_max_conns=7&pool_min_conns=2&pool_min_idle_conns=1", PoolOptions{ApplicationName: tt.application})
+			require.NoError(t, err, "parse attribution aliases through the production pool builder")
+			require.Equal(t, tt.expected, cfg.ConnConfig.RuntimeParams, "explicit attribution must replace only case-insensitive application names while empty options retain all naming inputs")
+			require.Equal(t, [3]int32{7, 2, 1}, [3]int32{cfg.MaxConns, cfg.MinConns, cfg.MinIdleConns}, "alias hardening must preserve every configured pool size")
+		})
+	}
+}

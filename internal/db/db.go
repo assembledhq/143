@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -44,6 +45,11 @@ func NewPoolConfig(databaseURL string, opts PoolOptions) (*pgxpool.Config, error
 		config.MaxConnIdleTime = opts.MaxConnIdleTime
 	}
 	if opts.ApplicationName != "" {
+		for key := range config.ConnConfig.RuntimeParams {
+			if strings.EqualFold(key, "application_name") {
+				delete(config.ConnConfig.RuntimeParams, key)
+			}
+		}
 		config.ConnConfig.RuntimeParams["application_name"] = opts.ApplicationName
 	}
 	return config, nil
