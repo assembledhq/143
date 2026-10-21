@@ -305,13 +305,21 @@ func (s *SessionThreadStore) Archive(ctx context.Context, orgID, sessionID, thre
 }
 
 func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
+	if err := s.updateStatusRow(ctx, s.db, orgID, threadID, status); err != nil {
+		return err
+	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
+	return nil
+}
+
+func (s *SessionThreadStore) updateStatusRow(ctx context.Context, conn DBTX, orgID, threadID uuid.UUID, status models.ThreadStatus) error {
 	query := `UPDATE session_threads SET status = @status WHERE id = @id AND org_id = @org_id`
 	if status == models.ThreadStatusRunning {
 		query = `UPDATE session_threads SET status = @status, started_at = now(), cancel_requested_at = NULL WHERE id = @id AND org_id = @org_id`
 	} else if status == models.ThreadStatusCompleted || status == models.ThreadStatusFailed || status == models.ThreadStatusCancelled {
 		query = `UPDATE session_threads SET status = @status, completed_at = now() WHERE id = @id AND org_id = @org_id`
 	}
-	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	ct, err := conn.Exec(ctx, query, pgx.NamedArgs{
 		"id":     threadID,
 		"org_id": orgID,
 		"status": status,
@@ -322,7 +330,6 @@ func (s *SessionThreadStore) UpdateStatus(ctx context.Context, orgID, threadID u
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
-	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
 }
 
@@ -417,6 +424,14 @@ func (s *SessionThreadStore) UpdateEditable(ctx context.Context, thread *models.
 // result columns — switch to UpdateTurnComplete on the thread store at that
 // point so per-thread review surfaces have data to show.
 func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID uuid.UUID, turn int, agentSessionID string) error {
+	if err := s.completeTurnRow(ctx, s.db, orgID, threadID, turn, agentSessionID); err != nil {
+		return err
+	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
+	return nil
+}
+
+func (s *SessionThreadStore) completeTurnRow(ctx context.Context, conn DBTX, orgID, threadID uuid.UUID, turn int, agentSessionID string) error {
 	query := `
 		UPDATE session_threads
 		SET status = 'idle',
@@ -425,7 +440,7 @@ func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID u
 		    agent_session_id = COALESCE(@agent_session_id, agent_session_id)
 		WHERE id = @id AND org_id = @org_id`
 
-	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	ct, err := conn.Exec(ctx, query, pgx.NamedArgs{
 		"id":               threadID,
 		"org_id":           orgID,
 		"current_turn":     turn,
@@ -437,7 +452,6 @@ func (s *SessionThreadStore) CompleteTurn(ctx context.Context, orgID, threadID u
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
-	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
 }
 
@@ -454,6 +468,14 @@ func emptyStringNil(value string) *string {
 // not produce one — same rationale as the session-level update; see
 // session_store.go updateResultRow for full details.
 func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
+	if err := s.updateResultRow(ctx, s.db, orgID, threadID, status, result); err != nil {
+		return err
+	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
+	return nil
+}
+
+func (s *SessionThreadStore) updateResultRow(ctx context.Context, conn DBTX, orgID, threadID uuid.UUID, status models.ThreadStatus, result *models.SessionResult) error {
 	query := `
 		UPDATE session_threads
 		SET status = @status,
@@ -470,7 +492,7 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 
 	failureExplanation := sessionResultFailureExplanation(result)
 
-	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	ct, err := conn.Exec(ctx, query, pgx.NamedArgs{
 		"id":                  threadID,
 		"org_id":              orgID,
 		"status":              status,
@@ -485,7 +507,6 @@ func (s *SessionThreadStore) UpdateResult(ctx context.Context, orgID, threadID u
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
-	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
 }
 
@@ -971,6 +992,14 @@ func (s *SessionThreadStore) MarkCancelRequestedBySessions(ctx context.Context, 
 // UpdateTurnComplete sets the thread to idle and persists turn metadata.
 // COALESCE on diff: see UpdateResult above.
 func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) error {
+	if err := s.updateTurnCompleteRow(ctx, s.db, orgID, threadID, turn, result, agentSessionID); err != nil {
+		return err
+	}
+	s.publishThreadRuntimeByID(ctx, orgID, threadID)
+	return nil
+}
+
+func (s *SessionThreadStore) updateTurnCompleteRow(ctx context.Context, conn DBTX, orgID, threadID uuid.UUID, turn int, result *models.SessionResult, agentSessionID string) error {
 	query := `
 		UPDATE session_threads
 		SET status = 'idle', current_turn = @current_turn, last_activity_at = now(),
@@ -981,7 +1010,7 @@ func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, thre
 		    failure_category = NULL
 		WHERE id = @id AND org_id = @org_id`
 
-	ct, err := s.db.Exec(ctx, query, pgx.NamedArgs{
+	ct, err := conn.Exec(ctx, query, pgx.NamedArgs{
 		"id":               threadID,
 		"org_id":           orgID,
 		"current_turn":     turn,
@@ -995,7 +1024,6 @@ func (s *SessionThreadStore) UpdateTurnComplete(ctx context.Context, orgID, thre
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("thread not found")
 	}
-	s.publishThreadRuntimeByID(ctx, orgID, threadID)
 	return nil
 }
 

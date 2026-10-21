@@ -159,6 +159,87 @@ func (s *GrantStore) adapter() { s.legacy() }
 	require.ErrorContains(t, compare(found, reviewed), "uncovered lifecycle candidate: internal/fixture.go:GrantStore.AppendApprovedSessionGrantInTx", "a newly extracted persistence root must require its own reviewed inventory contract")
 }
 
+func TestComposablePersistenceBoundariesRemainInventoried(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		genericCollision bool
+	}{
+		{name: "UpdateResultAndCompleteActivityPhaseInTx"},
+		{name: "UpdateStatusAndCompleteActivityPhaseInTx"},
+		{name: "UpdateTurnCompleteAndCompleteActivityPhaseInTx"},
+		{name: "UpdateStatusInTx", genericCollision: true},
+		{name: "CompleteTurnInTx"},
+		{name: "UpdateResultInTx", genericCollision: true},
+		{name: "UpdateTurnCompleteInTx"},
+		{name: "StartSeedPhaseInTx"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// These deliberately lexical fixtures do not resolve imported types
+			// or prove that the supplied tx is valid, owned or authorized.
+			root := fixture(t, "type OpaqueStore struct{}\nfunc (s *OpaqueStore) "+tt.name+"(ctx context.Context, orgID uuid.UUID, tx pgx.Tx) {}")
+			dir := filepath.Join(root, "internal", "consumer")
+			require.NoError(t, os.Mkdir(dir, 0o700), "create a different package for the generic-receiver caller fixture")
+			caller := "package consumer\ntype Pipeline struct{}\nfunc (p *Pipeline) write(ctx context.Context, orgID uuid.UUID, tx pgx.Tx) { p.store." + tt.name + "(ctx, orgID, tx) }"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "adapter.go"), []byte(caller), 0o600), "write the cross-package caller without lifecycle receiver-name evidence")
+			found, err := scan(root)
+			require.NoError(t, err, "scan the named persistence root and generic cross-package caller without type-checking claims")
+			type observation struct {
+				ID               string
+				Kinds, Calls     []string
+				RequiresContract bool
+			}
+			var actual []observation
+			for _, item := range found {
+				actual = append(actual, observation{ID: item.ID, Kinds: item.Kinds, Calls: item.Calls, RequiresContract: requiresMutationContract(item)})
+			}
+			rootID := "internal/fixture.go:OpaqueStore." + tt.name
+			require.Equal(t, []observation{
+				{ID: "internal/consumer/adapter.go:Pipeline.write", Kinds: []string{"boundary-caller"}, Calls: []string{"p.store." + tt.name, "p.store." + tt.name + "(ctx, orgID, tx)"}, RequiresContract: true},
+				{ID: rootID, Kinds: []string{"boundary-definition"}, RequiresContract: true},
+			}, actual, "every explicit transaction seam and its direct caller must require review even without SQL or a lifecycle-named receiver")
+			reviewed := reviewedFixture(found)
+			require.NoError(t, compare(found, reviewed), "explicit reviewed contracts should cover exactly the discovered root and direct caller")
+			rootMissing := reviewedFixture(found[:1])
+			require.ErrorContains(t, compare(found, rootMissing), "uncovered lifecycle candidate: "+rootID, "extraction must not silently remove the named persistence root from inventory coverage")
+			for index := range reviewed.Entries {
+				reviewed.Entries[index].CanonicalTarget = ""
+			}
+			contractErr := compare(found, reviewed)
+			for _, item := range found {
+				require.ErrorContains(t, contractErr, "mutation requires concrete canonical authority/outcome/0a contract: "+item.ID, "both the root and generic direct caller need a concrete reviewed operation contract")
+			}
+			if tt.genericCollision {
+				for index := range reviewed.Entries {
+					reviewed.Entries[index].Classification = "non-lifecycle-candidate"
+				}
+				require.NoError(t, compare(found, reviewed), "a generic InTx name collision may be excluded only through an explicit reviewed non-lifecycle classification")
+			}
+		})
+	}
+}
+
+func TestPlainGenericStoreMethodsRemainUnselected(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name string }{
+		{name: "UpdateStatus"},
+		{name: "UpdateResult"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			root := fixture(t, "type OpaqueStore struct{}\ntype Pipeline struct{}\nfunc (s *OpaqueStore) "+tt.name+"() {}\nfunc (p *Pipeline) write() { p.store."+tt.name+"(ctx, orgID, id, value) }")
+			found, err := scan(root)
+			require.NoError(t, err, "scan unrelated generic store methods without assigning lifecycle meaning from their names alone")
+			require.Equal(t, []candidate(nil), found, "registering explicit InTx seams must not broaden ordinary generic status/result discovery")
+		})
+	}
+}
+
 func reviewedFixture(candidates []candidate) inventory {
 	result := inventory{Version: 1, Scope: []string{"fixture"}, Limitations: []string{"syntax only"}}
 	for _, item := range candidates {

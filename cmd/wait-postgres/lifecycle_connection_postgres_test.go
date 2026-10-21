@@ -31,9 +31,25 @@ func TestLifecycleWaiterConnectionPostgres(t *testing.T) {
 	require.NoError(t, waitForPostgres(ctx, raw, time.Second), "the real waiter must connect and successfully ping the full-schema fixture")
 	inspection, err := pgx.Connect(ctx, raw)
 	require.True(t, err == nil, "open an independent observer without exposing its fixture connection string")
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), time.Second)
+		defer closeCancel()
+		require.NoError(t, inspection.Close(closeCtx), "close the independent observer even if its activity check fails")
+	}()
 	var retained int
-	require.NoError(t, inspection.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND application_name='143:operator:dev' AND pid<>pg_backend_pid()`).Scan(&retained), "inspect this unique database before any parallel factory probes start")
-	require.Zero(t, retained, "successful waitForPostgres must close its own attributed backend before returning")
+	// Close returns before the server necessarily removes its activity row.
+	// Poll synchronously so no query can race this connection's later cleanup.
+	for {
+		require.NoError(t, inspection.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND application_name='143:operator:dev' AND pid<>pg_backend_pid()`).Scan(&retained), "inspect this unique database before any parallel factory probes start")
+		if retained == 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("successful waitForPostgres must eventually release its attributed backend")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	require.NoError(t, inspection.Close(ctx), "close the independent observer before starting parallel child probes")
 	const build = "0123456789aBcDeF0123456789aBcDeF01234567"
 	tests := []struct {

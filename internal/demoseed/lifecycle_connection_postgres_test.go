@@ -161,10 +161,25 @@ func TestDemoSeedLifecycleEmbeddedMigrationPostgres(t *testing.T) {
 	}()
 	var observed []string
 	var observationErr error
-	require.Eventually(t, func() bool {
-		observationErr = admin.QueryRow(ctx, "SELECT COALESCE(array_agg(application_name::text || '|' || datname || '|' || backend_type ORDER BY pid), ARRAY[]::text[]) FROM pg_stat_activity WHERE datname = $1 AND $2 = ANY(pg_blocking_pids(pid))", name, conn.PgConn().PID()).Scan(&observed)
-		return observationErr == nil && len(observed) != 0
-	}, 10*time.Second, 10*time.Millisecond, "observe the actual embedded lib/pq connection waiting on its exact ledger barrier")
+	// Keep observation synchronous: an Eventually condition can outlive its
+	// deadline and race cleanup on the administrator's non-concurrent pgx.Conn.
+	observationCtx, observationCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer observationCancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+observe:
+	for {
+		observationErr = admin.QueryRow(observationCtx, "SELECT COALESCE(array_agg(application_name::text || '|' || datname || '|' || backend_type ORDER BY pid), ARRAY[]::text[]) FROM pg_stat_activity WHERE datname = $1 AND $2 = ANY(pg_blocking_pids(pid))", name, conn.PgConn().PID()).Scan(&observed)
+		if observationErr != nil || len(observed) != 0 {
+			break
+		}
+		select {
+		case <-observationCtx.Done():
+			observationErr = observationCtx.Err()
+			break observe
+		case <-ticker.C:
+		}
+	}
 	require.NoError(t, observationErr, "the independent observer must read only the generated migration backend")
 	require.Equal(t, []string{db.LifecycleOperatorConnectionApplicationName(version.BuildSHA) + "|" + name + "|client backend"}, observed, "the embedded migration driver must receive the binary's safe operator label without changing its selected database")
 	require.NoError(t, tx.Rollback(ctx), "release the observed ledger barrier")

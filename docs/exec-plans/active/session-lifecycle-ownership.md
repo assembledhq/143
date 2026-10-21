@@ -112,6 +112,7 @@ Labels remain self-reported and do not distinguish these two tools, invocation
 identity or privilege. This is partial command coverage: `backfill-usage`,
 `migrate`, `wait-postgres`, `demo-seed` and manual SQL paths remain unattributed
 by this slice. No command uses a label as deployment, drain or activation proof.
+The subsequent command slices below supersede that partial coverage list.
 
 A following migration-only slice labels connections opened by `cmd/migrate`
 with the same `143:operator:<safe-build>` policy. It retains golang-migrate's
@@ -125,11 +126,12 @@ single-file `go run` builds retain `dev`. There is no observer, lease or
 writer-version marker. This does not label `demo-seed`'s separate embedded
 migrator, `backfill-usage`, `wait-postgres` or manual SQL. Schema behavior,
 writer authority and every deployment/activation gate remain unchanged.
+The subsequent demo attribution slice below covers its embedded migrator.
 
 Demo-seed check mode now removes native `dbname`/`database` query overrides when
 selecting its generated temporary database, for both pgx and lib/pq. Malformed
 query parameters fail before it opens a connection. Unsupported case variants
-retain the drivers' rejection behavior. A full-schema check against a disposable
+retain PostgreSQL's rejection behavior. A full-schema check against a disposable
 source database verifies that its original rows and catalog remain unchanged and
 that the temporary sibling is removed. This target-isolation repair adds no
 writer attribution, observer or lifecycle authority.
@@ -858,6 +860,38 @@ contract. This repair does not establish a drained floor, canonical lock order,
 exact consent/readiness or epoch authority. The session-before-automation order
 and independent human-input grant transaction still require conversion.
 
+The result/phase persistence slice exposes concrete `pgx.Tx` variants of the
+three existing combined result, status and turn-completion boundaries. Existing
+wrappers remain transaction owners and call the same persistence implementation.
+No InTx path begins, settles, retries or publishes, including its row/head/diff
+helpers. Opaque `SessionPersistenceEffects` returns workspace notification data;
+the owner discards it after error, rollback or uncertain commit and publishes
+only after confirmed commit. It is not a commit receipt, durable outbox or
+lifecycle authority. Status and phase publication remain service responsibilities.
+SQL predicates, legacy returned-row shape and session/phase association behavior
+are unchanged: canonical admission must still establish exact phase ownership,
+current allocation and shared epochs before composing these resource-only writes.
+
+Thread status, no-result turn completion, result and result-bearing turn writes
+also have concrete `pgx.Tx` persistence variants. Each shares unchanged private
+row SQL with its legacy wrapper; only the wrapper retains immediate best-effort
+publication. InTx paths return opaque org/thread reload identity, never publish
+or settle, and reject missing transaction or result before writing. Legacy nil
+result behavior is unchanged. The explicit post-commit adapter reloads current
+visible state, possibly a later write; it does not promise the earlier write's
+snapshot, durable delivery or commit attestation. Archived-row mutation versus
+hidden notification, nil versus empty diff, exact turn and provider-ID behavior
+remain intentional legacy semantics, not new authority checks.
+
+The inventory guard registers the explicit composable seam names as both
+boundaries and contract-required direct calls. A cross-package `p.store` receiver
+cannot bypass review merely because its name lacks session/thread vocabulary.
+The two generic InTx name collisions require an explicit reviewed non-lifecycle
+classification; ordinary generic status/result discovery remains unchanged.
+Empty-SQL lexical fixtures prove discovery and contract enforcement for all eight
+named result/phase, thread and seed seams. This is syntax coverage, not runtime
+transaction ownership, semantic call resolution or authority enforcement.
+
 Before activating larger transactions, update competing old entry points and
 store primitives to the chosen compatible lock order. Include structured answers,
 grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
@@ -1562,6 +1596,19 @@ revision; it must not reinterpret new durable records or trigger replay.
   caller-owned paths, proving retained concurrent grants, duplicate detection and
   pre-lock isolation rejection on the full schema. Historical-writer drain and
   canonical consent/lock-order conversion remain open.
+- [x] Expose transaction-composable result/status/turn plus activity-phase
+  persistence with explicit post-commit workspace effects. Full-schema tests
+  prove exact outer commit/rollback and enabled-publisher silence; canonical
+  allocation/epoch/phase association checks remain unimplemented.
+- [x] Expose four thread persistence seams with explicit current-state
+  post-commit effects, preserving legacy wrappers and verifying full-schema
+  outer settlement, tenant rejection and notification behavior.
+- [x] Strengthen grant proof for concurrent duplicate first grants and absent
+  metadata visibility, and make attribution test observation/cleanup synchronous
+  so server-side connection exit timing does not create a false failure.
+- [x] Register composable persistence boundaries and direct generic callers in
+  the syntax guard, with concrete-contract regressions. Review-driven vocabulary
+  coverage does not promote these persistence seams to lifecycle authority.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -1837,6 +1884,50 @@ An additional linked-SHA test run covers those real pool/driver paths; it does
 not claim an actual demo command invocation. The unchanged complete migration
 command suite separately exercises the promoted shared URI helper. These checks
 add no observer or lifecycle authority and do not establish a deployed floor.
+
+### 0a result/phase persistence validation
+
+Focused unit and full-schema race tests passed locally on PostgreSQL 17.10:
+four root tests and 63 subtests, no failures or skips. Reproduce with an owned
+disposable PostgreSQL 15+ server in `TEST_DATABASE_URL` and
+`go test -race ./internal/db -run '^TestSessionPersistence' -count=1 -parallel=3
+-timeout=3m`. Existing result/status/turn regressions and focused vet also pass.
+
+An occupied one-connection pool and transaction wrapper reject nested settlement;
+an independent reader sees the exact original row set until outer commit.
+Whole-row comparisons cover session, phase, publish state, primary changeset and
+diff snapshots. A missing phase demonstrably leaves earlier status/snapshot
+writes staged until outer rollback; a foreign tenant stages none. Configured
+Redis publishers remain silent before commit and after rejection or rollback;
+explicit org-checked workspace publication retains the existing event fields.
+Legacy wrapper begin, phase and uncertain-commit failures produce no wakeup.
+No test treats an opaque in-memory effect value as a committed receipt or exact
+once delivery. This proves persistence composition only, not allocation, epoch,
+phase association, deployment or compatibility-floor acceptance.
+
+### 0a thread persistence validation
+
+The focused race selection passed locally on PostgreSQL 17.10: seven root tests,
+86 subtests, no failures or skips. Reproduce with an owned disposable PostgreSQL
+15+ server in `TEST_DATABASE_URL` and `go test -race -p=1 ./internal/db
+-run '^TestThreadPersistence' -count=1 -parallel=1 -timeout=3m`. Legacy/new unit
+regressions and focused vet also pass.
+
+The complete unchanged schema covers one occupied connection, stable transaction
+identity, exact whole-row outer commit/rollback, foreign/nil rejection before
+writes and enabled-publisher silence. Tests retain lower exact turns, empty
+provider-ID differences, nil/empty diff, failure and timestamp fields, archived
+row behavior and publication of a later committed state. Reload/publish failures
+remain best-effort warnings. These are composable persistence prerequisites,
+not canonical allocation/epoch fences, deployment or writer-floor evidence.
+
+Review follow-ups add wrapper and InTx concurrent duplicate-first-grant cases,
+independent pre-commit absence checks and an anchored metadata-read mock query.
+Grant freshness remains scoped to conforming grants, not unrelated snapshot
+replacement writers or historical binaries. Attribution observations now poll
+server-side backend disappearance and complete their query before connection
+cleanup, including timeout paths. These are test and documentation refinements;
+they do not broaden writer authority or establish a deployment floor.
 
 ## Surprises & Discoveries
 
