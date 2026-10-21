@@ -154,6 +154,24 @@ development builds unless their caller explicitly supplies the shared SHA linker
 flag. Labels do not distinguish command instances, prove privilege or grant a
 writer floor. Manual SQL and any unlabelled external writer remain inventory gates.
 
+The passive epoch schema slice adds `admission_epoch bigint NOT NULL DEFAULT 0`,
+nullable `end_epoch bigint`, and `lifecycle_version smallint NOT NULL DEFAULT 0`
+to sessions and threads. Migration 322 changes only sessions; migration 323
+changes only threads, each in a separate transaction with a five-second lock
+timeout. This avoids holding both hot-table DDL locks in one transaction.
+Each table still requires its own exclusive DDL lock; lock timeout remains a
+migration failure, not evidence that the schema was applied.
+Existing rows and legacy inserts receive version-zero defaults without an
+application backfill. A separate DB-only `LifecycleEpochState`
+and tenant-scoped read store expose the values without changing public session or
+thread representations. Thread reads also require the exact parent session.
+Reads retain existing deleted-session/archived-thread visibility and acquire no
+row locks. SQL types and nullability are storage representation only; no epoch
+relationship policy or admission/start/end authority is installed. No existing
+runtime caller reads, increments or enforces these fields. Dispatch/claim records,
+canonical fences, cutover state, writer-version changes and activation remain
+separate 0a work. Roll back readers before removing the passive columns.
+
 Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
 identify the inspected implementation; the executable inventory rechecks the
 current tree rather than treating line numbers as permanent identities.
@@ -1762,6 +1780,9 @@ revision; it must not reinterpret new durable records or trigger replay.
   with its existing publication owner, preserving exact receipts and optional
   status synchronization while proving final enqueue rejection rolls back all
   earlier callback writes.
+- [x] Add passive session/thread epoch and lifecycle-version columns with DB-only,
+  tenant/parent-scoped reads; prove fresh/upgrade/rollback/reapply, nullable bigint
+  round trips and unchanged legacy create/read/status/API behavior on PostgreSQL.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2444,6 +2465,26 @@ original SQL fence returns false, no effects and an exactly unchanged staged
 graph; the caller explicitly rolls back. The standalone checkpoint comment now
 states the already-characterized missing-provenance false-with-mutation edge.
 These are proof and documentation changes only, not runtime-policy changes.
+
+### 0a passive epoch representation validation
+
+`go test ./cmd/migrate ./internal/db -run
+'TestSessionLifecycleEpochMigrationPostgres|TestLifecycleEpochStore' -count=1`
+with a disposable PostgreSQL 15+ `TEST_DATABASE_URL` exercises the complete
+migration chain. On PostgreSQL 17.10, both fresh-schema and populated-upgrade
+fixtures pass the 321 → 322 → 323 upgrade and 323 → 322 → 321 rollback/reapply
+boundaries with exact legacy row preservation. The intermediate 322 boundary has
+exactly three session columns and no thread columns; rolling back threads leaves
+session metadata intact. Each migration changes only one hot table. The actual
+session and thread stores create and update rows while omitting the new columns;
+the new accessors preserve nullable end epochs and large bigint values and reject
+another tenant or parent. Existing model projections and serialized API fields
+remain unchanged. Twelve parallel mock cases additionally cover zero versus absent
+end epochs, missing rows, database errors and late scan failures. Tenancy and
+lifecycle inventory guards pass. The complete `internal/db` and `cmd/migrate`
+packages also pass against the same disposable server with `GOMAXPROCS=4` and
+`-p=1 -parallel=4`. These proofs establish passive representation,
+not canonical authority, compatibility-floor enforcement or production activation.
 
 ## Surprises & Discoveries
 
