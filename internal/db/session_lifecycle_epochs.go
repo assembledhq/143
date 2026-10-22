@@ -23,6 +23,13 @@ type LifecycleRequestEpochState struct {
 	AdmissionThreadEpoch  *int64
 }
 
+// LifecycleAdmissionClaimState observes a lane's retained logical claim pair.
+// Presence is not proof of admission, current epochs, a turn, or provider authority.
+type LifecycleAdmissionClaimState struct {
+	DispatchID *uuid.UUID
+	Token      *uuid.UUID
+}
+
 // LifecycleEpochStore reads passive metadata without acquiring lifecycle authority.
 type LifecycleEpochStore struct {
 	db DBTX
@@ -75,6 +82,22 @@ func (s *LifecycleEpochStore) GetRequest(ctx context.Context, orgID, sessionID, 
 		Scan(&state.AdmissionSessionEpoch, &state.AdmissionThreadEpoch)
 	if err != nil {
 		return LifecycleRequestEpochState{}, fmt.Errorf("get request lifecycle epochs: %w", err)
+	}
+	return state, nil
+}
+
+// GetThreadClaim reads the exact tenant/session/lane without locking or deriving
+// authority. Unlike GetThread, it includes archived lanes and invisible parents:
+// retained claim metadata remains observable until explicit future cleanup.
+func (s *LifecycleEpochStore) GetThreadClaim(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (LifecycleAdmissionClaimState, error) {
+	var state LifecycleAdmissionClaimState
+	err := s.db.QueryRow(ctx, `
+		SELECT admission_claim_dispatch_id, admission_claim_token
+		FROM session_threads
+		WHERE org_id = $1 AND session_id = $2 AND id = $3`, orgID, sessionID, threadID).
+		Scan(&state.DispatchID, &state.Token)
+	if err != nil {
+		return LifecycleAdmissionClaimState{}, fmt.Errorf("get thread admission claim: %w", err)
 	}
 	return state, nil
 }

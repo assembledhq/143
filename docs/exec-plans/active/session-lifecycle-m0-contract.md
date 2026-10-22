@@ -175,6 +175,23 @@ locks before installing its claim pointer/token; message/job references may be
 filled later in the SAME transaction. Do not invent a pointer-first FK exception
 or separately committed claim. Failed admission rolls back all these writes.
 
+Threaded admissions install only the lane's logical claim. The session claim is
+reserved for session-wide execution that conflicts with every lane; it is not a
+shared pointer rewritten by independent siblings. The session running status
+remains a derived projection of active siblings, not logical claim ownership.
+
+The passive lane-claim representation uses an exact token-bound FK from
+`session_threads(org_id,session_id,id,admission_claim_dispatch_id,admission_claim_token)`
+to `session_input_dispatches(org_id,session_id,thread_id,id,admission_claim_token)`.
+Both lane claim columns are NULL or both are present. This immediate,
+non-deferrable, non-cascading relationship proves structural identity only:
+it cannot prove current epochs, a known turn, admission eligibility, runtime
+ownership, or provider authority. Dispatch receipt token/turn slots remain
+nullable without defaults or historical inference. A future locked replacement
+must clear the lane pointer before changing a referenced receipt token, then
+install the replacement in the same transaction (or use a new dispatch).
+Session-wide claim columns and all claim writers remain deferred.
+
 ### Consumer arbitration and discovery
 
 `PendingAdmissionReconciler` is a lifecycle service invoked at worker startup and

@@ -307,6 +307,9 @@ func TestLifecycleMetadataWritesRequireInventoryContract(t *testing.T) {
 		{name: "compatibility insert", query: `INSERT INTO "public"."session_input_workspace_compatibility" (org_id,session_id,request_id,state) VALUES($1,$2,$3,'unprovable')`},
 		{name: "compatibility metadata update", query: `UPDATE public.session_input_workspace_compatibility SET workspace_state=$4 WHERE org_id=$1 AND session_id=$2 AND request_id=$3`},
 		{name: "compatibility delete", query: `DELETE FROM session_input_workspace_compatibility WHERE org_id=$1 AND session_id=$2 AND request_id=$3`},
+		{name: "dispatch insert", query: `INSERT INTO session_input_dispatches (org_id,session_id) VALUES($1,$2)`},
+		{name: "dispatch claim token update", query: `UPDATE "public"."session_input_dispatches" SET admission_claim_token=$3 WHERE org_id=$1 AND session_id=$2`},
+		{name: "dispatch delete", query: `DELETE FROM session_input_dispatches WHERE org_id=$1 AND session_id=$2`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -329,6 +332,46 @@ func TestLifecycleMetadataWritesRequireInventoryContract(t *testing.T) {
 				reviewed.Entries[index].CanonicalTarget = ""
 			}
 			require.ErrorContains(t, compare(found, reviewed), "mutation requires concrete canonical authority/outcome/0a contract", "an explicit passive-reader contract cannot approve a future metadata writer")
+		})
+	}
+}
+
+func TestLaneClaimAssignmentsRequireInventoryContract(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, assignment string }{
+		{name: "pointer", assignment: "admission_claim_dispatch_id=$3"},
+		{name: "quoted token", assignment: `"admission_claim_token"=$3`},
+		{name: "turn receipt", assignment: "admission_claim_turn=$3"},
+		{name: "tuple pair", assignment: "(admission_claim_dispatch_id, admission_claim_token)=($3,$4)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			found, err := scan(fixture(t, "func write() { exec(`UPDATE public.session_threads SET "+tt.assignment+" WHERE org_id=$1 AND session_id=$2`) }"))
+			require.NoError(t, err, "discover claim assignments inside generic-named production helpers")
+			require.Len(t, found, 1, "a direct lane claim assignment must not disappear from the writer inventory")
+			require.Equal(t, []string{"lifecycle-gate-update"}, found[0].Kinds, "claim updates must be recognized as authority-relevant lifecycle mutations")
+			require.True(t, requiresMutationContract(found[0]), "new claim writers must receive an explicit reviewed lifecycle contract")
+		})
+	}
+}
+
+func TestLaneClaimInsertsRequireInventoryContract(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, query string }{
+		{name: "session constructor", query: `INSERT INTO public.sessions (org_id,admission_claim_dispatch_id,admission_claim_token) VALUES($1,$2,$3)`},
+		{name: "lane constructor", query: `INSERT INTO public.session_threads (org_id,admission_claim_dispatch_id,admission_claim_token) VALUES($1,$2,$3)`},
+		{name: "lane upsert pair outside insert columns", query: `INSERT INTO public.session_threads (org_id,id,label) VALUES($1,$2,$3) ON CONFLICT(id) DO UPDATE SET admission_claim_dispatch_id=$4,admission_claim_token=$5`},
+		{name: "session upsert tuple outside insert columns", query: `INSERT INTO public.sessions (org_id,id) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET (admission_claim_dispatch_id,admission_claim_token)=($3,$4)`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			found, err := scan(fixture(t, "func write() { exec(`"+tt.query+"`) }"))
+			require.NoError(t, err, "discover claim installation even when no status column is inserted")
+			require.Len(t, found, 1, "claim-only inserts must not bypass the lifecycle writer inventory")
+			require.Equal(t, []string{"lifecycle-gate-insert"}, found[0].Kinds, "claim-only inserts must be classified as lifecycle mutations")
+			require.True(t, requiresMutationContract(found[0]), "new claim constructors need a reviewed mutation contract")
 		})
 	}
 }

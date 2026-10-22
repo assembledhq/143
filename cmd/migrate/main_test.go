@@ -84,6 +84,11 @@ func TestRepairKnownDirtyMigration(t *testing.T) {
 			expectError: true,
 		},
 		{
+			name:        "refuses dirty concurrent lane claim key migration 342",
+			repairer:    fakeDirtyMigrationRepairer{version: 342, dirty: true},
+			expectError: true,
+		},
+		{
 			name:        "returns version read failure",
 			repairer:    fakeDirtyMigrationRepairer{versionErr: errors.New("version unavailable")},
 			expectError: true,
@@ -273,6 +278,8 @@ func TestMigrationsRestrictConcurrentIndexes(t *testing.T) {
 		"000330_human_input_lifecycle_reference_key.down.sql":    "DROP INDEX CONCURRENTLY idx_session_human_input_requests_org_session_id",
 		"000331_thread_runtime_lifecycle_reference_key.up.sql":   "CREATE UNIQUE INDEX CONCURRENTLY idx_thread_runtimes_org_session_thread_id",
 		"000331_thread_runtime_lifecycle_reference_key.down.sql": "DROP INDEX CONCURRENTLY idx_thread_runtimes_org_session_thread_id",
+		"000342_dispatch_lane_claim_reference_key.up.sql":        "CREATE UNIQUE INDEX CONCURRENTLY idx_session_input_dispatches_lane_claim",
+		"000342_dispatch_lane_claim_reference_key.down.sql":      "DROP INDEX CONCURRENTLY idx_session_input_dispatches_lane_claim",
 	}
 
 	for _, path := range files {

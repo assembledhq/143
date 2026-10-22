@@ -2870,6 +2870,56 @@ rejection, raw-value/tenant-scope observations, legacy answer/cancel behavior an
 retained request dependencies. These are representation and compatibility tests,
 not provider verification, authoritative certification or activation evidence.
 
+### 0a passive lane-claim representation
+
+Migrations 341–344 add nullable dispatch receipt token/turn slots, build the
+five-column token-bound dispatch reference key concurrently, install nullable
+lane claim dispatch/token columns with a pair CHECK and exact tenant/session/
+lane/dispatch/token FK, then validate those constraints separately. All legacy
+rows remain unclaimed; no status, epoch, current turn, consumer or job changes.
+Session-wide claim columns, admission/release writers, arbitration, fencing,
+normalization, compatibility enforcement and activation remain deferred.
+
+Threaded admissions will own lane claims only. Independent siblings do not
+share a session claim pointer. Session claims are reserved for session-wide
+execution conflicting with all lanes; session running status remains derived.
+The FK is immediate, non-deferrable MATCH SIMPLE with NO ACTION on delete and
+update. The pair CHECK prevents a half-NULL pointer from bypassing the FK. A
+threadless dispatch cannot satisfy a lane claim, nor can a different tenant,
+parent, lane or receipt token. Dispatch-before-pointer ordering is mandatory in
+one transaction. A referenced token cannot rotate until its lane pointer is
+cleared; any future clear/replace/reinstall must share the canonical locked
+transaction. None of these structural facts authorizes execution or release.
+
+`LifecycleEpochStore.GetThreadClaim` is a raw exact-scope observation, not a
+claim operation. Unlike the epoch reader's visible-lane filter, it can observe
+retained metadata on archived lanes and invisible parents. Missing rows and
+unknown NULL pairs are distinct; it neither acquires locks nor infers current
+epochs, turns or authority. No production caller is added. Future generic
+dispatch writes and claim assignments require a reviewed lifecycle inventory
+contract; syntax coverage is not a runtime fence.
+
+The metadata/constraint installation uses a short transaction with a five-second
+lock acquisition timeout and no validation scan. Validation has its own
+transaction and still requires a table scan; local tests do not establish
+production duration. The concurrent index is a standalone statement without
+IF NOT EXISTS. A failed or interrupted build requires explicit operator
+inspection; dirty migration repair does not silently skip it.
+An ordinary metadata/validation failure, including lock timeout, also leaves
+the attempted migration dirty. Inspect the actual catalog and rollback state
+before explicit operator version repair; the built-in allowlist refuses all
+four versions and must never force past missing objects automatically.
+Validation down intentionally retains validated constraints until migration 343
+down removes them. Down migrations remove only this slice after its callers/writers are
+rolled back; they do not cascade, clear claims automatically or promise safe
+rollback after future activation. Dependent objects must be removed explicitly.
+
+Focused verification targets `TestSessionLaneClaim`,
+`TestLifecycleEpochStore_GetThreadClaim`, the lifecycle metadata-write scanner
+tests and concurrent-migration/dirty-repair policy tests on disposable
+PostgreSQL 15+. These prove representation, exact scope, rollback boundaries
+and legacy compatibility, not admission, production rollout or provider behavior.
+
 ## Surprises & Discoveries
 
 Shared ownership includes integration workers and runtime drains, not just the

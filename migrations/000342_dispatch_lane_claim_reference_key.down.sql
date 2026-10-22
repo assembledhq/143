@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_session_input_dispatches_lane_claim;

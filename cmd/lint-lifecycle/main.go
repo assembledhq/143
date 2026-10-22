@@ -208,9 +208,10 @@ var statusAssignmentRE = regexp.MustCompile(`(?i)\bstatus"?\s*=`)
 
 // These non-status columns also gate admission, snapshot lineage and retained
 // ownership. Discover their writes even when the method has an innocuous name.
-var gateAssignmentRE = regexp.MustCompile(`(?i)\b(?:automation_owner_generation_id|code_review_owner_pr_id|ownership_release_pending|cancel_requested_at|archived_at|current_turn|workspace_generation|workspace_revision|snapshot_key|pending_snapshot_key|base_snapshot_key|latest_diff_snapshot_id|recovery_state|sandbox_state|container_id|worker_node_id|turn_holding_container)"?\s*=`)
-var gateTableRE = regexp.MustCompile(`(?i)\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?(automation_target_sessions|pull_request_repair_runs|session_human_input_requests|session_lifecycle_cutovers|session_input_workspace_compatibility)"?\b`)
+var gateAssignmentRE = regexp.MustCompile(`(?i)\b(?:admission_claim_dispatch_id|admission_claim_token|admission_claim_turn|automation_owner_generation_id|code_review_owner_pr_id|ownership_release_pending|cancel_requested_at|archived_at|current_turn|workspace_generation|workspace_revision|snapshot_key|pending_snapshot_key|base_snapshot_key|latest_diff_snapshot_id|recovery_state|sandbox_state|container_id|worker_node_id|turn_holding_container)"?\s*=`)
+var gateTableRE = regexp.MustCompile(`(?i)\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?(automation_target_sessions|pull_request_repair_runs|session_human_input_requests|session_lifecycle_cutovers|session_input_workspace_compatibility|session_input_dispatches)"?\b`)
 var statusColumnRE = regexp.MustCompile(`(?i)\bstatus\b`)
+var claimColumnRE = regexp.MustCompile(`(?i)\b(?:admission_claim_dispatch_id|admission_claim_token|admission_claim_turn)\b`)
 var whitespaceRE = regexp.MustCompile(`\s+`)
 var updateRE = regexp.MustCompile(`(?i)\bUPDATE\s+`)
 var lifecycleFromRE = regexp.MustCompile(`(?i)\bFROM\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?(sessions|session_threads)"?\s+(?:AS\s+)?"?([a-z_][a-z0-9_]*)"?\b`)
@@ -531,6 +532,8 @@ func collectFacts(fn *function, constants map[string]string) {
 					end := strings.Index(query, ")")
 					if end >= 0 && statusColumnRE.MatchString(query[:end]) {
 						fn.kinds = append(fn.kinds, "status-insert")
+					} else if end >= 0 && claimColumnRE.MatchString(query) {
+						fn.kinds = append(fn.kinds, "lifecycle-gate-insert")
 					} else {
 						continue
 					}
@@ -538,7 +541,7 @@ func collectFacts(fn *function, constants map[string]string) {
 					fn.kinds = append(fn.kinds, "lifecycle-delete")
 				} else if statusAssignmentRE.MatchString(setClause(query)) {
 					fn.kinds = append(fn.kinds, "status-update")
-				} else if gateAssignmentRE.MatchString(setClause(query)) {
+				} else if gateAssignmentRE.MatchString(setClause(query)) || claimColumnRE.MatchString(setClause(query)) {
 					fn.kinds = append(fn.kinds, "lifecycle-gate-update")
 				} else if strings.Contains(query, "<dynamic>") || strings.Contains(setClause(query), "%s") || strings.HasSuffix(strings.TrimSpace(strings.ToUpper(query)), "SET") || setClause(query) == "" {
 					fn.kinds = append(fn.kinds, "possible-status-update")
@@ -952,7 +955,7 @@ func requiresMutationContract(found candidate) bool {
 		return true
 	}
 	for _, kind := range found.Kinds {
-		if kind == "status-update" || kind == "status-insert" || kind == "lifecycle-gate-update" || kind == "authority-table-write" {
+		if kind == "status-update" || kind == "status-insert" || kind == "lifecycle-gate-update" || kind == "lifecycle-gate-insert" || kind == "authority-table-write" {
 			return true
 		}
 	}
