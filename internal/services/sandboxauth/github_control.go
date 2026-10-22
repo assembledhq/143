@@ -36,11 +36,11 @@ func (s *Server) handleGitHubControl(ctx context.Context, conn net.Conn, scope *
 			s.writeError(conn, "unsupported GitHub coverage observer")
 			return
 		}
-		if !validCoverageReason(req.CoverageReason) {
+		if !validClientCoverageReason(req.CoverageReason) {
 			s.writeError(conn, "unsupported GitHub coverage reason")
 			return
 		}
-		s.logCoverage(metadata, req.CoverageReason)
+		s.logReportedCoverage(metadata, req.CoverageReason)
 	} else {
 		scope.mu.Lock()
 		binding, ok := scope.bindings[req.ObservationID]
@@ -57,7 +57,9 @@ func (s *Server) handleGitHubControl(ctx context.Context, conn net.Conn, scope *
 		}
 		metadata := binding.metadata
 		if req.UnknownPrincipal {
-			s.logCoverage(metadata, "unknown_principal")
+			metadata.AuthType, metadata.InstallationID = telemetry.AuthTypeUnknown, 0
+			metadata.PrincipalUnresolved = true
+			s.logReportedCoverage(metadata, "unknown_principal")
 		} else if metadata.AuthType == telemetry.AuthTypeAppInstallation {
 			route := telemetry.NormalizeExternalRoute(req.Route)
 			if err := s.githubController.BeforeExternal(ctx, ratelimit.Scope{InstallationID: metadata.InstallationID, Caller: metadata.Caller, Route: route}); err != nil {
@@ -89,9 +91,9 @@ func validGitHubRequestMethod(method string) bool {
 	}
 }
 
-func validCoverageReason(reason string) bool {
+func validClientCoverageReason(reason string) bool {
 	switch reason {
-	case "supported_control", "legacy_observation_only", "legacy_unobserved_api", "unsupported_command", "explicit_credentials", "custom_host", "missing_binding", "binding_unavailable", "invalid_control_request", "control_unavailable", "control_check_failed", "unknown_principal", "observation_rejected", "observation_report_failed", "observation_queue_full", "observation_timeout":
+	case "unsupported_command", "explicit_credentials", "custom_host", "missing_binding", "control_unavailable", "control_check_failed", "observation_report_failed", "observation_queue_full", "observation_timeout":
 		return true
 	default:
 		return false
@@ -99,12 +101,24 @@ func validCoverageReason(reason string) bool {
 }
 
 func (s *Server) logCoverage(metadata telemetry.RequestMetadata, reason string) {
-	event := s.logger.Info().Str("github_caller", metadata.Caller).Str("github_coverage_reason", reason)
+	s.logCoverageEvent(metadata, reason, "host", true)
+}
+
+func (s *Server) logReportedCoverage(metadata telemetry.RequestMetadata, reason string) {
+	s.logCoverageEvent(metadata, reason, "sandbox", false)
+}
+
+func (s *Server) logCoverageEvent(metadata telemetry.RequestMetadata, reason, source string, trusted bool) {
+	event := s.logger.Info().Str("github_caller", metadata.Caller).Str("github_coverage_reason", reason).
+		Str("github_coverage_source", source).Bool("github_coverage_trusted", trusted)
 	if metadata.InstallationID > 0 {
 		event = event.Int64("github_installation_id", metadata.InstallationID)
 	}
 	if metadata.AuthType != "" {
 		event = event.Str("github_auth_type", metadata.AuthType)
+	}
+	if metadata.PrincipalUnresolved {
+		event = event.Bool("github_principal_unresolved", true)
 	}
 	if metadata.SessionID != "" {
 		event = event.Str("session_id", metadata.SessionID)
@@ -116,7 +130,7 @@ func (s *Server) logCoverage(metadata telemetry.RequestMetadata, reason string) 
 }
 
 func (c *Client) reportCoverage(ctx context.Context, caller, reason string, stderr io.Writer) {
-	if c.SocketPath == "" || !validCoverageReason(reason) {
+	if c.SocketPath == "" || !validClientCoverageReason(reason) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)

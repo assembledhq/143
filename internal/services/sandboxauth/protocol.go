@@ -36,6 +36,11 @@ import (
 // read by `143-tools git-credential` / `143-tools auth-token`.
 const SocketEnvVar = "_143_AUTH_SOCK"
 
+// currentHelperVersion identifies credential requests from helpers that can
+// distinguish current unobserved use from older binaries. It is a declaration,
+// not an attestation that the helper applied request admission.
+const currentHelperVersion = 1
+
 // SandboxSocketDir is the canonical in-sandbox directory the orchestrator
 // bind-mounts the per-session host socket directory onto. We mount a
 // directory rather than the socket file directly because Linux file bind-
@@ -98,6 +103,7 @@ const (
 type Request struct {
 	Op                 Op                `json:"op"`
 	Action             Action            `json:"action,omitempty"`
+	HelperVersion      int               `json:"helper_version,omitempty"`
 	Observer           string            `json:"observer,omitempty"`
 	WantObservation    bool              `json:"want_observation,omitempty"`
 	WantRequestControl bool              `json:"want_request_control,omitempty"`
@@ -248,7 +254,7 @@ func isListenerTransientlyAbsent(err error) bool {
 // action. Returns the response payload (which may carry a non-empty Error
 // field) and any transport error.
 func (c *Client) Get(ctx context.Context, action Action) (*Response, error) {
-	return c.exchange(ctx, Request{Op: OpGet, Action: action})
+	return c.exchange(ctx, Request{Op: OpGet, Action: action, HelperVersion: currentHelperVersion})
 }
 
 func (c *Client) exchange(ctx context.Context, req Request) (*Response, error) {
@@ -303,7 +309,7 @@ func (c *Client) GetObservedAPIToken(ctx context.Context, callers ...string) (*R
 	if len(callers) > 0 {
 		caller = callers[0]
 	}
-	return c.exchange(ctx, Request{Op: OpGet, Action: ActionAPI, WantObservation: true, WantRequestControl: true, Observer: caller})
+	return c.exchange(ctx, Request{Op: OpGet, Action: ActionAPI, HelperVersion: currentHelperVersion, WantObservation: true, WantRequestControl: true, Observer: caller})
 }
 
 func (c *Client) Observe(ctx context.Context, observationID string, events []HTTPObservation, finish bool) error {

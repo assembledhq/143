@@ -53,6 +53,7 @@ func New(cfg Config, logger zerolog.Logger, metrics *Metrics) *Client {
 		opts.DialTimeout = cfg.Timeouts.Dial
 		opts.ReadTimeout = cfg.Timeouts.Read
 		opts.WriteTimeout = cfg.Timeouts.Write
+		opts.ContextTimeoutEnabled = true
 		if cfg.PoolSize > 0 {
 			opts.PoolSize = cfg.PoolSize
 		}
@@ -63,13 +64,14 @@ func New(cfg Config, logger zerolog.Logger, metrics *Metrics) *Client {
 			return nil
 		}
 		rdb = redis.NewFailoverClient(&redis.FailoverOptions{
-			MasterName:    cfg.MasterName,
-			SentinelAddrs: cfg.Addrs,
-			Password:      cfg.Password,
-			PoolSize:      cfg.PoolSize,
-			DialTimeout:   cfg.Timeouts.Dial,
-			ReadTimeout:   cfg.Timeouts.Read,
-			WriteTimeout:  cfg.Timeouts.Write,
+			MasterName:            cfg.MasterName,
+			SentinelAddrs:         cfg.Addrs,
+			Password:              cfg.Password,
+			PoolSize:              cfg.PoolSize,
+			DialTimeout:           cfg.Timeouts.Dial,
+			ReadTimeout:           cfg.Timeouts.Read,
+			WriteTimeout:          cfg.Timeouts.Write,
+			ContextTimeoutEnabled: true,
 		})
 	case "cluster":
 		if len(cfg.Addrs) == 0 {
@@ -77,12 +79,13 @@ func New(cfg Config, logger zerolog.Logger, metrics *Metrics) *Client {
 			return nil
 		}
 		rdb = redis.NewClusterClient(&redis.ClusterOptions{
-			Addrs:        cfg.Addrs,
-			Password:     cfg.Password,
-			PoolSize:     cfg.PoolSize,
-			DialTimeout:  cfg.Timeouts.Dial,
-			ReadTimeout:  cfg.Timeouts.Read,
-			WriteTimeout: cfg.Timeouts.Write,
+			Addrs:                 cfg.Addrs,
+			Password:              cfg.Password,
+			PoolSize:              cfg.PoolSize,
+			DialTimeout:           cfg.Timeouts.Dial,
+			ReadTimeout:           cfg.Timeouts.Read,
+			WriteTimeout:          cfg.Timeouts.Write,
+			ContextTimeoutEnabled: true,
 		})
 	default:
 		logger.Error().Str("topology", cfg.Topology).Msg("invalid Redis topology, running without Redis")

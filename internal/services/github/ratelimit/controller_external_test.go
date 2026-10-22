@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2/server"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -134,4 +136,79 @@ func TestNilControllerBeforeExternal(t *testing.T) {
 	t.Parallel()
 	var controller *Controller
 	require.NoError(t, controller.BeforeExternal(context.Background(), Scope{InstallationID: 42}), "an absent optional controller should preserve external request availability")
+}
+
+func TestControllerExternalAdmissionBoundsRedisLookup(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		blockOffset   time.Duration
+		probeOffset   time.Duration
+		callerTimeout time.Duration
+		expectDefer   bool
+	}{
+		{name: "no retained cooldown"},
+		{name: "retained cooldown", blockOffset: time.Minute, expectDefer: true},
+		{name: "retained trusted probe", blockOffset: -time.Second, probeOffset: 30 * time.Second, expectDefer: true},
+		{name: "shorter caller deadline", blockOffset: time.Minute, callerTimeout: 50 * time.Millisecond, expectDefer: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			client, redisServer, _ := newControllerTestRedis(t)
+			now := time.Now().UTC()
+			controller := newControllerTestInstance(t, &now, client)
+			state := cache.GitHubRateLimitState{}
+			if tt.blockOffset != 0 {
+				state = cache.GitHubRateLimitState{Generation: 7, EpisodeCount: 3, BlockedUntil: now.Add(tt.blockOffset), Kind: string(KindPrimary), Resource: "core", Reason: "primary_reset"}
+				if tt.probeOffset != 0 {
+					state.ProbeOwner, state.ProbeToken, state.ProbeGeneration = "trusted-host", "trusted-probe", state.Generation
+					state.ProbeUntil = now.Add(tt.probeOffset)
+				}
+				controller.fallback.remember(controller.key(42), state, now)
+			}
+			entered := make(chan struct{}, 1)
+			redisServer.Server().SetPreHook(func(_ *server.Peer, command string, _ ...string) bool {
+				if !strings.EqualFold(command, "hgetall") {
+					return false
+				}
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+				return true
+			})
+			ctx := context.Background()
+			if tt.callerTimeout != 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.callerTimeout)
+				defer cancel()
+			}
+			started := time.Now()
+			err := controller.BeforeExternal(ctx, Scope{InstallationID: 42, Caller: "sandbox_gh"})
+			limit := 1800 * time.Millisecond
+			if tt.callerTimeout != 0 {
+				limit = 500 * time.Millisecond
+			}
+			require.Less(t, time.Since(started), limit, "slow Redis must respect an earlier caller deadline and leave time for the auth socket response before the helper's two-second deadline")
+			select {
+			case <-entered:
+			default:
+				t.Fatal("external admission should attempt a real Redis read before using local fallback")
+			}
+			if tt.expectDefer {
+				var deferral *Deferral
+				require.ErrorAs(t, err, &deferral, "slow Redis must preserve retained local cooldowns and trusted probe leases")
+				expectedRetryAt := state.BlockedUntil
+				if state.ProbeUntil.After(expectedRetryAt) {
+					expectedRetryAt = state.ProbeUntil
+				}
+				require.Equal(t, expectedRetryAt, deferral.RetryAt, "degraded external admission should retain the strongest local deadline")
+			} else {
+				require.NoError(t, err, "external admission without a known cooldown should use the existing local fallback policy")
+			}
+			require.Equal(t, state, controller.fallback.get(controller.key(42), now), "bounded lookup must preserve local evidence without granting recovery authority")
+			require.Equal(t, uint64(0), controller.probeSeq.Load(), "bounded external lookup must never allocate a trusted recovery probe")
+		})
+	}
 }
