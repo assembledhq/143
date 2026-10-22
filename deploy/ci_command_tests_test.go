@@ -50,8 +50,8 @@ func TestCICommandTestsRunEveryPackage(t *testing.T) {
 	require.Greater(t, commandIndex, migrationIndex, "command tests must run after database migrations")
 	step := job.Steps[commandIndex]
 	require.Empty(t, step.If, "all backend test invocations must exercise the comprehensive command gate")
-	require.Positive(t, step.TimeoutMinutes, "command-test execution must have a step timeout")
-	require.LessOrEqual(t, step.TimeoutMinutes, 5, "command tests must retain their bounded CI budget")
+	require.Equal(t, 10, step.TimeoutMinutes, "command tests must retain a bounded step budget with compilation headroom")
+	require.Greater(t, time.Duration(step.TimeoutMinutes)*time.Minute, 300*time.Second, "step budget must leave headroom beyond the command package deadline")
 	if databaseURL, overridden := step.Env["TEST_DATABASE_URL"]; overridden {
 		require.Equal(t, job.Env["TEST_DATABASE_URL"], databaseURL, "the command-test step must preserve its provisioned test database")
 	}
@@ -109,7 +109,7 @@ exit "${MOCK_GO_EXIT_CODE:?}"
 			if tt.race {
 				expected = append(expected, "-race")
 			}
-			expected = append(expected, "-timeout=120s")
+			expected = append(expected, "-timeout=300s")
 			require.Equal(t, expected, strings.Split(strings.TrimSuffix(string(logged), "\n"), "\n"), "CI must test every command package without a test-name filter, with the event's race mode and a bounded package timeout")
 		})
 	}

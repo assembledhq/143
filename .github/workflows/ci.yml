@@ -243,6 +243,7 @@ jobs:
 
       # Full-schema Postgres fixtures need their own bounded package budget.
       # Keep database work outside the concurrent general package suite.
+      # Bound overlapping fixtures, not the concurrency exercised inside a test.
       - name: Run database tests
         id: database_tests
         timeout-minutes: 10
@@ -260,7 +261,7 @@ jobs:
           # Keep stderr separate so compiler/Redis warnings cannot corrupt JSONL.
           # Disable errexit only while copying both pipeline statuses immediately.
           set +e
-          go test -json ./internal/db -coverpkg=./internal/... -coverprofile=coverage-unit-db.out \
+          go test -json ./internal/db -parallel=2 -coverpkg=./internal/... -coverprofile=coverage-unit-db.out \
             -covermode="$mode" "${race[@]}" -timeout="$package_timeout" \
             2>"$diagnostics/go-test.stderr.log" | tee "$diagnostics/go-test.jsonl"
           statuses=("${PIPESTATUS[@]}")
@@ -334,13 +335,14 @@ jobs:
         run: python3 -B -m unittest discover -s scripts -p 'test_*code_review_export*.py'
 
       - name: Run command tests
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           race=()
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             race=(-race)
           fi
-          go test ./cmd/... -count=1 "${race[@]}" -timeout=120s
+          # Fresh-schema cases share a package deadline, not one per test.
+          go test ./cmd/... -count=1 "${race[@]}" -timeout=300s
 
       # Chrome startup and rendering need CPU that the parallel backend suite
       # can otherwise consume. Keep real browser fixtures in a serial step,
@@ -353,18 +355,14 @@ jobs:
           preview_chrome_path="$(command -v google-chrome)"
           preview_chrome_binary="$(readlink -f "$preview_chrome_path")"
           test -x "$preview_chrome_binary"
-          preview_chrome_version="$(timeout 5s "$preview_chrome_binary" --version)"
-          case "$preview_chrome_version" in
-            "Google Chrome "*) ;;
-            *) echo "CI browser must identify as Google Chrome" >&2; exit 1 ;;
-          esac
+          preview_chrome_version="$(bash .github/scripts/probe-preview-chrome.sh "$preview_chrome_binary")"
           preview_chrome_dir="$(mktemp -d "${RUNNER_TEMP:?}/preview-chrome.XXXXXX")"
           trap 'rm -rf "$preview_chrome_dir"' EXIT
           # chromedp discovers headless_shell and Chromium before Google Chrome.
           # This runner-owned alias selects validated Google Chrome for this fixture step.
           ln -s "$preview_chrome_binary" "$preview_chrome_dir/headless_shell"
           test "$(readlink -f "$preview_chrome_dir/headless_shell")" = "$preview_chrome_binary"
-          printf 'Preview test browser: %s (%s)\n' "$preview_chrome_binary" "$preview_chrome_version"
+          printf 'Preview test browser: %s\n' "$preview_chrome_version"
           mode=count
           race=()
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then

@@ -175,7 +175,11 @@ else:
 				if pkg == "./internal/db" || pkg == "./internal/worker" {
 					args = append(args, "-json")
 				}
-				args = append(args, pkg, "-coverpkg=./internal/...", "-coverprofile="+profile, "-covermode="+tt.mode)
+				args = append(args, pkg)
+				if pkg == "./internal/db" {
+					args = append(args, "-parallel=2")
+				}
+				args = append(args, "-coverpkg=./internal/...", "-coverprofile="+profile, "-covermode="+tt.mode)
 				args = append(args, tt.race...)
 				return append(args, "-timeout="+tt.boundedTimeout)
 			}

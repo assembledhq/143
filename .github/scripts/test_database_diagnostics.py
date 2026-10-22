@@ -100,7 +100,7 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
                 self.assertEqual((diagnostics / "exit-status.txt").read_text(), f"go_test={go_status}\njson_capture={tee_status}\n")
                 calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
                 go = next(call for call in calls if call[0] == "go")
-                self.assertEqual(go, ["go", "test", "-json", "./internal/db", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-db.out", "-covermode=count", "-timeout=300s"], "diagnostics must not change PR test coverage or budgets")
+                self.assertEqual(go, ["go", "test", "-json", "./internal/db", "-parallel=2", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-db.out", "-covermode=count", "-timeout=300s"], "diagnostics must preserve PR test coverage, budgets, and bounded fixture overlap")
 
     def test_bounded_aggregate_only_postgres_snapshot(self):
         for status in (0, 1, 124):
