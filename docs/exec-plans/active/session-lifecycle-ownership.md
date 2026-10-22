@@ -1791,6 +1791,10 @@ revision; it must not reinterpret new durable records or trigger replay.
   defaults or inference. Keep its DB-only reader observational, preserve unknown
   metadata and existing API behavior, and validate known classification labels
   separately from admission authority.
+- [x] Add passive runtime/executor/inbox-batch admission epochs and raw runtime
+  drain metadata in separate single-table migrations. Prove exact nullable-lane
+  reads and unchanged legacy allocation, heartbeat, terminal, reclaim and batch
+  behavior; lease expiry never supplies physical drain proof.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2544,6 +2548,40 @@ notice, compatibility guard or activation is introduced. Future canonical writer
 must validate those contracts atomically; a stored label or opaque JSON is not
 readiness proof. This migration deliberately remains a catalog-only additive
 prerequisite rather than scanning the hot table to enforce a policy not yet wired.
+
+### 0a passive execution metadata validation
+
+`go test ./cmd/migrate ./internal/db -run
+'TestSessionExecutionEpoch|TestExecutionEpochMetadata_Reads|TestThreadRuntimeStore_GetLifecycleMetadata_DrainProof'
+-count=1` with a disposable PostgreSQL 15+ `TEST_DATABASE_URL` exercises the real
+schema and stores. PostgreSQL 17.10 fixtures cover fresh schema and independent
+325 → 326 → 327 → 328 upgrades, reverse rollback and reapply. Each migration
+alters only its own hot table with nullable, default-free columns: three runtime
+fields, two executor fields and two delivery-batch fields. Full legacy row graphs
+and API projections, including existing writer and request metadata, survive.
+
+The three DB-only reads require exact tenant/session/lane/resource scope without
+locks, active-status/lease filters or inference. An absent executor lane matches
+only SQL NULL, never every lane or the zero UUID. Real driver round trips preserve
+independent NULL, zero and signed bigint values; raw runtime JSON distinguishes
+SQL NULL, JSON null and opaque future values. Thirty-eight parallel mock cases
+also cover exact query arguments, underlying errors and complete scan-failure
+cleanup.
+
+Eighteen isolated full-schema cases exercise actual runtime allocation, live
+transition, heartbeat, delivery advancement, terminal close and expiry reclaim;
+threaded/unthreaded executor allocation, heartbeat, drain, terminal and reclaim;
+and real message/inbox seed, acknowledgement, batch start and abandonment paths.
+Exact typed checks preserve large epoch values and ensure absent drain proof
+remains SQL NULL after terminal or lease-loss observations. Populated metadata
+also survives unchanged. Batch comparisons normalize only the preexisting UTC
+versus driver-local timestamp representation when comparing logical values;
+no response formatting or production timeout policy changes.
+
+These are representation and compatibility proofs, not immutable allocation,
+dispatch binding, physical process drain, launch permission, historical settlement,
+writer-floor or activation proof. No metadata author, runtime consumer, public
+model field or lifecycle authority is added.
 
 ## Surprises & Discoveries
 
