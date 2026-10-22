@@ -3,62 +3,23 @@ package agent
 import (
 	"context"
 	"errors"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	testpostgres "github.com/assembledhq/143/internal/testutil/postgres"
 )
 
 func newThreadDeliveryPostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	raw := os.Getenv("TEST_DATABASE_URL")
-	if raw == "" {
-		t.Skip("set TEST_DATABASE_URL for live delivery lifecycle tests")
-	}
-	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, raw)
-	require.NoError(t, err, "connect disposable PostgreSQL")
-	t.Cleanup(func() { require.NoError(t, admin.Close(ctx), "close test admin") })
-	name := "thread_delivery_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
-	require.NoError(t, err, "create isolated live-delivery database")
-	t.Cleanup(func() {
-		_, err := admin.Exec(ctx, "DROP DATABASE "+name+" WITH (FORCE)")
-		require.NoError(t, err, "drop only this isolated database")
-	})
-	parsed, err := url.Parse(raw)
-	require.NoError(t, err, "parse disposable PostgreSQL URL")
-	parsed.Path = "/" + name
-	source, err := filepath.Abs("../../../migrations")
-	require.NoError(t, err, "resolve current migration chain")
-	migration, err := migrate.New("file://"+source, parsed.String())
-	require.NoError(t, err, "initialize full lifecycle migrations")
-	require.NoError(t, migration.Up(), "exercise complete current schema")
-	sourceErr, dbErr := migration.Close()
-	require.NoError(t, sourceErr, "close migration source")
-	require.NoError(t, dbErr, "close migration connection")
-	config, err := pgxpool.ParseConfig(parsed.String())
-	require.NoError(t, err, "parse isolated live delivery pool")
-	config.MaxConns = 8
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	require.NoError(t, err, "open isolated live-delivery pool")
-	t.Cleanup(pool.Close)
-	return pool
+	return testpostgres.NewPool(t, context.Background(), "../../../migrations", 8)
 }
 
 func seedThreadDeliverySession(t *testing.T, pool *pgxpool.Pool) *models.Session {

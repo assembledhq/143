@@ -3,54 +3,20 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"testing"
+	"time"
+
 	"github.com/assembledhq/143/internal/models"
-	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	testpostgres "github.com/assembledhq/143/internal/testutil/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
 )
 
 func newFeedbackLifecyclePool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	raw := os.Getenv("TEST_DATABASE_URL")
-	if raw == "" {
-		t.Skip("set TEST_DATABASE_URL to disposable PostgreSQL for durable preview startup tests")
-	}
-	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, raw)
-	require.NoError(t, err, "connect disposable database server")
-	t.Cleanup(func() { require.NoError(t, admin.Close(ctx), "close lifecycle admin connection") })
-	name := "feedback_lifecycle_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	_, err = admin.Exec(ctx, "CREATE DATABASE "+name)
-	require.NoError(t, err, "create isolated preview database")
-	t.Cleanup(func() {
-		_, err := admin.Exec(ctx, "DROP DATABASE "+name+" WITH (FORCE)")
-		require.NoError(t, err, "remove isolated preview database")
-	})
-	parsed, err := url.Parse(raw)
-	require.NoError(t, err, "parse disposable database URL")
-	parsed.Path = "/" + name
-	source, err := filepath.Abs("../../migrations")
-	require.NoError(t, err, "resolve full migration chain")
-	migration, err := migrate.New("file://"+source, parsed.String())
-	require.NoError(t, err, "initialize isolated migrations")
-	require.NoError(t, migration.Up(), "preview lifecycle must exercise current complete schema")
-	sourceErr, dbErr := migration.Close()
-	require.NoError(t, sourceErr, "close migration source")
-	require.NoError(t, dbErr, "close migration connection")
-	pool, err := pgxpool.New(ctx, parsed.String())
-	require.NoError(t, err, "open isolated preview pool")
-	t.Cleanup(pool.Close)
-	return pool
+	return testpostgres.NewPool(t, context.Background(), "../../migrations", 0)
 }
 
 func seedFeedbackLifecycle(t *testing.T, pool *pgxpool.Pool) (uuid.UUID, uuid.UUID, uuid.UUID) {
