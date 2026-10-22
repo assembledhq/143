@@ -3610,7 +3610,7 @@
       "migration": "No production caller. The public runner recognizes only this actual-conflict private cause in addition to actual 40P01/55P03, retaining all existing exclusions. SQL/key indirection is pinned by independent unit and real PostgreSQL tests; syntax inventory is not whole-program or runtime proof.",
       "canonical_target": "Private implementation shared by cutover entry/activation acquisition prerequisites",
       "authority": "None; effective settings and namespaced locks cannot establish tenant ownership, record provenance or active semantics.",
-      "fence_outcome": "Owner must roll back on any error. A private busy is neither SQLSTATE 55P03 nor public exhausted contention, and cannot silently authorize replay.",
+      "fence_outcome": "Owner must roll back on any error. A private busy is neither SQLSTATE 55P03 nor public exhausted contention; only the owner's confirmed-whole-rollback retry path with all existing exclusions can replay it.",
       "prerequisite_0a": "Every future owner must retain the bounded whole-unit retry discipline and all cancellation/joined-error/rollback/commit exclusions; mandatory canonical checks, all caller conversions and activation guards remain prerequisites.",
       "evidence": [
         "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverInTx",
