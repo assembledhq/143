@@ -146,6 +146,47 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Lightweight jobs must not populate Backend Test's build cache.
+          cache: false
+
+      - name: Identify backend Go cache
+        id: go-cache
+        run: |
+          go_version="$(go env GOVERSION)"
+          go_build_cache="$(go env GOCACHE)"
+          go_module_cache="$(go env GOMODCACHE)"
+          mode=count
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=race-atomic
+          fi
+          family="backend-go-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS}-${go_version}"
+          {
+            echo "family=$family"
+            echo "scope=${family}-${mode}"
+            echo "build=$go_build_cache"
+            echo "modules=$go_module_cache"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Cache backend Go modules and build outputs
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.build }}
+            ${{ steps.go-cache.outputs.modules }}
+          # Cache entries are immutable. Each commit saves the complete warmed
+          # backend cache after success, reusing compatible objects on restore.
+          key: ${{ steps.go-cache.outputs.scope }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
+          # New PRs can fall back to main's race-mode cache: Go itself keys
+          # objects by build flags, while modules are reusable across modes.
+          restore-keys: |
+            ${{ steps.go-cache.outputs.scope }}-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ steps.go-cache.outputs.scope }}-
+            ${{ steps.go-cache.outputs.family }}-
+
+      - name: Reset cached Go test results
+        # Cached results do not track external PostgreSQL state. Keep compiled
+        # objects and downloaded modules, but execute every test against its fixtures.
+        run: go clean -testcache
 
       - name: Test review dependency recipe
         run: python3 -B .143/review-dependencies_test.py
@@ -197,7 +238,7 @@ jobs:
               unit_packages+=("$package")
             fi
           done <<< "$packages"
-          go test "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
+          go test -json "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
             -coverprofile=coverage-unit-other.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
       # Full-schema Postgres fixtures need their own bounded package budget.

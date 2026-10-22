@@ -167,7 +167,7 @@ else:
 				require.NoError(t, json.Unmarshal([]byte(line), &args), "fake Go must record complete argument arrays")
 				calls = append(calls, args)
 			}
-			otherArgs := []string{"test", "github.com/assembledhq/143/internal/config", "github.com/assembledhq/143/internal/services/preview", "-skip", "^TestBrowserChromeDP", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-other.out", "-covermode=" + tt.mode}
+			otherArgs := []string{"test", "-json", "github.com/assembledhq/143/internal/config", "github.com/assembledhq/143/internal/services/preview", "-skip", "^TestBrowserChromeDP", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-other.out", "-covermode=" + tt.mode}
 			otherArgs = append(otherArgs, tt.race...)
 			otherArgs = append(otherArgs, "-timeout="+tt.otherTimeout)
 			boundedArgs := func(pkg, profile string) []string {
