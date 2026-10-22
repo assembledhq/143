@@ -49,8 +49,9 @@ type lifecycleTxStarter interface {
 // ErrLifecycleContention identifies an exhausted, confirmed-aborted lock unit.
 var ErrLifecycleContention = errors.New("lifecycle transaction contended")
 
-// LifecycleContentionError preserves the last PostgreSQL contention error. It
-// means no attempt committed; it does not authorize replay of external effects.
+// LifecycleContentionError preserves the last eligible PostgreSQL or private
+// cutover-interlock conflict. It means no attempt committed; it does not
+// authorize replay of external effects.
 type LifecycleContentionError struct {
 	Attempts int
 	Cause    error
@@ -131,9 +132,12 @@ func requireLifecycleScopeTransactionInTx(ctx context.Context, tx pgx.Tx) error 
 // attempt's values are valid after this function returns nil. Discard all values
 // on any error or panic.
 //
-// Only setup/work SQLSTATE 40P01 and 55P03 can replay, after an explicit successful
-// whole-transaction rollback. Begin and commit errors never replay, including a
-// commit error reporting rollback: callers must resolve the exact command receipt
+// Only setup/work SQLSTATE 40P01 and 55P03, or the private busy error created by
+// an actual cutover advisory try-lock false, can replay after an explicit
+// successful whole-transaction rollback. This concrete private cause is the sole
+// application-error exception, not a generic retryable-error interface. Begin
+// and commit errors never replay, including a commit error reporting rollback:
+// callers must resolve the exact command receipt
 // rather than infer permission to resubmit. Cancellation cannot bound a callback
 // that ignores its context, but an expired unit is never knowingly committed.
 // A live context before Commit does not reserve time for it; deadline expiry or
@@ -250,11 +254,18 @@ func retryableLifecycleTransaction(err error) bool {
 		return false
 	}
 	// A joined error may also contain a network/application failure. One nested
-	// SQLSTATE must not hide that ambiguity and grant permission to replay.
+	// eligible conflict must not hide that ambiguity and permit replay.
 	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
 		if _, joined := cause.(interface{ Unwrap() []error }); joined {
 			return false
 		}
+	}
+	// Only the cutover helper's actual nonwaiting acquisition conflict has this
+	// private concrete type. Eligibility is not abort proof: the owner above
+	// still confirms whole rollback, budget and pre-commit phase before replay.
+	var busy *lifecycleCutoverInterlockBusyError
+	if errors.As(err, &busy) && busy != nil {
+		return true
 	}
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && (pgErr.Code == "40P01" || pgErr.Code == "55P03")

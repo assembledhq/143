@@ -761,11 +761,19 @@ This is a selected design, **not a proven deadlock-free implementation**. For
 pre-floor/floor coexistence, floor writers take newly conflicting explicit locks
 NOWAIT (including advisory try-lock); `SET LOCAL lock_timeout='250ms'`,
 `statement_timeout='1500ms'`, whole DB admission/lock-unit deadline 2 seconds
-(including retries, not outside-transaction selected artifact I/O). On `55P03` or
-`40P01` only, confirm transaction abort with Rollback before replay, at most three
-attempts with jittered 25–100ms delay and full revalidation. `57014`, network,
-arbitrary application errors or unknown commit never auto-retry. A rollback
-failure is not a confirmed abort; abandon connection and resolve command receipt.
+(including retries, not outside-transaction selected artifact I/O). Only actual
+`55P03`/`40P01` or the concrete private busy error from a real cutover advisory
+try-lock `false` may enter whole-unit retry. A false try-lock is not a fabricated
+SQLSTATE and does not itself abort the transaction. Confirm whole rollback before
+replay, at most three attempts with jittered 25–100ms delay and full revalidation.
+The private actual-conflict type is the sole application-error exception, never
+a string convention or generic retryable-error interface. `57014`, network,
+joined/ambiguous failures, other application errors or unknown commit never
+auto-retry. Begin and commit errors do not replay even if they carry an otherwise
+eligible conflict cause. Cancellation or deadline expiry also forbids replay; the
+same whole-unit deadline covers all attempts rather than resetting on conflict.
+A rollback failure is not a confirmed abort; abandon connection and resolve
+command receipt.
 No provider/Slack/Redis effect inside any attempted transaction. Foreground lock
 retry exhaustion returns typed Contended without a claim/answer; already accepted
 async receipt stays pending for independent reconciliation, not ingress-job retry

@@ -261,7 +261,7 @@ func TestLifecycleCutoverFreshStatementObservationPostgres(t *testing.T) {
 	}
 }
 
-func TestLifecycleCutoverBusyRollsBackWithoutRunnerReplayPostgres(t *testing.T) {
+func TestLifecycleCutoverBusyExhaustsBoundedRunnerPostgres(t *testing.T) {
 	t.Parallel()
 	pool, orgID, sessionID := newLifecycleCutoverPostgresFixture(t)
 	setupCtx, stopSetup := context.WithTimeout(context.Background(), 10*time.Second)
@@ -277,10 +277,29 @@ func TestLifecycleCutoverBusyRollsBackWithoutRunnerReplayPostgres(t *testing.T) 
 	before := lifecycleCutoverPostgresRows(t, ctx, holder, orgID, sessionID)
 	attempts := 0
 	var busyCause error
-	var attemptedTx pgx.Tx
+	var attemptedTransactions []pgx.Tx
+	var identities [][2]string
+	var callbackDeadline time.Time
 	err = RunLifecycleTransaction(ctx, pool, func(workCtx context.Context, tx pgx.Tx) error {
 		attempts++
-		attemptedTx = tx
+		deadline, ok := workCtx.Deadline()
+		require.True(t, ok, "every busy attempt must retain the owner's existing bounded deadline")
+		if attempts == 1 {
+			callbackDeadline = deadline
+		} else {
+			require.Equal(t, callbackDeadline, deadline, "busy replay must not reset or extend the whole-unit budget")
+			_, closedErr := attemptedTransactions[len(attemptedTransactions)-1].Exec(workCtx, "SELECT 1")
+			require.ErrorIs(t, closedErr, pgx.ErrTxClosed, "the previous real transaction must be closed before any new callback runs")
+		}
+		attemptedTransactions = append(attemptedTransactions, tx)
+		identity := lifecycleCutoverPostgresTransactionIdentity(t, workCtx, tx)
+		for _, previous := range identities {
+			require.NotEqual(t, previous, identity, "every replay must enter a distinct real transaction even if its backend connection is reused")
+		}
+		identities = append(identities, identity)
+		var priorEffects []int
+		require.NoError(t, tx.QueryRow(workCtx, `SELECT COALESCE(array_agg(attempt ORDER BY attempt),ARRAY[]::integer[]) FROM lifecycle_cutover_effect_probe WHERE org_id=$1`, orgID).Scan(&priorEffects), "read prior committed effects through the fresh callback's already-held connection")
+		require.Equal(t, []int{}, priorEffects, "every prior attempt must be fully rolled back before another effect is staged")
 		_, stageErr := tx.Exec(workCtx, `INSERT INTO lifecycle_cutover_effect_probe(org_id,attempt) VALUES($1,$2)`, orgID, attempts)
 		if stageErr != nil {
 			return fmt.Errorf("stage synthetic outer effect: %w", stageErr)
@@ -292,14 +311,23 @@ func TestLifecycleCutoverBusyRollsBackWithoutRunnerReplayPostgres(t *testing.T) 
 		busyCause = observeErr
 		return fmt.Errorf("synthetic outer command rejected: %w", observeErr)
 	})
-	require.Equal(t, 1, attempts, "the SQLSTATE-only public runner must never automatically replay an advisory false application outcome")
+	require.Equal(t, 3, attempts, "a continuously busy interlock must stop at exactly the existing three-attempt cap")
 	require.NotNil(t, busyCause, "the tested failure must come from the real private busy interlock rather than an unrelated setup error")
-	require.ErrorIs(t, err, busyCause, "outer wrapping must retain the exact private busy cause")
-	requireLifecycleCutoverPostgresBusy(t, err)
+	require.ErrorIs(t, err, ErrLifecycleContention, "only the owner may report exhausted contention after confirming all three whole-unit rollbacks")
+	var exhausted *LifecycleContentionError
+	require.ErrorAs(t, err, &exhausted, "bounded exhaustion must use the existing public contention result")
+	require.Equal(t, 3, exhausted.Attempts, "the public exhaustion result must report the exact completed attempt count")
+	require.ErrorIs(t, exhausted.Cause, busyCause, "exhaustion must preserve the final actual private busy cause through outer wrapping")
+	var busy *lifecycleCutoverInterlockBusyError
+	require.ErrorAs(t, err, &busy, "the public exhaustion wrapper must retain its final concrete private busy cause")
+	var pgErr *pgconn.PgError
+	require.False(t, errors.As(err, &pgErr), "advisory exhaustion must not fabricate a PostgreSQL SQLSTATE failure")
 	// A settled pgx transaction rejects subsequent operations without borrowing
 	// another observer connection; durable readback uses the held blocker.
-	_, closedErr := attemptedTx.Exec(setupCtx, "SELECT 1")
-	require.ErrorIs(t, closedErr, pgx.ErrTxClosed, "the runner must settle its rejected whole unit before returning")
+	// Each replacement callback already checked its predecessor was closed;
+	// only the last attempt still needs this client-side closure assertion.
+	_, closedErr := attemptedTransactions[len(attemptedTransactions)-1].Exec(setupCtx, "SELECT 1")
+	require.ErrorIs(t, closedErr, pgx.ErrTxClosed, "the final exhausted attempt must also be settled before the runner returns")
 	var effects []int
 	require.NoError(t, holder.QueryRow(setupCtx, `SELECT COALESCE(array_agg(attempt ORDER BY attempt),ARRAY[]::integer[]) FROM lifecycle_cutover_effect_probe WHERE org_id=$1`, orgID).Scan(&effects), "read committed effects through the held transaction without an extra pool observer")
 	require.Equal(t, []int{}, effects, "the complete staged unit must roll back rather than leave a durable effect or replay artifact")
@@ -352,5 +380,5 @@ func requireLifecycleCutoverPostgresBusy(t *testing.T, err error) {
 	var pgErr *pgconn.PgError
 	require.False(t, errors.As(err, &pgErr), "private busy must not manufacture a PostgreSQL SQLSTATE contention failure")
 	require.NotErrorIs(t, err, ErrLifecycleContention, "a nonwaiting advisory refusal is not exhausted confirmed-aborted SQL contention")
-	require.False(t, retryableLifecycleTransaction(err), "the unchanged public runner must not classify private advisory busy as SQLSTATE-retryable")
+	require.True(t, retryableLifecycleTransaction(err), "a raw private busy cause is retry-eligible only after its owner confirms whole-unit rollback")
 }

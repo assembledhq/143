@@ -355,11 +355,28 @@ func requireCutoverMigrationFailure(t *testing.T, err error, code, constraint, c
 	require.Equal(t, column, pgErr.ColumnName, label+" must identify the expected not-null column when applicable")
 }
 
+func TestSessionLifecycleCutoverMissingOrganizationPostgres(t *testing.T) {
+	t.Parallel()
+	migration, conn := newContentMigrationPostgres(t, true)
+	require.NoError(t, migration.Migrate(336), "isolate the organization FK before installing the later tenant/session reference")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var foreignKeys []string
+	require.NoError(t, conn.QueryRow(ctx, `SELECT ARRAY(SELECT conname::text FROM pg_constraint WHERE conrelid='public.session_lifecycle_cutovers'::regclass AND contype='f' ORDER BY conname)`).Scan(&foreignKeys), "inspect all installed parent references before the isolated organization rejection")
+	require.Equal(t, []string{"session_lifecycle_cutovers_org_id_fkey"}, foreignKeys, "only the organization FK may reject this fixture rather than relying on competing trigger order")
+	record := cutoverMigrationRecord{OrgID: uuid.New(), SessionID: uuid.New(), State: "shadow"}
+	_, err := insertCutoverMigrationRecord(ctx, conn, cutoverMigrationArguments(record))
+	requireCutoverMigrationFailure(t, err, "23503", "session_lifecycle_cutovers_org_id_fkey", "", "missing organization before the scoped session FK exists")
+	var count int64
+	require.NoError(t, conn.QueryRow(ctx, `SELECT count(*) FROM session_lifecycle_cutovers WHERE org_id=$1 AND session_id=$2`, record.OrgID, record.SessionID).Scan(&count), "inspect only the rejected missing-organization identity")
+	require.Equal(t, int64(0), count, "organization rejection must not leave any partial cutover row")
+}
+
 func TestSessionLifecycleCutoverMembershipPostgres(t *testing.T) {
 	t.Parallel()
 	migration, conn := newContentMigrationPostgres(t, true)
 	require.NoError(t, migration.Migrate(337), "install the exact tenant/session reference before exercising synthetic membership")
-	tests := []struct{ name string }{{name: "missing organization"}, {name: "missing session"}, {name: "foreign session"}, {name: "duplicate tenant session"}, {name: "same tenant different sessions remain independent"}}
+	tests := []struct{ name string }{{name: "missing session"}, {name: "foreign session"}, {name: "duplicate tenant session"}, {name: "same tenant different sessions remain independent"}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -369,9 +386,6 @@ func TestSessionLifecycleCutoverMembershipPostgres(t *testing.T) {
 			constraint := "session_lifecycle_cutovers_session_scope_fk"
 			code := "23503"
 			switch tt.name {
-			case "missing organization":
-				want.OrgID = uuid.New()
-				constraint = "session_lifecycle_cutovers_org_id_fkey"
 			case "missing session":
 				want.SessionID = uuid.New()
 			case "foreign session":

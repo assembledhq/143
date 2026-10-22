@@ -3569,7 +3569,7 @@
       "canonical_target": "Private cutover entry prerequisite for future canonical commands and activation guards, not a reusable authorization API",
       "authority": "None. Arbitrary writers are not excluded by an advisory lock; all canonical writers and guards must participate before this protocol can become authoritative.",
       "fence_outcome": "Success returns raw transaction-local metadata only. Successful late acquisition continues; actual conflict returns private busy error, never a fabricated SQLSTATE or permission to replay.",
-      "prerequisite_0a": "Before any production caller, compose canonical checks plus mutation, specify capability/normalization/version envelopes, add narrowly reviewed actual-conflict retry integration, and prove VOLATILE trigger snapshot and mixed-version OLD/NEW scope behavior.",
+      "prerequisite_0a": "Before any production caller, compose canonical checks plus mutation using the bounded confirmed-abort owner, specify capability/normalization/version envelopes, and prove VOLATILE trigger snapshot and mixed-version OLD/NEW scope behavior.",
       "evidence": [
         "internal/db/session_lifecycle_cutover.go:observeLifecycleCutoverInTx",
         "internal/db/session_lifecycle_cutover_test.go",
@@ -3590,8 +3590,8 @@
       "migration": "Unused private prerequisite only. Complete floor, drain, classification, guards, capability coverage and activation-controller backoff remain deferred; no intake barrier or active version is installed.",
       "canonical_target": "Private exclusive cutover acquisition for the future fully gated activation owner",
       "authority": "Acquisition alone is not activation permission, proof of drain, floor or provider conformance.",
-      "fence_outcome": "No public contention-exhaustion signal is returned before confirmed abort or retries. Public runner currently rolls back private busy once without replay.",
-      "prerequisite_0a": "Specify and prove the activation owner, exact gate receipts, retained provenance, bounded actual-conflict retry/backoff and safe rollback before any caller.",
+      "fence_outcome": "Raw false is private busy, not public exhaustion. The owner may replay only after confirmed whole rollback and existing budget/phase/uncertainty checks, with the same at-most-three attempt cap; no arbitrary application error is eligible.",
+      "prerequisite_0a": "Specify and prove the activation owner, exact gate receipts, retained provenance, controller rescheduling/backoff and safe rollback before any caller; DB-unit retries do not implement that controller.",
       "evidence": [
         "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverExclusiveInTx",
         "internal/db/session_lifecycle_cutover_test.go",
@@ -3607,11 +3607,11 @@
       "lock": "Identical hashtextextended(text,0) bigint key for both transaction-scoped modes. No session locks/unlocks, waiting variant, row effects, savepoint, settings or retries. Hash collisions add contention, never replace exact scoped reads.",
       "stale_result": "Only actual false constructs lifecycleCutoverInterlockBusyError; cancellation/query/scan errors wrap their own cause. A successful acquisition is not a command result.",
       "classification": "unfenced-needs-conversion",
-      "migration": "No production caller and no public runner policy extension. SQL/key indirection is pinned by independent unit and real PostgreSQL tests; this syntax inventory does not establish whole-program routing or protocol proof.",
+      "migration": "No production caller. The public runner recognizes only this actual-conflict private cause in addition to actual 40P01/55P03, retaining all existing exclusions. SQL/key indirection is pinned by independent unit and real PostgreSQL tests; syntax inventory is not whole-program or runtime proof.",
       "canonical_target": "Private implementation shared by cutover entry/activation acquisition prerequisites",
       "authority": "None; effective settings and namespaced locks cannot establish tenant ownership, record provenance or active semantics.",
       "fence_outcome": "Owner must roll back on any error. A private busy is neither SQLSTATE 55P03 nor public exhausted contention, and cannot silently authorize replay.",
-      "prerequisite_0a": "Review an exact-type retry extension retaining current cancellation/joined-error/rollback/commit exclusions before the first production caller, plus mandatory canonical checks and activation guards.",
+      "prerequisite_0a": "Every future owner must retain the bounded whole-unit retry discipline and all cancellation/joined-error/rollback/commit exclusions; mandatory canonical checks, all caller conversions and activation guards remain prerequisites.",
       "evidence": [
         "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverInTx",
         "internal/db/session_lifecycle_cutover_test.go",
@@ -3631,7 +3631,7 @@
       "canonical_target": "Private cutover entry acquisition before future canonical domain/job/session/lane commands",
       "authority": "None; participation by every protected writer and exact durable routing remain prerequisites.",
       "fence_outcome": "No permission, default version-zero result or retry allowance follows from acquisition alone.",
-      "prerequisite_0a": "Complete actual-conflict retry integration, canonical checks plus mutation, all callers and VOLATILE OLD/NEW routing snapshot proof before activation.",
+      "prerequisite_0a": "Compose the bounded confirmed-abort retry owner with canonical checks plus mutation, all callers and VOLATILE OLD/NEW routing snapshot proof before activation; bound bulk advisory-lock cardinality too.",
       "evidence": [
         "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverSharedInTx",
         "internal/db/session_lifecycle_cutover_test.go",
