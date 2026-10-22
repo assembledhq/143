@@ -203,6 +203,7 @@ func TestRecoveryLoop_Start_StopsOnCancelAfterTick(t *testing.T) {
 
 	loop := NewRecoveryLoop(nodes, jobs, zerolog.Nop(), 90*time.Second, 100)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		loop.Start(ctx, 5*time.Millisecond)
