@@ -1803,6 +1803,10 @@ revision; it must not reinterpret new durable records or trigger replay.
   scoped parent references, structural checks and exact ingress/message uniqueness.
   Preserve unknown provenance and legacy behavior without adding a producer,
   consumer, claim, admission state or runnable scanner.
+- [x] Add a private transaction-local parent/explicit-lane locking kernel with
+  stable batched acquisition and read-only policy verification. Prove exact scope,
+  caller-owned settlement and confirmed-abort retry composition without exporting
+  authorization snapshots or wiring production callers.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2655,6 +2659,10 @@ version without a default. A thread epoch requires an explicit lane. Answer and
 denial identities require a request. These are structural checks, not validation,
 consent, readiness or authority; JSON null and future payload shapes remain raw
 stored values. No zero/current-parent epoch or inferred primary lane is supplied.
+Allowing an unknown session epoch deliberately relaxes the eventual contract's
+required field at this empty identity-only boundary. Before the first production
+producer, tighten that requirement with the consumer/binding protocol; unknown
+provenance must never become a current-epoch fallback or runnable binding.
 Uniqueness is tenant/ingress-kind/key and tenant/nonnull-message identity, not
 content digest or request alone. The tenant/session/id key can support future
 parent-scoped references, without installing any claim pointer. Lane/request
@@ -2687,6 +2695,51 @@ hard-delete policy, canonical authority and activation gates. Rollback removes
 only these new schema objects without CASCADE; future readers/writers and any
 dependent references must be retired first. These local proofs do not establish
 hosted CI, production lock timing, compatible floor or activation.
+Dropping the parent FKs during rollback can take stronger, read-blocking locks
+than adding them; the local timeout bounds acquisition, not production hold time.
+Inspect actual `pg_constraint.conindid` dependencies before retiring an equivalent
+parent key rather than assuming which matching unique index PostgreSQL selected.
+
+### 0a private session/lane lock-kernel validation
+
+`go test ./internal/db -run 'LifecycleScope|LifecycleTransaction' -count=1` with
+a disposable PostgreSQL 15+ `TEST_DATABASE_URL` exercises the new private kernel
+alongside the existing transaction runner. The kernel locks the exact tenant
+session first, then one UUID-ordered batch of explicitly selected lanes using
+`FOR NO KEY UPDATE NOWAIT`. It clones, deduplicates and sorts inputs without
+mutating their backing array, issues no queries inside loops, rejects an incomplete
+or foreign-parent selection, and returns no partial snapshot on any error.
+An empty lane list locks only the session; it never discovers a primary lane.
+
+The read-only policy prerequisite shares the existing configuration constants.
+It requires effective READ COMMITTED, the existing writer marker and timeouts,
+and a live caller deadline with at most the lifecycle unit budget remaining.
+It does not configure, downgrade or reset anything. Existing configurator behavior
+and emitted SQL stay unchanged. Effective settings cannot establish that the
+configurator ran or that settings were transaction-local; remaining time cannot
+prove transaction age. The owner must establish the whole budget before acquiring
+the transaction. Neither observation establishes a writer floor or activation.
+
+Full-schema PostgreSQL cases preserve exact raw statuses, visibility markers,
+nullable end epochs and integer extremes, including hidden and terminal rows.
+Policy failures acquire no session/thread relation lock and leave effective
+settings and data unchanged. Deterministic barriers delegate the actual production
+lane SQL unchanged: independent connection probes see the parent locked while
+lanes are still free, then verify exact selected/unselected scope. Real NOWAIT
+failures return no snapshot; only the owner rolls back staged writes. A real runner
+retry reaches a fresh transaction after confirmed abort, observes no first-attempt
+effect and commits only the second attempt. No sleep-based ordering is assumed.
+Mock regressions additionally fix the literal SQL contract and cover query, scan,
+iteration, membership and synchronous cancellation failures with zero results.
+
+Both private prerequisites and their direct callers are explicit syntax-inventory
+boundaries, without promotion to mutation authority. Locked observations are not
+permission objects: no domain/reservation/expected-epoch/receipt eligibility is
+decided here, and there are no production callers or lifecycle writes. Future
+canonical primitives must compose mandatory checks and mutation together using
+this implementation. Cutover interlocks, higher-rank discovery/restarts, stronger
+end/reset child exclusion and mixed-version lock-graph progress remain open.
+These tests do not prove historical deadlock freedom or production timing.
 
 ## Surprises & Discoveries
 

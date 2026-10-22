@@ -23,11 +23,20 @@ const (
 	lifecycleRollbackTimeout     = 250 * time.Millisecond
 	lifecycleRetryMinimum        = 25 * time.Millisecond
 	lifecycleRetryMaximum        = 100 * time.Millisecond
+	lifecycleWriterVersion       = "1"
+	lifecycleLockTimeout         = "250ms"
+	lifecycleStatementTimeout    = "1500ms"
 
 	lifecycleTransactionSettings = `SELECT
-		set_config('lifecycle143.writer_version', '1', true),
-		set_config('lock_timeout', '250ms', true),
-		set_config('statement_timeout', '1500ms', true)`
+		set_config('lifecycle143.writer_version', '` + lifecycleWriterVersion + `', true),
+		set_config('lock_timeout', '` + lifecycleLockTimeout + `', true),
+		set_config('statement_timeout', '` + lifecycleStatementTimeout + `', true)`
+
+	lifecycleTransactionPolicyQuery = `SELECT
+		current_setting('transaction_isolation'),
+		COALESCE(current_setting('lifecycle143.writer_version', true), ''),
+		current_setting('lock_timeout'),
+		current_setting('statement_timeout')`
 )
 
 // lifecycleTxStarter is private for deterministic tests. A structural BeginTx
@@ -79,6 +88,33 @@ func ConfigureLifecycleTransactionInTx(ctx context.Context, tx pgx.Tx) error {
 	}
 	if _, err := tx.Exec(ctx, lifecycleTransactionSettings); err != nil {
 		return fmt.Errorf("configure lifecycle transaction settings: %w", err)
+	}
+	return nil
+}
+
+// requireLifecycleScopeTransactionInTx observes the effective policy for the
+// private scope-lock kernel; it never installs settings or creates a budget.
+// Its caller validates nonnil ctx/tx. Effective settings cannot establish how
+// they were configured, and a remaining deadline cannot prove transaction age.
+// The transaction owner must establish the whole-unit budget before acquisition.
+func requireLifecycleScopeTransactionInTx(ctx context.Context, tx pgx.Tx) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("lifecycle scope transaction context: %w", err)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > LifecycleTransactionTimeout {
+		return errors.New("lifecycle scope requires an existing deadline within the lifecycle transaction budget")
+	}
+	var actual [4]string
+	if err := tx.QueryRow(ctx, lifecycleTransactionPolicyQuery).Scan(&actual[0], &actual[1], &actual[2], &actual[3]); err != nil {
+		return fmt.Errorf("read lifecycle scope transaction policy: %w", err)
+	}
+	expected := [4]string{string(pgx.ReadCommitted), lifecycleWriterVersion, lifecycleLockTimeout, lifecycleStatementTimeout}
+	if actual != expected {
+		return errors.New("lifecycle scope requires the configured READ COMMITTED lifecycle transaction policy")
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("lifecycle scope transaction context after policy read: %w", err)
 	}
 	return nil
 }

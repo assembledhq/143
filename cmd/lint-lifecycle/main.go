@@ -96,6 +96,7 @@ type call struct {
 // generic UpdateStatusInTx/UpdateResultInTx collisions: inventory review must
 // classify unrelated uses rather than silently exclude generic receivers.
 var boundaryNames = strings.Fields(`
+lockLifecycleScopeInTx requireLifecycleScopeTransactionInTx
 SubmitSessionMessage SubmitThreadMessage AnswerQueuedHumanInputForContinue
 answerQueuedHumanInputForContinue BeginRuntime beginRuntimeControl
 RunSession RunAgent ContinueSession ContinueSessionWithOptions

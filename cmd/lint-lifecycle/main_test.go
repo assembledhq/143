@@ -243,6 +243,39 @@ func TestComposablePersistenceBoundariesRemainInventoried(t *testing.T) {
 	}
 }
 
+func TestPrivateScopeLockPrerequisitesRemainInventoried(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name string }{
+		{name: "lockLifecycleScopeInTx"},
+		{name: "requireLifecycleScopeTransactionInTx"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := fixture(t, "func "+tt.name+"(ctx context.Context, tx pgx.Tx, orgID uuid.UUID) {}\nfunc adapter(ctx context.Context, tx pgx.Tx, orgID uuid.UUID) { "+tt.name+"(ctx, tx, orgID) }")
+			found, err := scan(root)
+			require.NoError(t, err, "scan the private prerequisite and its same-package caller without introducing a public authority API")
+			type observation struct {
+				ID               string
+				RequiresContract bool
+			}
+			actual := make([]observation, 0, len(found))
+			for _, item := range found {
+				actual = append(actual, observation{ID: item.ID, RequiresContract: requiresMutationContract(item)})
+			}
+			want := []observation{{ID: "internal/fixture.go:adapter"}, {ID: "internal/fixture.go:" + tt.name}}
+			require.Equal(t, want, actual, "private locking observations must be inventoried without being classified as mutation authority")
+			reviewed := reviewedFixture(found)
+			for index := range reviewed.Entries {
+				reviewed.Entries[index].CanonicalTarget = ""
+			}
+			require.NoError(t, compare(found, reviewed), "an observational prerequisite does not become an authorization primitive merely by being explicitly inventoried")
+			reviewed.Entries = reviewed.Entries[:1]
+			require.ErrorContains(t, compare(found, reviewed), "uncovered lifecycle candidate: internal/fixture.go:"+tt.name, "the private locking root must still require an explicit reviewed inventory entry")
+		})
+	}
+}
+
 func TestPlainGenericStoreMethodsRemainUnselected(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ name string }{
