@@ -266,7 +266,7 @@ func dropDatabase(ctx context.Context, config *pgx.ConnConfig, name string) erro
 	})
 }
 
-func templateKey(config *pgx.ConnConfig, source string) ([sha256.Size]byte, error) {
+func templateKey(config *pgx.ConnConfig, source string) (key [sha256.Size]byte, result error) {
 	// JSON sorts runtime parameter keys. Include the normalized endpoint,
 	// identity and database rather than URL spelling; the digest is never logged.
 	type endpoint struct {
@@ -296,6 +296,16 @@ func templateKey(config *pgx.ConnConfig, source string) ([sha256.Size]byte, erro
 	if len(files) == 0 {
 		return [sha256.Size]byte{}, errors.New("fixture migration directory contains no SQL migrations")
 	}
+	root, err := os.OpenRoot(source)
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("open fixture migration directory: %w", err)
+	}
+	defer func() {
+		if err := root.Close(); err != nil {
+			key = [sha256.Size]byte{}
+			result = errors.Join(result, fmt.Errorf("close fixture migration directory: %w", err))
+		}
+	}()
 	sort.Strings(files)
 	hash := sha256.New()
 	// Hash.Write cannot fail. Framing prevents ambiguous boundaries between
@@ -307,14 +317,13 @@ func templateKey(config *pgx.ConnConfig, source string) ([sha256.Size]byte, erro
 	write(encoded)
 	write([]byte(source))
 	for _, path := range files {
-		content, err := os.ReadFile(path)
+		content, err := root.ReadFile(filepath.Base(path))
 		if err != nil {
 			return [sha256.Size]byte{}, fmt.Errorf("read fixture migration: %w", err)
 		}
 		write([]byte(filepath.Base(path)))
 		write(content)
 	}
-	var key [sha256.Size]byte
 	copy(key[:], hash.Sum(nil))
 	return key, nil
 }

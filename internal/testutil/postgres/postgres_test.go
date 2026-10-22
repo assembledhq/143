@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -46,6 +47,39 @@ func TestTemplateKey(t *testing.T) {
 			second, err := templateKey(other, source)
 			require.NoError(t, err, "fingerprint comparison migration contents and configuration")
 			require.Equal(t, tt.expectEqual, first == second, "only identical schema and database identity should reuse a template")
+		})
+	}
+}
+
+func TestTemplateKeyRejectsEscapingSymlinks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		relative bool
+	}{
+		{name: "absolute symlink outside migration directory"},
+		{name: "relative symlink outside migration directory", relative: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			parent := t.TempDir()
+			source := filepath.Join(parent, "migrations")
+			require.NoError(t, os.Mkdir(source, 0o700), "create an isolated migration directory")
+			outside := filepath.Join(parent, "outside.sql")
+			require.NoError(t, os.WriteFile(outside, []byte("CREATE TABLE escaped_fixture(value integer)"), 0o600), "create a readable SQL file outside the migration directory")
+			target := outside
+			if tt.relative {
+				var err error
+				target, err = filepath.Rel(source, outside)
+				require.NoError(t, err, "create a relative path that escapes the migration directory")
+			}
+			require.NoError(t, os.Symlink(target, filepath.Join(source, "000001_escape.up.sql")), "create a migration symlink to the outside SQL file")
+			config, err := pgx.ParseConfig("postgres://localhost/fixtures?sslmode=disable")
+			require.NoError(t, err, "parse a synthetic fixture connection without contacting PostgreSQL")
+			key, err := templateKey(config, source)
+			require.ErrorContains(t, err, "read fixture migration", "migration fingerprinting must reject symbolic links outside its opened directory")
+			require.Equal(t, [sha256.Size]byte{}, key, "an escaping migration must not produce a reusable template fingerprint")
 		})
 	}
 }
