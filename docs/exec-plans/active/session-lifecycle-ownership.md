@@ -1799,6 +1799,10 @@ revision; it must not reinterpret new durable records or trigger replay.
   standalone concurrent unique indexes. Prove index shape, row preservation,
   synthetic composite-FK scope and visible dirty-state refusal without installing
   production foreign keys, changing retention or creating lifecycle authority.
+- [x] Add the empty dispatch identity/ingress foundation with nullable epochs,
+  scoped parent references, structural checks and exact ingress/message uniqueness.
+  Preserve unknown provenance and legacy behavior without adding a producer,
+  consumer, claim, admission state or runnable scanner.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2632,6 +2636,57 @@ older transactions; local small-fixture timings do not prove production timing.
 Dependent FKs must be removed before these indexes can be rolled back. Future
 children also need lookup indexes and evidence-retention protection before their
 first active writer; no cascading evidence deletion is authorized here.
+
+### 0a passive dispatch identity foundation validation
+
+`go test ./cmd/migrate -run 'TestSessionInputDispatch' -count=1` with a disposable
+PostgreSQL 15+ `TEST_DATABASE_URL` exercises the real schema. Migrations 332–335
+introduce only the identity/ingress subset of `session_input_dispatches`, not its
+complete consumer-binding protocol. The first migration creates the empty table,
+organization FK, structural checks and lookup/identity indexes. Each subsequent
+migration installs one tenant/session-scoped parent FK, for session, optional lane
+or optional request. Their separate transactions use the five-second local lock
+timeout and never hold several existing hot-parent locks at once. No production
+code inserts, reads, normalizes or scans these rows.
+
+The representation stores six input kinds, exact ingress identity/digest, opaque
+JSON, independently nullable nonnegative epochs and an explicit normalization
+version without a default. A thread epoch requires an explicit lane. Answer and
+denial identities require a request. These are structural checks, not validation,
+consent, readiness or authority; JSON null and future payload shapes remain raw
+stored values. No zero/current-parent epoch or inferred primary lane is supplied.
+Uniqueness is tenant/ingress-kind/key and tenant/nonnull-message identity, not
+content digest or request alone. The tenant/session/id key can support future
+parent-scoped references, without installing any claim pointer. Lane/request
+lookup indexes support the new parent FKs.
+
+PostgreSQL fixtures cover fresh schema, populated 331 → 332 → 333 → 334 → 335,
+independent rollback and reapply, exact catalog shape, clean ledgers and an empty
+dispatch table at schema boundaries. They preserve complete prior row graphs,
+API projections and indexes, including the preceding referenced-key prerequisites.
+Separate synthetic rows exercise exact scoped references, structural rejection,
+ingress/message uniqueness and nullable/large-value round trips. Parent-delete
+and dependent-reference probes retain evidence rather than cascading it away.
+Existing session soft deletion remains unchanged; the physical-delete refusal
+probe opts into the existing hard-delete setting only inside an owned disposable
+test transaction and rolls it back, including all session and dispatch fields.
+Direct DDL refusal probes do not claim the ledger stays clean after a failed
+migration rollback.
+
+The request FK proves tenant/session/request membership, not null-safe lane
+equality. The partitioned message table lacks a matching tenant-scoped unique
+parent key, so `message_id` has no FK; its child uniqueness does not prove message
+existence, tenant/session/lane ownership or inbox association. Canonical writers
+must establish these facts atomically before any row can become bound.
+
+Admission/consumer states, job/runtime bindings, claim tokens, due scans, parked
+control, conditional bound-request uniqueness and all producers/consumers remain
+deferred together. No new job/runtime retention dependency is installed. Before
+the first production writer, complete the binding checks, exact FK/retention and
+hard-delete policy, canonical authority and activation gates. Rollback removes
+only these new schema objects without CASCADE; future readers/writers and any
+dependent references must be retired first. These local proofs do not establish
+hosted CI, production lock timing, compatible floor or activation.
 
 ## Surprises & Discoveries
 
