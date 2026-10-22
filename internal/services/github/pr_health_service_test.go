@@ -2767,6 +2767,9 @@ func TestPRServiceEnrichPullRequestHealth(t *testing.T) {
 			"Fix bug", (*string)(nil), "open", "pending", "app", "", nil, nil, nil,
 			models.PullRequestMergeStateUnknown, false, 1, true, (*time.Time)(nil), int64(5), models.PullRequestMergeWhenReadyStateOff, (*uuid.UUID)(nil), (*time.Time)(nil), "", (*int64)(nil), "", (*time.Time)(nil), (*time.Time)(nil), now, now,
 		))
+	mock.ExpectQuery("SELECT .+ FROM pull_request_health_snapshots WHERE org_id = .+ AND pull_request_id = .+ AND version = .+").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "version": int64(5)}).
+		WillReturnRows(pgxmock.NewRows(prHealthSnapshotTestColumns))
 	mock.ExpectQuery("SELECT .+ FROM repositories WHERE org_id = .+ AND full_name = .+ AND status = 'active'").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "full_name": "assembledhq/143"}).
 		WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(

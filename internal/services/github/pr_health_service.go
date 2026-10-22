@@ -1810,6 +1810,26 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 	if err != nil {
 		return err
 	}
+	snapshot, err := s.pullRequests.GetHealthSnapshot(ctx, orgID, pullRequestID, version)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("get pull request health snapshot for enrichment: %w", err)
+	}
+	if err == nil && canReusePullRequestHealthEnrichment(pr, snapshot, version) {
+		current, currentErr := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
+		if errors.Is(currentErr, pgx.ErrNoRows) {
+			return nil
+		}
+		if currentErr != nil {
+			return fmt.Errorf("get current pull request health for enrichment reuse: %w", currentErr)
+		}
+		if current.Version != version || current.EnrichmentStatus == models.PullRequestHealthEnrichmentStatusReady {
+			return nil
+		}
+		// A concurrent summary write can regress the current status after the
+		// snapshot is enriched. Restore it from the persisted payloads; the
+		// version-scoped update cannot change a newer current health row.
+		return s.pullRequests.UpdateHealthEnrichment(ctx, orgID, pullRequestID, version, snapshot.ConflictPayload, snapshot.FailingTestsPayload, models.PullRequestHealthEnrichmentStatusReady)
+	}
 	repo, err := s.repos.GetByFullName(ctx, orgID, pr.GitHubRepo)
 	if err != nil {
 		return err
@@ -1829,6 +1849,7 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 	if err != nil {
 		return err
 	}
+	providerReadsSucceeded := true
 	commitStatuses, err := s.listCommitStatusesForRef(ctx, token, owner, repoName, details.Head.SHA)
 	if err != nil {
 		s.logger.Warn().
@@ -1836,6 +1857,7 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 			Str("pull_request_id", pullRequestID.String()).
 			Str("head_sha", details.Head.SHA).
 			Msg("failed to fetch GitHub commit statuses during pull request health enrichment")
+		providerReadsSucceeded = false
 		commitStatuses = nil
 	}
 
@@ -1872,6 +1894,7 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 		}
 		annotations, annErr := s.fetchCheckRunAnnotations(ctx, token, owner, repoName, check.ID)
 		if annErr != nil {
+			providerReadsSucceeded = false
 			s.logger.Warn().Err(annErr).Int64("check_run_id", check.ID).Msg("failed to fetch check run annotations")
 		}
 		payloadChecks = append(payloadChecks, failingCheckPayload{
@@ -1898,18 +1921,62 @@ func (s *PRService) EnrichPullRequestHealth(ctx context.Context, orgID, pullRequ
 	}
 
 	failingTestsPayload, err := json.Marshal(map[string]any{
-		"pull_request_id":  pr.ID,
-		"repository":       pr.GitHubRepo,
-		"pull_request_num": pr.GitHubPRNumber,
-		"url":              pr.GitHubPRURL,
-		"head_sha":         details.Head.SHA,
-		"checks":           payloadChecks,
+		"pull_request_id":          pr.ID,
+		"repository":               pr.GitHubRepo,
+		"pull_request_num":         pr.GitHubPRNumber,
+		"url":                      pr.GitHubPRURL,
+		"head_sha":                 details.Head.SHA,
+		"checks":                   payloadChecks,
+		"provider_reads_succeeded": providerReadsSucceeded,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal failing tests payload: %w", err)
 	}
 
 	return s.pullRequests.UpdateHealthEnrichment(ctx, orgID, pullRequestID, version, conflictPayload, failingTestsPayload, models.PullRequestHealthEnrichmentStatusReady)
+}
+
+// canReusePullRequestHealthEnrichment only reuses the persisted result for this
+// exact version after all provider reads succeeded. Legacy, empty, or incomplete
+// ready payloads still take the normal fetch path, including when an earlier
+// enrichment captured a different live head.
+func canReusePullRequestHealthEnrichment(pr models.PullRequest, snapshot models.PullRequestHealthSnapshot, version int64) bool {
+	if snapshot.EnrichmentStatus != models.PullRequestHealthEnrichmentStatusReady ||
+		snapshot.OrgID != pr.OrgID || snapshot.PullRequestID != pr.ID || snapshot.Version != version ||
+		snapshot.HeadSHA == "" || snapshot.BaseSHA == "" {
+		return false
+	}
+	var conflict struct {
+		PullRequestID uuid.UUID `json:"pull_request_id"`
+		Repository    string    `json:"repository"`
+		Number        int       `json:"pull_request_num"`
+		HeadSHA       string    `json:"head_sha"`
+		BaseSHA       string    `json:"base_sha"`
+	}
+	if err := json.Unmarshal(snapshot.ConflictPayload, &conflict); err != nil ||
+		conflict.PullRequestID != pr.ID || conflict.Repository != pr.GitHubRepo || conflict.Number != pr.GitHubPRNumber ||
+		conflict.HeadSHA != snapshot.HeadSHA || conflict.BaseSHA != snapshot.BaseSHA {
+		return false
+	}
+	var failingTests struct {
+		PullRequestID          uuid.UUID                       `json:"pull_request_id"`
+		Repository             string                          `json:"repository"`
+		Number                 int                             `json:"pull_request_num"`
+		HeadSHA                string                          `json:"head_sha"`
+		Checks                 []agent.PullRequestFailingCheck `json:"checks"`
+		ProviderReadsSucceeded bool                            `json:"provider_reads_succeeded"`
+	}
+	if err := json.Unmarshal(snapshot.FailingTestsPayload, &failingTests); err != nil ||
+		failingTests.PullRequestID != pr.ID || failingTests.Repository != pr.GitHubRepo || failingTests.Number != pr.GitHubPRNumber ||
+		failingTests.HeadSHA != snapshot.HeadSHA || failingTests.Checks == nil || !failingTests.ProviderReadsSucceeded {
+		return false
+	}
+	for _, check := range failingTests.Checks {
+		if strings.TrimSpace(check.Name) == "" || check.Category.Validate() != nil {
+			return false
+		}
+	}
+	return true
 }
 
 type StartPullRequestRepairOptions struct {
