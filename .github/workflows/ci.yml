@@ -238,7 +238,7 @@ jobs:
               unit_packages+=("$package")
             fi
           done <<< "$packages"
-          go test "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
+          go test -json "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
             -coverprofile=coverage-unit-other.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
       # Full-schema Postgres fixtures need their own bounded package budget.
