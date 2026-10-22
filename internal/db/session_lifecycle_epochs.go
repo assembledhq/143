@@ -15,6 +15,14 @@ type LifecycleEpochState struct {
 	LifecycleVersion int16
 }
 
+// LifecycleRequestEpochState observes the admission epochs recorded on a human
+// input request. Each absent epoch remains unknown independently; these values
+// do not establish request eligibility or mutation authorization.
+type LifecycleRequestEpochState struct {
+	AdmissionSessionEpoch *int64
+	AdmissionThreadEpoch  *int64
+}
+
 // LifecycleEpochStore reads passive metadata without acquiring lifecycle authority.
 type LifecycleEpochStore struct {
 	db DBTX
@@ -51,6 +59,22 @@ func (s *LifecycleEpochStore) GetThread(ctx context.Context, orgID, sessionID, t
 		Scan(&state.AdmissionEpoch, &state.EndEpoch, &state.LifecycleVersion)
 	if err != nil {
 		return LifecycleEpochState{}, fmt.Errorf("get thread lifecycle epochs: %w", err)
+	}
+	return state, nil
+}
+
+// GetRequest follows SessionHumanInputRequestStore.GetByID visibility, scoped to
+// the exact tenant and session. It neither locks rows nor infers missing epochs
+// from current session or thread state, and does not filter status or expiry.
+func (s *LifecycleEpochStore) GetRequest(ctx context.Context, orgID, sessionID, requestID uuid.UUID) (LifecycleRequestEpochState, error) {
+	var state LifecycleRequestEpochState
+	err := s.db.QueryRow(ctx, `
+		SELECT admission_session_epoch, admission_thread_epoch
+		FROM session_human_input_requests
+		WHERE org_id = $1 AND session_id = $2 AND id = $3`, orgID, sessionID, requestID).
+		Scan(&state.AdmissionSessionEpoch, &state.AdmissionThreadEpoch)
+	if err != nil {
+		return LifecycleRequestEpochState{}, fmt.Errorf("get request lifecycle epochs: %w", err)
 	}
 	return state, nil
 }
