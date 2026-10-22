@@ -3557,6 +3557,88 @@
       ]
     },
     {
+      "id": "internal/db/session_lifecycle_cutover.go:observeLifecycleCutoverInTx",
+      "source_sha256": "d4b28a1e79277b8b9f30d3a8624d2ad29ddb8d921444d20fa841f0b9ad238a5c",
+      "operation": "private raw cutover observation after shared transaction interlock",
+      "owner": "Supplied bounded transaction owner; DB observation only, no lifecycle command or activation owner",
+      "predicate": "Exact nonzero org/session, effective READ COMMITTED lifecycle policy and existing unit deadline. Successful shared acquisition precedes a separate fresh scoped SELECT. Missing metadata is ErrNoRows, not inferred version-zero eligibility.",
+      "lock": "Transaction-scoped shared advisory try-lock, then a separate READ COMMITTED statement. No blocking acquisition, settings write, row mutation, Begin, settlement, retry or external effect.",
+      "stale_result": "Any policy, acquisition, lookup, scan, scope or context error returns a completely zero observation with its cause. Caller must roll back the entire unit and discard captured observations.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "Passive migrations 336/337 create empty representation with real scoped FKs. No producer, activation, guard or production caller. Stored state/version/JSON is not authority and cannot prove floor, drain, normalization or provider conformance.",
+      "canonical_target": "Private cutover entry prerequisite for future canonical commands and activation guards, not a reusable authorization API",
+      "authority": "None. Arbitrary writers are not excluded by an advisory lock; all canonical writers and guards must participate before this protocol can become authoritative.",
+      "fence_outcome": "Success returns raw transaction-local metadata only. Successful late acquisition continues; actual conflict returns private busy error, never a fabricated SQLSTATE or permission to replay.",
+      "prerequisite_0a": "Before any production caller, compose canonical checks plus mutation, specify capability/normalization/version envelopes, add narrowly reviewed actual-conflict retry integration, and prove VOLATILE trigger snapshot and mixed-version OLD/NEW scope behavior.",
+      "evidence": [
+        "internal/db/session_lifecycle_cutover.go:observeLifecycleCutoverInTx",
+        "internal/db/session_lifecycle_cutover_test.go",
+        "internal/db/session_lifecycle_cutover_postgres_test.go",
+        "cmd/migrate/session_lifecycle_cutover_schema_postgres_test.go",
+        "Discovered: private boundary; syntax inventory is not within-statement snapshot or activation proof"
+      ]
+    },
+    {
+      "id": "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverExclusiveInTx",
+      "source_sha256": "c2d75fa090b6cf80b98db72ea6b558f51d5a837e6f1b36197645f6538e2610e1",
+      "operation": "private exclusive nonwaiting cutover interlock prerequisite",
+      "owner": "Caller-owned lifecycle transaction; no activation controller is installed",
+      "predicate": "Exact org/session and observed configured lifecycle transaction policy. Exclusive acquisition uses the same canonical namespaced bigint key as shared acquisition.",
+      "lock": "pg_try_advisory_xact_lock, transaction scoped and never waiting; lock lifetime ends only with caller settlement. No row writes or activation.",
+      "stale_result": "Context, policy, query and scan failures preserve cause. Actual false returns private busy error; owner must roll back the whole unit.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "Unused private prerequisite only. Complete floor, drain, classification, guards, capability coverage and activation-controller backoff remain deferred; no intake barrier or active version is installed.",
+      "canonical_target": "Private exclusive cutover acquisition for the future fully gated activation owner",
+      "authority": "Acquisition alone is not activation permission, proof of drain, floor or provider conformance.",
+      "fence_outcome": "No public contention-exhaustion signal is returned before confirmed abort or retries. Public runner currently rolls back private busy once without replay.",
+      "prerequisite_0a": "Specify and prove the activation owner, exact gate receipts, retained provenance, bounded actual-conflict retry/backoff and safe rollback before any caller.",
+      "evidence": [
+        "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverExclusiveInTx",
+        "internal/db/session_lifecycle_cutover_test.go",
+        "internal/db/session_lifecycle_cutover_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverInTx",
+      "source_sha256": "63b43fe32279e208b1641432ba4a27509a1ac832170937e19018a8c864f10c08",
+      "operation": "private shared/exclusive advisory try-lock implementation",
+      "owner": "DB acquisition helper; caller owns all transaction history, settlement and effects",
+      "predicate": "Reject nil context/transaction, expired context and zero IDs before SQL. Read-only effective policy check precedes one fixed shared/exclusive query and exact session_lifecycle_cutover:org:session key.",
+      "lock": "Identical hashtextextended(text,0) bigint key for both transaction-scoped modes. No session locks/unlocks, waiting variant, row effects, savepoint, settings or retries. Hash collisions add contention, never replace exact scoped reads.",
+      "stale_result": "Only actual false constructs lifecycleCutoverInterlockBusyError; cancellation/query/scan errors wrap their own cause. A successful acquisition is not a command result.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "No production caller and no public runner policy extension. SQL/key indirection is pinned by independent unit and real PostgreSQL tests; this syntax inventory does not establish whole-program routing or protocol proof.",
+      "canonical_target": "Private implementation shared by cutover entry/activation acquisition prerequisites",
+      "authority": "None; effective settings and namespaced locks cannot establish tenant ownership, record provenance or active semantics.",
+      "fence_outcome": "Owner must roll back on any error. A private busy is neither SQLSTATE 55P03 nor public exhausted contention, and cannot silently authorize replay.",
+      "prerequisite_0a": "Review an exact-type retry extension retaining current cancellation/joined-error/rollback/commit exclusions before the first production caller, plus mandatory canonical checks and activation guards.",
+      "evidence": [
+        "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverInTx",
+        "internal/db/session_lifecycle_cutover_test.go",
+        "internal/db/session_lifecycle_cutover_postgres_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverSharedInTx",
+      "source_sha256": "473c882818366767f784c5c9aadb4a8f880de823947351255e70b65b7cac9ebf",
+      "operation": "private shared nonwaiting cutover interlock prerequisite",
+      "owner": "Caller-owned lifecycle transaction, with no admission or authorization owner added",
+      "predicate": "Exact org/session plus existing bounded READ COMMITTED lifecycle policy; shared/shared may coexist, exclusive conflict returns immediately.",
+      "lock": "pg_try_advisory_xact_lock_shared on the same namespaced key used by exclusive acquisition. May be discovered late without blocking; no row effects or settlement.",
+      "stale_result": "Any acquisition error requires whole-unit rollback by owner. Actual false remains private busy; success does not require restarting the transaction.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "Unused private entry prerequisite; the raw observation uses a separate fresh post-acquisition lookup. No active record, production caller or SQL trigger is installed.",
+      "canonical_target": "Private cutover entry acquisition before future canonical domain/job/session/lane commands",
+      "authority": "None; participation by every protected writer and exact durable routing remain prerequisites.",
+      "fence_outcome": "No permission, default version-zero result or retry allowance follows from acquisition alone.",
+      "prerequisite_0a": "Complete actual-conflict retry integration, canonical checks plus mutation, all callers and VOLATILE OLD/NEW routing snapshot proof before activation.",
+      "evidence": [
+        "internal/db/session_lifecycle_cutover.go:tryLockLifecycleCutoverSharedInTx",
+        "internal/db/session_lifecycle_cutover_test.go",
+        "internal/db/session_lifecycle_cutover_postgres_test.go"
+      ]
+    },
+    {
       "id": "internal/db/session_lifecycle_fences.go:lockLifecycleScopeInTx",
       "source_sha256": "3e463a769499f16d8a9610547753a28cebb7ef45c55b2a2a50422b43cf80ba21",
       "operation": "private session and explicit-lane acquisition prerequisite",
@@ -3587,8 +3669,8 @@
       "lock": "One current_setting read before any lifecycle row query; no settings write, row lock, budget creation/reset, Begin, settlement, retry or external effect.",
       "stale_result": "Context, policy-read, scan or effective-setting mismatch returns an error before row acquisition. A successful policy observation is not tenant, actor, owner, epoch, lease, writer-floor or activation authority.",
       "classification": "unfenced-needs-conversion",
-      "migration": "Private prerequisite for the unused scope-lock kernel. Keep ConfigureLifecycleTransactionInTx as the sole setting writer and retain its existing supplied-owner behavior. The transaction owner must establish the full unit budget before acquisition.",
-      "canonical_target": "Private policy prerequisite for lockLifecycleScopeInTx; not a mutation or authorization API",
+      "migration": "Private prerequisite for the unused scope-lock and cutover-interlock kernels. Keep ConfigureLifecycleTransactionInTx as the sole setting writer and retain its existing supplied-owner behavior. The transaction owner must establish the full unit budget before acquisition.",
+      "canonical_target": "Private policy prerequisite for lockLifecycleScopeInTx and tryLockLifecycleCutoverInTx; not a mutation or authorization API",
       "authority": "None; observed settings and remaining context lifetime cannot prove the authority or complete history of the supplied transaction.",
       "fence_outcome": "Policy or context mismatch rejects the unit without a scope snapshot; never silently reconfigure, extend time or infer permission from the marker.",
       "prerequisite_0a": "Compose complete canonical checks and mutation inside the already-owned bounded transaction before any production caller; preserve the distinct census, floor and activation gates.",

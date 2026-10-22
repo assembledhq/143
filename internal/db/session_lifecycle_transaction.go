@@ -19,16 +19,16 @@ const (
 	// commit together. Rollback has a separate bounded cleanup context.
 	LifecycleTransactionTimeout = 2 * time.Second
 
-	lifecycleTransactionAttempts = 3
-	lifecycleRollbackTimeout     = 250 * time.Millisecond
-	lifecycleRetryMinimum        = 25 * time.Millisecond
-	lifecycleRetryMaximum        = 100 * time.Millisecond
-	lifecycleWriterVersion       = "1"
-	lifecycleLockTimeout         = "250ms"
-	lifecycleStatementTimeout    = "1500ms"
+	lifecycleTransactionAttempts      = 3
+	lifecycleRollbackTimeout          = 250 * time.Millisecond
+	lifecycleRetryMinimum             = 25 * time.Millisecond
+	lifecycleRetryMaximum             = 100 * time.Millisecond
+	lifecycleTransactionMarkerVersion = "1"
+	lifecycleLockTimeout              = "250ms"
+	lifecycleStatementTimeout         = "1500ms"
 
 	lifecycleTransactionSettings = `SELECT
-		set_config('lifecycle143.writer_version', '` + lifecycleWriterVersion + `', true),
+		set_config('lifecycle143.writer_version', '` + lifecycleTransactionMarkerVersion + `', true),
 		set_config('lock_timeout', '` + lifecycleLockTimeout + `', true),
 		set_config('statement_timeout', '` + lifecycleStatementTimeout + `', true)`
 
@@ -109,7 +109,7 @@ func requireLifecycleScopeTransactionInTx(ctx context.Context, tx pgx.Tx) error 
 	if err := tx.QueryRow(ctx, lifecycleTransactionPolicyQuery).Scan(&actual[0], &actual[1], &actual[2], &actual[3]); err != nil {
 		return fmt.Errorf("read lifecycle scope transaction policy: %w", err)
 	}
-	expected := [4]string{string(pgx.ReadCommitted), lifecycleWriterVersion, lifecycleLockTimeout, lifecycleStatementTimeout}
+	expected := [4]string{string(pgx.ReadCommitted), lifecycleTransactionMarkerVersion, lifecycleLockTimeout, lifecycleStatementTimeout}
 	if actual != expected {
 		return errors.New("lifecycle scope requires the configured READ COMMITTED lifecycle transaction policy")
 	}
