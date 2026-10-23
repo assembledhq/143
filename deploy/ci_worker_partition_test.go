@@ -75,6 +75,7 @@ func TestCIUnitPartitionsAndCoverage(t *testing.T) {
 		{name: "pull request", event: "pull_request", mode: "count", otherTimeout: "120s", boundedTimeout: "300s"},
 		{name: "push", event: "push", mode: "atomic", otherTimeout: "180s", boundedTimeout: "360s", race: []string{"-race"}},
 		{name: "scheduled", event: "schedule", mode: "atomic", otherTimeout: "180s", boundedTimeout: "360s", race: []string{"-race"}},
+		{name: "manual", event: "workflow_dispatch", mode: "atomic", otherTimeout: "180s", boundedTimeout: "360s", race: []string{"-race"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
