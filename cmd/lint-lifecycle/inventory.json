@@ -3557,6 +3557,49 @@
       ]
     },
     {
+      "id": "internal/db/session_lifecycle_fences.go:lockLifecycleScopeInTx",
+      "source_sha256": "3e463a769499f16d8a9610547753a28cebb7ef45c55b2a2a50422b43cf80ba21",
+      "operation": "private session and explicit-lane acquisition prerequisite",
+      "owner": "DB row acquisition only; the supplied transaction owner retains budgeting, settlement, revalidation and effects",
+      "predicate": "Exact org/session, then deduplicated explicit org/session/thread identities in UUID order. No primary-lane discovery, visibility/status filtering, expected-epoch substitution or authorization decision. All requested lanes must exist in the exact scope.",
+      "lock": "Requires observed lifecycle transaction settings and an existing bounded context. Parent FOR NO KEY UPDATE NOWAIT precedes one ordered batch of lane locks. No pool, Begin, savepoint, Commit, Rollback, retry, settings write or publisher. This is not the stronger end/reset lock or a cutover interlock.",
+      "stale_result": "Any context, policy, SQL, scan or membership failure returns a zero snapshot with its cause; the owner must roll back the whole unit and discard observations. Raw returned statuses and epochs are not permission and remain valid only within the supplied transaction.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "Private acquisition prerequisite with no production caller. Future canonical primitives must compose mandatory durable authority checks and mutation together using this implementation, not export a validate-then-write snapshot or promote an adapter to another authorizer.",
+      "canonical_target": "Private row-acquisition implementation for future AdmitMessageInTx, AdmitAnswerInTx and related canonical primitives",
+      "authority": "None is established here. Future commands must prove typed domain ownership, exact expected epochs, retained reservations and operation-specific receipts after locks, with higher-rank domain/job rows acquired first.",
+      "fence_outcome": "Missing or mismatched scope rejects the whole unit; only actual underlying eligible PostgreSQL errors may reach the existing owner's confirmed-abort retry policy. No reusable fence or mutation disposition is returned.",
+      "prerequisite_0a": "Implement cutover interlock, complete canonical checks plus mutation, exact caller conversion and mixed-version proof before wiring a production caller; separately prove FOR UPDATE end/reset child exclusion.",
+      "evidence": [
+        "internal/db/session_lifecycle_fences.go:lockLifecycleScopeInTx",
+        "internal/db/session_lifecycle_scope_test.go",
+        "internal/db/session_lifecycle_scope_postgres_test.go",
+        "internal/db/session_lifecycle_scope_concurrency_postgres_test.go",
+        "Discovered: boundary-caller, boundary-definition, indirect-caller; syntax coverage does not prove authority or physical lock order"
+      ]
+    },
+    {
+      "id": "internal/db/session_lifecycle_transaction.go:requireLifecycleScopeTransactionInTx",
+      "source_sha256": "c73cd4ae5e2a8dfc6b1e67ef561ee900dc8735837dd6d597816a15231024395f",
+      "operation": "private read-only lifecycle policy prerequisite",
+      "owner": "Existing lifecycle transaction policy; this verifier does not configure or own a transaction",
+      "predicate": "Observes READ COMMITTED, the shared writer marker and timeout constants, plus an existing live deadline with at most the lifecycle unit budget remaining. Effective settings do not establish configurator provenance or transaction age.",
+      "lock": "One current_setting read before any lifecycle row query; no settings write, row lock, budget creation/reset, Begin, settlement, retry or external effect.",
+      "stale_result": "Context, policy-read, scan or effective-setting mismatch returns an error before row acquisition. A successful policy observation is not tenant, actor, owner, epoch, lease, writer-floor or activation authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "Private prerequisite for the unused scope-lock kernel. Keep ConfigureLifecycleTransactionInTx as the sole setting writer and retain its existing supplied-owner behavior. The transaction owner must establish the full unit budget before acquisition.",
+      "canonical_target": "Private policy prerequisite for lockLifecycleScopeInTx; not a mutation or authorization API",
+      "authority": "None; observed settings and remaining context lifetime cannot prove the authority or complete history of the supplied transaction.",
+      "fence_outcome": "Policy or context mismatch rejects the unit without a scope snapshot; never silently reconfigure, extend time or infer permission from the marker.",
+      "prerequisite_0a": "Compose complete canonical checks and mutation inside the already-owned bounded transaction before any production caller; preserve the distinct census, floor and activation gates.",
+      "evidence": [
+        "internal/db/session_lifecycle_transaction.go:requireLifecycleScopeTransactionInTx",
+        "internal/db/session_lifecycle_scope_test.go",
+        "internal/db/session_lifecycle_scope_postgres_test.go",
+        "Discovered: boundary-definition; the syntax inventory is not whole-policy or configuration-provenance proof"
+      ]
+    },
+    {
       "id": "internal/db/session_review_workspace_recovery.go:SessionStore.RecoverIncompleteCodeReviewWorkspace",
       "source_sha256": "7f331c35903e0b2166ce588d2e087638c21381d33c10926ab6c54e1543c620b4",
       "operation": "recover abandoned review preparation workspace",
