@@ -1783,6 +1783,10 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Add passive session/thread epoch and lifecycle-version columns with DB-only,
   tenant/parent-scoped reads; prove fresh/upgrade/rollback/reapply, nullable bigint
   round trips and unchanged legacy create/read/status/API behavior on PostgreSQL.
+- [x] Add independently nullable request admission epochs with no default or
+  backfill, plus a tenant/session/request-scoped passive read. Prove legacy
+  threaded and threadless requests retain unknown provenance even with nonzero
+  parent epochs, and preserve existing request models and API fields.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2485,6 +2489,30 @@ lifecycle inventory guards pass. The complete `internal/db` and `cmd/migrate`
 packages also pass against the same disposable server with `GOMAXPROCS=4` and
 `-p=1 -parallel=4`. These proofs establish passive representation,
 not canonical authority, compatibility-floor enforcement or production activation.
+
+### 0a passive request epoch representation validation
+
+`go test ./cmd/migrate ./internal/db -run
+'TestSessionHumanInputEpochMigrationPostgres|TestLifecycleEpochStore_GetRequest'
+-count=1` with a disposable PostgreSQL 15+ `TEST_DATABASE_URL` exercises the
+complete migration chain through request metadata. PostgreSQL 17.10 fixtures
+cover fresh schema and populated 323 → 324 → 323 → 324 boundaries, exact legacy
+row preservation and nullable bigint columns without defaults. Both threaded and
+threadless legacy requests retain NULL admission epochs, including newly created
+requests whose parent epochs are already nonzero. Each missing epoch remains
+unknown independently; neither a current parent value nor zero fills it in.
+
+The passive accessor matches the existing request store's tenant/session/request
+scope without status, expiry or parent-visibility filtering. It does not lock or
+mutate rows. Real driver tests distinguish NULL, present zero and large bigint
+values while retaining complete legacy model and serialized API projections.
+Actual legacy answer/cancel transitions preserve populated metadata; expired and
+nonpending requests remain observable even with archived/deleted parents, matching
+the existing request lookup rather than changing its visibility policy.
+Eight parallel mock cases additionally preserve underlying query/no-row errors
+and discard partially scanned metadata on failure. This slice adds no producer
+proof, classification, readiness enforcement, dispatch binding, epoch mutation,
+runtime consumer, writer floor or activation authority.
 
 ## Surprises & Discoveries
 
