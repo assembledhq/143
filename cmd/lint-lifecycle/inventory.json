@@ -3661,6 +3661,27 @@
       ]
     },
     {
+      "id": "internal/db/session_lifecycle_lane_claim.go:verifyLifecycleLaneClaimInTx",
+      "source_sha256": "b1397e16ece3ec9d3fff2870cd2a71cd6b339e4d6629bb9ef5187d37067d3b2a",
+      "operation": "private exact lane-claim and expected dispatch receipt comparison",
+      "owner": "Caller-owned bounded READ COMMITTED transaction; private observation only",
+      "predicate": "Explicit nonzero org/session/lane/dispatch/token and nonnegative expected epochs/turn. Read exact scoped lane and expected dispatch without mutable visibility/status filters, successor adoption or NULL normalization. Compare current and recorded epochs plus recorded receipt turn against explicit expectations. Both current_turn counters remain raw, not eligibility or receipt identity.",
+      "lock": "Existing effective policy and shared cutover try-lock, parent then explicit lane NO KEY UPDATE NOWAIT, then expected dispatch NO KEY UPDATE NOWAIT. Higher-ranked domain/job rows must already be held. No settings, Begin, settlement, retries, mutation or effects.",
+      "stale_result": "Every error returns zero observation with cause for whole-owner rollback. Present rows distinguish absent pair, incomplete/corrupt receipt, identity mismatch, stale epochs/turn and exact identity equality. Missing expected dispatch remains ErrNoRows even for an absent claim.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "Unused private prerequisite only; schema 341-344 remains passive. No producer, acquisition/release/replacement writer, production caller, session-wide slot, consumer arbitration, normalization or activation is installed.",
+      "canonical_target": "Private receipt comparison prerequisite for future complete canonical admission and release transactions, never reusable authorization",
+      "authority": "None. Exact equality is transaction-local identity evidence, not AdmissionAuthority, eligibility, ownership, runtime permission, drain or safe-release proof. NO KEY UPDATE does not exclude new FK children.",
+      "fence_outcome": "No matching result on absent/incomplete/mismatch/stale evidence or any error. Raw metadata remains observable on successful reads, including hidden/terminal/version-zero records; equality cannot authorize mutation and cannot survive transaction settlement.",
+      "prerequisite_0a": "Before production use compose complete canonical current authority, ownership, eligibility, consumer and mutation checks, exact caller conversion, bounded outer settlement and mixed-version proof. Acquisition/release writers and activation remain separate gates.",
+      "evidence": [
+        "internal/db/session_lifecycle_lane_claim.go:verifyLifecycleLaneClaimInTx",
+        "internal/db/session_lifecycle_lane_claim_test.go",
+        "internal/db/session_lifecycle_lane_claim_postgres_test.go",
+        "Discovered: private boundary and existing prerequisite calls; syntax inventory is not authority or runtime fencing proof"
+      ]
+    },
+    {
       "id": "internal/db/session_lifecycle_transaction.go:requireLifecycleScopeTransactionInTx",
       "source_sha256": "c73cd4ae5e2a8dfc6b1e67ef561ee900dc8735837dd6d597816a15231024395f",
       "operation": "private read-only lifecycle policy prerequisite",

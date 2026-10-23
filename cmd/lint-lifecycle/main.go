@@ -97,6 +97,7 @@ type call struct {
 // classify unrelated uses rather than silently exclude generic receivers.
 var boundaryNames = strings.Fields(`
 lockLifecycleScopeInTx requireLifecycleScopeTransactionInTx
+verifyLifecycleLaneClaimInTx
 observeLifecycleCutoverInTx tryLockLifecycleCutoverSharedInTx tryLockLifecycleCutoverExclusiveInTx tryLockLifecycleCutoverInTx
 SubmitSessionMessage SubmitThreadMessage AnswerQueuedHumanInputForContinue
 answerQueuedHumanInputForContinue BeginRuntime beginRuntimeControl
