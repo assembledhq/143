@@ -57,9 +57,9 @@ separate even when their source identities and fingerprints agree.
 
 Supply a descriptor with this exact shape. Paths are relative to `--archive-root`;
 components cannot be absolute, normalized away, or contain `..`. Each original
-acquisition manifest keeps the format documented in the historical export API:
-`{version:1, acquisition, pages:[{file,sha256,request_cursor}]}`. The matching
-checksum inventory must contain exactly the manifest and its pages.
+acquisition manifest remains unchanged. The default format is the historical
+export API's `{version:1, acquisition, pages:[{file,sha256,request_cursor}]}`.
+The matching checksum inventory must contain exactly the manifest and its pages.
 
 ```json
 {
@@ -73,6 +73,43 @@ checksum inventory must contain exactly the manifest and its pages.
   }]
 }
 ```
+
+An acquisition entry may additionally declare `manifest_format`. Omitting it
+means `cursor_manifest_v1`, preserving the strict existing contract. The only
+other supported value is the explicit opt-in `operator_acquisition_v0`; formats
+are never autodetected or used as fallback after validation fails. Both may occur
+in one descriptor without combining their acquisition snapshots.
+
+| Format | Manifest evidence | Cursor validation provenance |
+| --- | --- | --- |
+| `cursor_manifest_v1` | Version 1 envelope; each page retains `request_cursor`. | Captured request cursors must equal the previous response's validated continuation. |
+| `operator_acquisition_v0` | Unversioned operator envelope; each page retains `file`, `sha256`, and integer `bytes`. | Reconstructed response-chain continuity only: ordered response positions, acquisition IDs, continuations, counts and EOF are checked. Original request cursors are unavailable; no request receipt is invented. |
+
+The operator envelope has exactly `status`, `acquisition`,
+`live_sha_before_acquisition`, `pages`, `unique_source_records`,
+`publication_denominator_established`, `split_assignment_performed`,
+`holdout_opened`, and `historical_scoring_performed`. Status must be
+`acquired_unpartitioned_unscored`, the recorded source revision must be a full
+SHA, and all four bookkeeping flags must be Boolean false. These are retained
+archive claims, not authorization or proof about a subsequent operation.
+`unique_source_records` must be an integer equal to this acquisition's declared
+record count, never a cross-acquisition review denominator. Page byte lengths
+must fit existing bounds and exactly match the bytes read during inventory and
+selected materialization. Unknown fields, formats, types, flags, contradictory
+sizes, or cursor discontinuities fail closed.
+
+For an operator manifest, add this field to its descriptor entry:
+
+```json
+"manifest_format": "operator_acquisition_v0"
+```
+
+Do not rewrite or wrap an original manifest to make it look like version 1.
+`manifest_sha256` and every locator's `acquisition_manifest_sha256` continue to
+hash the exact original manifest. The pinned descriptor's format tag provides
+metadata-only cursor-provenance classification; retain the descriptor with the
+inventory and receipt. Inventory, locator, selection and bundle schemas remain
+unchanged. No original source, record or page fingerprint is reserialized.
 
 The descriptor's acquisition inventory must be approved against the frozen archive
 by its custodian. Hashing an opaque original catalog cannot independently prove

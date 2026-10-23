@@ -62,7 +62,7 @@ def materialize(root, catalog_raw, index_raw, graph_raw, protocol_raw, plan_raw,
         for descriptor in manifest["pages"]:
             key = (a["id"], descriptor["sha256"])
             need(key not in pages)
-            pages[key] = (str(PurePosixPath(entry["manifest"]).parent / descriptor["file"]), entry, manifest)
+            pages[key] = (str(PurePosixPath(entry["manifest"]).parent / descriptor["file"]), entry, manifest, descriptor)
     need(all((key[0], key[1]) in pages for key in selected))
     selected_by_page = defaultdict(list)
     for key, row in wanted.items():
@@ -73,10 +73,11 @@ def materialize(root, catalog_raw, index_raw, graph_raw, protocol_raw, plan_raw,
         page_keys = sorted(selected_by_page)
         with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as bundle:
             for page_key in page_keys:
-                name, entry, manifest = pages[page_key]
+                name, entry, manifest, descriptor = pages[page_key]
                 raw = read_relative(root, name, metadata.MAX_PAGE)
                 spent += len(raw)
                 need(spent <= metadata.MAX_TOTAL_BYTES and sha(raw) == page_key[1])
+                metadata.validate_page_size(entry, descriptor, raw)
                 document = Document(raw)
                 fields = document.members()
                 keys(fields, ("data", "acquisition", "meta"))
