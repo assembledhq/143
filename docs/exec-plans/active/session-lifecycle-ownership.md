@@ -2741,6 +2741,69 @@ this implementation. Cutover interlocks, higher-rank discovery/restarts, stronge
 end/reset child exclusion and mixed-version lock-graph progress remain open.
 These tests do not prove historical deadlock freedom or production timing.
 
+### 0a passive cutover record and private interlock validation
+
+Migrations 336–337 add an empty `session_lifecycle_cutovers` table and then its
+exact tenant/session FK in separate five-second-lock-timeout transactions. The
+creation transaction references only the existing organization parent; the next
+references the existing tenant/session unique key. Both identities are nonnull
+and form the primary key. The representation has no secondary scan index,
+producer, backfill, activation writer, guard, purge job or cascade. Existing session
+soft deletion remains unchanged. Retained cutover rows block physical parent
+deletion until a future explicit retention policy proves guard provenance can
+be removed. Rollback removes only these new objects, refuses dependencies and
+does not establish safe rollback after active writers exist; FK removal can need
+stronger parent locks than installation.
+
+This passive boundary chooses an explicit nonnegative bigint `version`, the three
+named states with a typed enum, a nullable positive message cutoff, nullable
+nonnegative integer minimum writer version, and raw nullable normalization and
+resumability-capability JSON. No column has a default. SQL NULL, JSON null and
+arbitrary JSON remain distinct observations, not certificates. The cutoff is a
+retained watermark rather than an enduring message association, so it has no
+message FK; it must only be captured after the future proved drain. A NULL cutoff
+does not prove an empty historical set. The future activation writer must still
+specify version/CAS semantics, a positively proved empty-set representation,
+bounded normalization and provenance, the tested multi-lane/provider/build/
+ResumeIdentity capability envelope, attempt/backoff bookkeeping and retention.
+No stored version, `active` string, timestamp or JSON establishes those gates.
+
+The private transaction-only helpers use shared or exclusive nonblocking advisory
+acquisition on `hashtextextended('session_lifecycle_cutover:<org>:<session>',0)`
+with canonical UUID text and identical key construction in both modes. Hash
+collisions can add contention but never replace the exact scoped SQL lookup.
+Both modes require the existing observed READ COMMITTED lifecycle policy and
+live bounded deadline; neither writes settings, begins, settles, retries or
+mutates rows. The transaction marker's private constant is named separately from
+the unchanged writer-registration version. Shared acquisition is followed by a
+separate fresh scoped read; missing metadata returns `ErrNoRows`, not presumed
+version-zero eligibility. Successful late acquisition continues without a false
+restart. Any failure yields no observation and requires owner rollback.
+
+A false advisory try-lock returns a private concrete busy error, never a
+fabricated PostgreSQL SQLSTATE or a premature public contention-exhaustion result.
+The public runner's SQLSTATE-only retry policy is unchanged: this application
+error receives one confirmed whole rollback and no automatic replay. This is a
+deliberate incomplete prerequisite, not final conflict handling. Before wiring
+any production caller, reconcile the contract's real-exclusive-conflict retry
+requirement with an explicitly reviewed narrow retry extension retaining all
+current cancellation, joined-error, rollback-failure and ambiguous-commit gates.
+
+All four private interlock/observation helpers are explicit unconverted inventory
+boundaries, not mutation authorities. Future cutover-table insert, metadata update
+and delete syntax also requires a concrete reviewed mutation contract; ordinary
+helper names cannot silently avoid that inventory. This remains conservative
+syntax coverage, not proof of all SQL routing or runtime guard enforcement.
+
+`go test ./internal/models ./internal/db -run 'LifecycleCutover|LifecycleTransaction|LifecycleScope'`
+and `go test ./cmd/migrate -run SessionLifecycleCutover` with a disposable
+PostgreSQL 15+ URL exercise the passive schema, raw observations and actual lock
+interactions. These Go separate-statement probes do not prove the future
+explicitly VOLATILE trigger's within-statement snapshot behavior. The OLD/NEW
+multi-scope guard routing, all participating writers, complete canonical
+checks/mutations and mixed-version activation/floor proofs remain open. There
+are no production callers, activation changes or inferred permissions here.
+
 ## Surprises & Discoveries
 
 Shared ownership includes integration workers and runtime drains, not just the
