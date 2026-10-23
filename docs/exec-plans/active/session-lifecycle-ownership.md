@@ -2920,6 +2920,53 @@ tests and concurrent-migration/dirty-repair policy tests on disposable
 PostgreSQL 15+. These prove representation, exact scope, rollback boundaries
 and legacy compatibility, not admission, production rollout or provider behavior.
 
+### 0a private lane-claim receipt comparison
+
+`verifyLifecycleLaneClaimInTx` is an unused private DB prerequisite, not an
+admission or release command. Its caller supplies a concrete, already configured
+bounded READ COMMITTED transaction and explicit organization/session/lane/
+dispatch/token/epoch/turn expectations. Higher-ranked domain/job locks must
+already be held. It composes the shared cutover try-lock, exact parent and lane
+row locks, then locks the explicitly expected dispatch; it never retargets to
+the current lane pointer, primary lane or a sibling. No transaction setup,
+settlement, retry, mutation or external effect occurs in this helper.
+
+Successful reads preserve the whole raw locked scope, lane claim pair, current
+lane turn and independently nullable dispatch receipt fields. Missing scoped
+rows remain errors, including a missing expected dispatch when the lane is
+unclaimed; this differs from a present receipt with NULL metadata. Any error
+returns no observation and requires whole-unit rollback by the owner. With all
+rows present, comparison precedence is absent pair, incomplete/corrupt receipt,
+identity mismatch, stale epoch/recorded receipt turn, then exact equality.
+Explicit zero epochs and turns are representable; unknown NULL values are never
+inferred as zero.
+Neither parent nor lane current turn is compared. Existing thread admission
+names the running turn as `CurrentTurn+1` (`thread.Service.SendMessage`), and
+`SessionThreadStore.CompleteTurn` advances that counter when completion persists.
+The receipt's claimed turn is compared only to the caller's explicit expected
+turn, never inferred from a mutable counter. Both running and completed lane
+states can retain the same receipt identity without becoming eligible for any
+operation. Independent sibling activity must not invalidate this lane's receipt.
+
+Exact equality is transaction-local identity evidence only. Hidden, terminal,
+end-marked or version-zero rows can compare equal without becoming eligible.
+Admission-strength NO KEY UPDATE locks do not exclude new FK children or prove
+consumer absence, physical drain, runtime ownership or safe release. The result
+must not survive transaction settlement or become a reusable permission. Future
+canonical admission/release must compose complete current authority, ownership,
+eligibility, consumer and mutation checks in its locked transaction. Claim
+acquisition/release/replacement, session-wide slots, dispatch producers, counter
+updates, normalization, compatibility enforcement and activation remain absent.
+
+Focused verification uses disposable PostgreSQL 15+ with `go test -race -p=1
+-parallel=2 ./internal/db ./cmd/migrate -run
+'TestLifecycleLaneClaim|TestLifecycleScope|TestSessionLaneClaim' -count=1
+-timeout=300s`. Independent NOWAIT probes at query barriers distinguish physical
+lock acquisition from equality, while fresh-statement successor observations
+and outer rollback probes exercise stale evidence and caller ownership. These
+are local schema/transaction proofs, not mixed-version rollout or production
+acceptance evidence.
+
 ## Surprises & Discoveries
 
 Shared ownership includes integration workers and runtime drains, not just the
