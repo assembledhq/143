@@ -39,9 +39,9 @@ type lifecycleCutoverObservation struct {
 
 // lifecycleCutoverInterlockBusyError is created only for an actual false result
 // from the private transaction-scoped advisory try-lock. It is not a PostgreSQL
-// SQLSTATE or an exhausted/confirmed-aborted unit. The unchanged public runner
-// rolls back this application error once without replay; its eventual bounded
-// retry integration must be reviewed before any production caller is wired.
+// SQLSTATE or an exhausted/confirmed-aborted unit. This exact private type is
+// eligible for the owner's existing bounded retry protocol only after confirmed
+// whole rollback and its other exclusions. Acquisition alone never permits replay.
 type lifecycleCutoverInterlockBusyError struct{}
 
 func (*lifecycleCutoverInterlockBusyError) Error() string {

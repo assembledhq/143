@@ -394,7 +394,7 @@ func TestLifecycleCutoverInterlockLeavesCallerTransactionOpen(t *testing.T) {
 	}
 }
 
-func TestLifecycleCutoverBusyRemainsNonretryable(t *testing.T) {
+func TestLifecycleCutoverBusyRetriesPreserveFailureExclusions(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
@@ -403,12 +403,16 @@ func TestLifecycleCutoverBusyRemainsNonretryable(t *testing.T) {
 		rollbackErr error
 		wantErr     error
 	}{
-		{name: "actual busy cause", wrap: func(err error) error { return err }},
-		{name: "wrapped busy cause", wrap: func(err error) error { return fmt.Errorf("outer admission: %w", err) }},
 		{name: "joined network uncertainty", wrap: func(err error) error { return errors.Join(err, io.EOF) }, wantErr: io.EOF},
+		{name: "wrapped joined network uncertainty", wrap: func(err error) error {
+			return fmt.Errorf("outer admission: %w", errors.Join(err, io.EOF))
+		}, wantErr: io.EOF},
 		{name: "joined real SQLSTATE still cannot authorize replay", wrap: func(err error) error {
 			return errors.Join(err, &pgconn.PgError{Code: "55P03", Message: "independent synthetic cause"})
 		}},
+		{name: "joined deadline remains nonretryable", wrap: func(err error) error {
+			return errors.Join(err, context.DeadlineExceeded)
+		}, wantErr: context.DeadlineExceeded},
 		{name: "cancellation after actual busy", wrap: func(err error) error { return err }, cancel: true, wantErr: context.Canceled},
 		{name: "failed rollback is not abort proof", wrap: func(err error) error { return err }, rollbackErr: io.ErrClosedPipe, wantErr: io.ErrClosedPipe},
 	}
@@ -440,8 +444,8 @@ func TestLifecycleCutoverBusyRemainsNonretryable(t *testing.T) {
 			if tt.wantErr != nil {
 				require.ErrorIs(t, err, tt.wantErr, "additional cancellation, uncertainty or rollback failures must remain visible")
 			}
-			require.Equal(t, 1, calls, "the existing runner must never replay a private application-level advisory busy result")
-			require.NotErrorIs(t, err, ErrLifecycleContention, "one advisory false result is not exhausted PostgreSQL contention")
+			require.Equal(t, 1, calls, "eligible advisory conflict must not bypass cancellation, uncertainty or failed-abort exclusions")
+			require.NotErrorIs(t, err, ErrLifecycleContention, "an excluded advisory conflict must not be labeled exhausted safe contention")
 			require.NoError(t, mock.ExpectationsWereMet(), "runner must perform exactly one whole rollback and no retry or commit")
 		})
 	}
@@ -509,8 +513,9 @@ func requireCutoverPrivateBusy(t *testing.T, err error) {
 	t.Helper()
 	var busy *lifecycleCutoverInterlockBusyError
 	require.ErrorAs(t, err, &busy, "an actual advisory false result must retain its private concrete conflict type")
+	require.NotNil(t, busy, "an eligible advisory conflict must contain a real nonnil private cause")
 	var pgErr *pgconn.PgError
 	require.False(t, errors.As(err, &pgErr), "advisory false must not fabricate a PostgreSQL error or SQLSTATE")
 	require.NotErrorIs(t, err, ErrLifecycleContention, "an acquisition conflict must not masquerade as exhausted confirmed-aborted retries")
-	require.False(t, retryableLifecycleTransaction(err), "private advisory conflict must remain outside the runner's existing SQLSTATE-only retry policy")
+	require.True(t, retryableLifecycleTransaction(err), "actual advisory conflict is eligible for owner retry only after a successful whole rollback")
 }

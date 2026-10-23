@@ -2782,12 +2782,26 @@ restart. Any failure yields no observation and requires owner rollback.
 
 A false advisory try-lock returns a private concrete busy error, never a
 fabricated PostgreSQL SQLSTATE or a premature public contention-exhaustion result.
-The public runner's SQLSTATE-only retry policy is unchanged: this application
-error receives one confirmed whole rollback and no automatic replay. This is a
-deliberate incomplete prerequisite, not final conflict handling. Before wiring
-any production caller, reconcile the contract's real-exclusive-conflict retry
-requirement with an explicitly reviewed narrow retry extension retaining all
-current cancellation, joined-error, rollback-failure and ambiguous-commit gates.
+The public runner additionally recognizes this exact nonnil private conflict
+type, only after confirming whole rollback and all existing replay exclusions.
+It retains the same two-second total budget, at most three attempts and jittered
+25–100ms delay, with fresh revalidation in every callback. It does not extend the
+deadline, infer an abort from `false`, fabricate a SQLSTATE, match error text or
+accept a generic retryable-error interface. Cancellation, joined uncertainty,
+failed rollback and all begin/commit failures remain nonreplayable even if they
+carry an otherwise eligible conflict. Exhaustion returns the existing public
+contention result preserving the private cause, never a partial observation or
+permission to repeat external effects. The contract's source wording now names
+this one narrow actual-conflict exception alongside actual `55P03`/`40P01`.
+
+Deterministic unit and PostgreSQL retry probes require fresh transaction identity,
+unchanged unit deadline and complete disappearance of the first attempt's staged
+effect before the next attempt proceeds. An independently held blocker is
+released only by its test controller; only the final successful attempt commits.
+Permanent contention exhausts the same attempt cap with every staged effect
+rolled back and the independent holder untouched. Raw busy remains distinct from
+the public exhausted-contention result. These are owner retry proofs, not an
+activation controller, automatic activation backoff, or mixed-version progress.
 
 All four private interlock/observation helpers are explicit unconverted inventory
 boundaries, not mutation authorities. Future cutover-table insert, metadata update
@@ -2803,6 +2817,8 @@ explicitly VOLATILE trigger's within-statement snapshot behavior. The OLD/NEW
 multi-scope guard routing, all participating writers, complete canonical
 checks/mutations and mixed-version activation/floor proofs remain open. There
 are no production callers, activation changes or inferred permissions here.
+Future bulk claimers and sweeps must also bound the number of advisory keys held
+per transaction; a time budget alone does not bound shared lock-table usage.
 
 ## Surprises & Discoveries
 
