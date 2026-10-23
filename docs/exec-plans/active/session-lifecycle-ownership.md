@@ -1787,6 +1787,10 @@ revision; it must not reinterpret new durable records or trigger replay.
   backfill, plus a tenant/session/request-scoped passive read. Prove legacy
   threaded and threadless requests retain unknown provenance even with nonzero
   parent epochs, and preserve existing request models and API fields.
+- [x] Add nullable request classification/readiness representation without
+  defaults or inference. Keep its DB-only reader observational, preserve unknown
+  metadata and existing API behavior, and validate known classification labels
+  separately from admission authority.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2513,6 +2517,33 @@ Eight parallel mock cases additionally preserve underlying query/no-row errors
 and discard partially scanned metadata on failure. This slice adds no producer
 proof, classification, readiness enforcement, dispatch binding, epoch mutation,
 runtime consumer, writer floor or activation authority.
+
+### 0a passive request readiness representation validation
+
+`go test ./cmd/migrate ./internal/db ./internal/models -run
+'TestSessionHumanInputReadinessMigrationPostgres|TestSessionHumanInputRequestStore_GetLifecycleReadiness|TestHumanInputReadinessState_Validate'
+-count=1` with a disposable PostgreSQL 15+ `TEST_DATABASE_URL` covers the complete
+migration chain through readiness metadata. PostgreSQL 17.10 fixtures exercise
+fresh schema and populated 324 → 325 → 324 → 325 boundaries, preserving every
+legacy field and both existing admission epochs. The seven new columns are
+nullable and have no defaults or backfill. Existing threaded/threadless creation
+leaves all seven unknown, even with populated epochs and an expired request.
+
+The DB-only reader returns independently nullable legacy/version/state/deadline
+fields and raw JSON without classification or eligibility decisions. SQL NULL
+stays distinct from explicit false, zero and JSON null. The typed state helper
+validates the four known labels; the observational reader deliberately preserves
+unknown stored labels rather than asserting their validity. Real legacy answer
+and cancel, nonpending/expired requests and archived/deleted parents retain their
+existing model, API and lookup behavior. Seventeen parallel reader cases and eight
+parallel enum cases cover exact scope, raw values, errors and late-scan cleanup.
+
+No readiness proof author, immutability or shape enforcement, active classifier,
+deadline policy, due index, producer/recovery association, answer/start consumer,
+notice, compatibility guard or activation is introduced. Future canonical writers
+must validate those contracts atomically; a stored label or opaque JSON is not
+readiness proof. This migration deliberately remains a catalog-only additive
+prerequisite rather than scanning the hot table to enforce a policy not yet wired.
 
 ## Surprises & Discoveries
 
