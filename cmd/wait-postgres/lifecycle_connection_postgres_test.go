@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"net/url"
 	"os"
@@ -79,9 +78,10 @@ func TestLifecycleWaiterConnectionPostgres(t *testing.T) {
 			defer childCancel()
 			child := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestLifecycleWaiterConnectionPostgres$", "-test.timeout=15s")
 			child.Env = lifecycleWaiterEnvironment(values...)
-			var output bytes.Buffer
+			var output lifecycleWaiterProbeOutput
 			child.Stdout, child.Stderr = &output, &output
-			require.True(t, child.Run() == nil, "the real waiter connection factory must preserve native targets and unrelated settings while overriding every application-name source without writer authority")
+			runErr := child.Run()
+			require.True(t, runErr == nil, "the real waiter connection factory must preserve native targets and unrelated settings while overriding every application-name source without writer authority; %s", lifecycleWaiterProbeSummary(runErr, childCtx.Err(), &output))
 		})
 	}
 }

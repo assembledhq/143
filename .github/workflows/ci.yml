@@ -335,14 +335,53 @@ jobs:
         run: python3 -B -m unittest discover -s scripts -p 'test_*code_review_export*.py'
 
       - name: Run command tests
+        id: command_tests
         timeout-minutes: 10
         run: |
           race=()
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             race=(-race)
           fi
-          # Fresh-schema cases share a package deadline, not one per test.
-          go test ./cmd/... -count=1 "${race[@]}" -timeout=300s
+          # Bound fresh-database creation/drop across packages and parallel tests,
+          # without reducing concurrency exercised inside individual tests.
+          diagnostics="${RUNNER_TEMP:?}/ci-command-diagnostics"
+          mkdir -p "$diagnostics"
+          set +e
+          go test -json ./cmd/... -p=1 -parallel=2 -count=1 "${race[@]}" -timeout=300s \
+            2>"$diagnostics/go-test.stderr.log" | tee "$diagnostics/go-test.jsonl"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          capture_status="${statuses[1]}"
+          if ! cat "$diagnostics/go-test.stderr.log" >&2; then
+            echo "::warning::Could not replay command test stderr"
+            capture_status=1
+          fi
+          if ! printf 'go_test=%s\njson_capture=%s\n' "${statuses[0]}" "$capture_status" >"$diagnostics/exit-status.txt"; then
+            echo "::warning::Could not retain command test exit statuses"
+            capture_status=1
+          fi
+          # Preserve the test failure even if diagnostic capture also fails.
+          if [[ "${statuses[0]}" != "0" ]]; then
+            exit "${statuses[0]}"
+          fi
+          exit "$capture_status"
+
+      - name: Collect command test PostgreSQL diagnostics
+        if: ${{ !cancelled() && (steps.command_tests.outcome == 'success' || steps.command_tests.outcome == 'failure') }}
+        timeout-minutes: 1
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+          CI_POSTGRES_DIAGNOSTICS_SCOPE: command
+        run: bash .github/scripts/collect-ci-postgres-diagnostics.sh
+
+      - name: Upload command test diagnostics
+        if: ${{ !cancelled() && (steps.command_tests.outcome == 'success' || steps.command_tests.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: command-test-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-command-diagnostics/
+          retention-days: 7
+          if-no-files-found: error
 
       # Chrome startup and rendering need CPU that the parallel backend suite
       # can otherwise consume. Keep real browser fixtures in a serial step,

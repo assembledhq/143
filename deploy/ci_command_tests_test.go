@@ -90,6 +90,7 @@ exit "${MOCK_GO_EXIT_CODE:?}"
 			command.Dir = directory
 			command.Env = []string{
 				"PATH=" + bin + ":/usr/bin:/bin",
+				"RUNNER_TEMP=" + directory,
 				"GITHUB_EVENT_NAME=" + tt.event,
 				"TEST_DATABASE_URL=" + job.Env["TEST_DATABASE_URL"],
 				"MOCK_GO_LOG=" + logPath,
@@ -105,7 +106,7 @@ exit "${MOCK_GO_EXIT_CODE:?}"
 			}
 			logged, err := os.ReadFile(logPath)
 			require.NoError(t, err, "fixture must record the actual Go test arguments")
-			expected := []string{"test", "./cmd/...", "-count=1"}
+			expected := []string{"test", "-json", "./cmd/...", "-p=1", "-parallel=2", "-count=1"}
 			if tt.race {
 				expected = append(expected, "-race")
 			}

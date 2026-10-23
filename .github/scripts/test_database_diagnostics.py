@@ -82,17 +82,21 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
         }
 
     def test_original_test_status_and_json_capture(self):
-        cases = [(0, 0, 0), (7, 0, 7), (0, 9, 9), (7, 9, 7)]
-        for go_status, tee_status, expected in cases:
-            with self.subTest(go=go_status, tee=tee_status), tempfile.TemporaryDirectory() as directory:
+        suites = [
+            ("Run database tests", "ci-db-diagnostics", ["go", "test", "-json", "./internal/db", "-parallel=2", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-db.out", "-covermode=count", "-timeout=300s"]),
+            ("Run command tests", "ci-command-diagnostics", ["go", "test", "-json", "./cmd/...", "-p=1", "-parallel=2", "-count=1", "-timeout=300s"]),
+        ]
+        cases = [(suite, go, tee, expected) for suite in suites for go, tee, expected in [(0, 0, 0), (7, 0, 7), (0, 9, 9), (7, 9, 7)]]
+        for (step, folder, arguments), go_status, tee_status, expected in cases:
+            with self.subTest(step=step, go=go_status, tee=tee_status), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 result = subprocess.run(
-                    ["bash", "-eo", "pipefail", "-c", run_script("Run database tests")],
+                    ["bash", "-eo", "pipefail", "-c", run_script(step)],
                     cwd=root, env=self.environment(root, GO_STATUS=str(go_status), TEE_STATUS=str(tee_status)),
                     capture_output=True, text=True, timeout=10, check=False,
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
-                diagnostics = root / "ci-db-diagnostics"
+                diagnostics = root / folder
                 self.assertEqual((diagnostics / "go-test.jsonl").read_text(), EVENT, "stderr must not corrupt per-test JSON")
                 self.assertEqual(json.loads((diagnostics / "go-test.jsonl").read_text())["Test"], "TestSynthetic")
                 self.assertEqual((diagnostics / "go-test.stderr.log").read_text(), "synthetic non-JSON warning\n")
@@ -100,19 +104,20 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
                 self.assertEqual((diagnostics / "exit-status.txt").read_text(), f"go_test={go_status}\njson_capture={tee_status}\n")
                 calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
                 go = next(call for call in calls if call[0] == "go")
-                self.assertEqual(go, ["go", "test", "-json", "./internal/db", "-parallel=2", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-db.out", "-covermode=count", "-timeout=300s"], "diagnostics must preserve PR test coverage, budgets, and bounded fixture overlap")
+                self.assertEqual(go, arguments, "diagnostics must preserve PR test coverage, budgets, and bounded fixture overlap")
 
     def test_bounded_aggregate_only_postgres_snapshot(self):
-        for status in (0, 1, 124):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+        cases = [(scope, folder, status) for scope, folder in [("database", "ci-db-diagnostics"), ("command", "ci-command-diagnostics")] for status in (0, 1, 124)]
+        for scope, folder, status in cases:
+            with self.subTest(scope=scope, status=status), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 result = subprocess.run(
                     ["bash", str(COLLECTOR)], cwd=root,
-                    env=self.environment(root, COLLECT_STATUS=str(status)),
+                    env=self.environment(root, COLLECT_STATUS=str(status), CI_POSTGRES_DIAGNOSTICS_SCOPE=scope),
                     capture_output=True, text=True, timeout=10, check=False,
                 )
                 self.assertEqual(result.returncode, 0, "unavailable diagnostics must not mask the test outcome")
-                outputs = sorted((root / "ci-db-diagnostics").iterdir())
+                outputs = sorted((root / folder).iterdir())
                 self.assertEqual([path.name for path in outputs], ["container-resources.txt", "container-state.json", "postgres-snapshot.json"])
                 expected = '{"synthetic":"aggregate-only"}\n' if status == 0 else f'{{"unavailable":true,"exit_status":{status}}}\n'
                 self.assertEqual([path.read_text() for path in outputs], [expected] * 3)
@@ -135,15 +140,36 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
 
     def test_failed_step_upload_precedes_database_cleanup(self):
         source = WORKFLOW.read_text()
-        collect = "Collect database test PostgreSQL diagnostics"
-        upload = "Upload database test diagnostics"
-        self.assertLess(source.index(collect), source.index(upload))
-        self.assertLess(source.index(upload), source.index("- name: Stop CI Postgres"))
-        for name in (collect, upload):
-            step = "\n".join(workflow_step(name))
-            self.assertIn("!cancelled()", step)
-            self.assertIn("steps.database_tests.outcome == 'failure'", step, "failure must not skip its diagnostics")
-        self.assertIn("retention-days: 7", "\n".join(workflow_step(upload)))
+        for scope, identifier in [("database", "database_tests"), ("command", "command_tests")]:
+            with self.subTest(scope=scope):
+                collect = f"Collect {scope} test PostgreSQL diagnostics"
+                upload = f"Upload {scope} test diagnostics"
+                run = "\n".join(workflow_step(f"Run {scope} tests"))
+                self.assertIn(f"id: {identifier}", run)
+                self.assertLess(source.index(f"Run {scope} tests"), source.index(collect))
+                self.assertLess(source.index(collect), source.index(upload))
+                self.assertLess(source.index(upload), source.index("- name: Stop CI Postgres"))
+                for name in (collect, upload):
+                    step = "\n".join(workflow_step(name))
+                    self.assertIn("!cancelled()", step)
+                    self.assertIn(f"steps.{identifier}.outcome == 'failure'", step, "failure must not skip its diagnostics")
+                self.assertIn("retention-days: 7", "\n".join(workflow_step(upload)))
+                if scope == "command":
+                    self.assertIn("CI_POSTGRES_DIAGNOSTICS_SCOPE: command", "\n".join(workflow_step(collect)))
+                    self.assertIn("${{ runner.temp }}/ci-command-diagnostics/", "\n".join(workflow_step(upload)))
+
+    def test_unknown_scope_is_rejected_without_echoing_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = subprocess.run(
+                ["bash", str(COLLECTOR)], cwd=root,
+                env=self.environment(root, CI_POSTGRES_DIAGNOSTICS_SCOPE=PRIVATE_ERROR),
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            self.assertEqual(result.returncode, 1, "only fixed diagnostic destinations are allowed")
+            self.assertFalse((root / "calls.jsonl").exists(), "invalid scopes must not execute external commands")
+            for marker in PRIVATE_MARKERS:
+                self.assertNotIn(marker, result.stdout + result.stderr, "invalid scopes must not publish caller input")
 
 
 if __name__ == "__main__":
