@@ -1070,7 +1070,8 @@ conflicting locks, with confirmed whole-transaction rollback and bounded retry
 before any external effect. `NOWAIT` cannot bound implicit FK waits: require
 `SET LOCAL lock_timeout` with a documented bound for those waits as well. Retry
 the whole transaction with bounded attempts/backoff only after confirmed abort
-for explicitly classified `40P01`/`55P03` conflicts; revalidate state each time.
+for explicitly classified `40P01`/`55P03` conflicts and the companion section 5's
+one concrete actual cutover-advisory-conflict exception; revalidate state each time.
 Never retry unknown commit, arbitrary errors, or partially published effects.
 When attempts exhaust, unaccepted synchronous commands return a typed contention
 outcome without answer/grant/claim changes; adapters map it to a retryable response.
@@ -2819,6 +2820,55 @@ checks/mutations and mixed-version activation/floor proofs remain open. There
 are no production callers, activation changes or inferred permissions here.
 Future bulk claimers and sweeps must also bound the number of advisory keys held
 per transaction; a time budget alone does not bound shared lock-table usage.
+
+### 0a passive request workspace compatibility representation
+
+Migrations 338–340 create an empty `session_input_workspace_compatibility`
+table, then install its exact tenant/session and tenant/session/request FKs in
+separate five-second-lock-timeout transactions. The table creation references
+only the organization parent. The `(org_id,request_id)` primary key bounds the
+representation to one current row per request, with a session lookup index and
+the contract's partial pending-revalidation due index. None starts a scanner or
+creates a certificate. All FKs are immediate NO ACTION: retained request evidence
+blocks physical deletion until an explicit future retention policy removes it.
+Existing soft deletion remains unchanged; down migrations do not cascade and are
+not safe-rollback proof after future producers or dependents exist.
+
+State is explicitly one of certified/pending/unavailable/unprovable, without a
+default. Digests, signed bigint generation/revision, key, raw workspace JSON,
+polymorphic authority kind/receipt, reason and revalidation time are independently
+nullable with no defaults or backfill. Unknown, negative, empty or incomplete
+metadata remains representable at this raw boundary; it is not a valid workspace
+contract or proof of certification. The future canonical writer must validate
+the complete exact descriptor, immutable request anchor, operation-specific
+receipt and CAS. There is no fabricated general receipt table or unscoped UUID
+FK, no snapshot-key FK, and no inferred current-sibling producer identity.
+
+The DB-only reader takes exact organization/session/request scope, returns raw
+values, preserves missing-row errors and discards partial values on every error.
+It does not lock, join current descriptors, classify absent rows, filter mutable
+request status or parent visibility, validate a stored certificate, or authorize
+any operation. Retained terminal metadata is observable until explicit cleanup.
+The typed state validator names the known storage labels, not readiness policy.
+
+All production writes to this table require a concrete lifecycle inventory
+contract, including generic-named insert, metadata-update and delete helpers.
+This is conservative syntax coverage, not a guard or whole-program SQL proof.
+There is no producer, all-pending atomic watermark fanout, selected provider
+revalidation, anchor immutability/CAS, per-request disposition, 128-row cap
+enforcement, recovery/notice action, OLD/NEW guard, floor or activation. These
+remain requirements before the first authoritative writer. No stored label,
+digest, JSON or receipt ID may certify input or veto another authorized operation.
+
+Focused verification uses `go test -race -p=1 -parallel=4 ./internal/models
+./internal/db ./cmd/migrate -run
+'TestInputWorkspaceCompatibilityState_Validate|TestSessionHumanInputRequestStore_GetWorkspaceCompatibility|TestSessionInputWorkspace'
+-count=1` with an owned disposable PostgreSQL 15+ URL. The real-schema probes
+exercise fresh and populated upgrade/down/reapply boundaries, complete prior
+row/API/index preservation, exact catalog shapes, isolated FK and structural
+rejection, raw-value/tenant-scope observations, legacy answer/cancel behavior and
+retained request dependencies. These are representation and compatibility tests,
+not provider verification, authoritative certification or activation evidence.
 
 ## Surprises & Discoveries
 

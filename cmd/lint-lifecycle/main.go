@@ -209,7 +209,7 @@ var statusAssignmentRE = regexp.MustCompile(`(?i)\bstatus"?\s*=`)
 // These non-status columns also gate admission, snapshot lineage and retained
 // ownership. Discover their writes even when the method has an innocuous name.
 var gateAssignmentRE = regexp.MustCompile(`(?i)\b(?:automation_owner_generation_id|code_review_owner_pr_id|ownership_release_pending|cancel_requested_at|archived_at|current_turn|workspace_generation|workspace_revision|snapshot_key|pending_snapshot_key|base_snapshot_key|latest_diff_snapshot_id|recovery_state|sandbox_state|container_id|worker_node_id|turn_holding_container)"?\s*=`)
-var gateTableRE = regexp.MustCompile(`(?i)\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?(automation_target_sessions|pull_request_repair_runs|session_human_input_requests|session_lifecycle_cutovers)"?\b`)
+var gateTableRE = regexp.MustCompile(`(?i)\b(?:UPDATE|INSERT\s+INTO|DELETE\s+FROM)\s+(?:(?:"?[a-z_][a-z0-9_]*"?)\s*\.\s*)?"?(automation_target_sessions|pull_request_repair_runs|session_human_input_requests|session_lifecycle_cutovers|session_input_workspace_compatibility)"?\b`)
 var statusColumnRE = regexp.MustCompile(`(?i)\bstatus\b`)
 var whitespaceRE = regexp.MustCompile(`\s+`)
 var updateRE = regexp.MustCompile(`(?i)\bUPDATE\s+`)

@@ -298,18 +298,21 @@ func TestPlainGenericStoreMethodsRemainUnselected(t *testing.T) {
 	}
 }
 
-func TestCutoverMetadataWritesRequireInventoryContract(t *testing.T) {
+func TestLifecycleMetadataWritesRequireInventoryContract(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ name, query string }{
 		{name: "insert", query: `INSERT INTO "public"."session_lifecycle_cutovers" (org_id,session_id,version,state) VALUES($1,$2,0,'shadow')`},
 		{name: "metadata update", query: `UPDATE public.session_lifecycle_cutovers SET normalization=$3 WHERE org_id=$1 AND session_id=$2`},
 		{name: "delete", query: `DELETE FROM session_lifecycle_cutovers WHERE org_id=$1 AND session_id=$2`},
+		{name: "compatibility insert", query: `INSERT INTO "public"."session_input_workspace_compatibility" (org_id,session_id,request_id,state) VALUES($1,$2,$3,'unprovable')`},
+		{name: "compatibility metadata update", query: `UPDATE public.session_input_workspace_compatibility SET workspace_state=$4 WHERE org_id=$1 AND session_id=$2 AND request_id=$3`},
+		{name: "compatibility delete", query: `DELETE FROM session_input_workspace_compatibility WHERE org_id=$1 AND session_id=$2 AND request_id=$3`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			found, err := scan(fixture(t, "func write() { exec(`"+tt.query+"`) }"))
-			require.NoError(t, err, "new cutover metadata writes must scan even under an ordinary helper name")
+			require.NoError(t, err, "lifecycle metadata writes must scan even under an ordinary helper name")
 			type observation struct {
 				ID               string
 				Kinds            []string
@@ -320,12 +323,12 @@ func TestCutoverMetadataWritesRequireInventoryContract(t *testing.T) {
 				actual = append(actual, observation{ID: item.ID, Kinds: item.Kinds, RequiresContract: requiresMutationContract(item)})
 			}
 			want := []observation{{ID: "internal/fixture.go:write", Kinds: []string{"authority-table-write"}, RequiresContract: true}}
-			require.Equal(t, want, actual, "cutover insertion, metadata edits and deletion must require a concrete reviewed mutation contract")
+			require.Equal(t, want, actual, "cutover and compatibility insertion metadata edits and deletion must require a concrete reviewed mutation contract")
 			reviewed := reviewedFixture(found)
 			for index := range reviewed.Entries {
 				reviewed.Entries[index].CanonicalTarget = ""
 			}
-			require.ErrorContains(t, compare(found, reviewed), "mutation requires concrete canonical authority/outcome/0a contract", "an explicit passive-reader contract cannot approve a future cutover writer")
+			require.ErrorContains(t, compare(found, reviewed), "mutation requires concrete canonical authority/outcome/0a contract", "an explicit passive-reader contract cannot approve a future metadata writer")
 		})
 	}
 }
