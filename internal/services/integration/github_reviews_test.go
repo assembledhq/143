@@ -60,10 +60,11 @@ func TestGitHubCodeReviewSource_ListRecentPRs_Merged(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL,
-		Token:   "test-token",
-		Owner:   "octocat",
-		Repo:    "hello-world",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+		Token:      "test-token",
+		Owner:      "octocat",
+		Repo:       "hello-world",
 	})
 
 	results, err := src.ListRecentPRs(context.Background(), PRFilter{State: "merged", Limit: 10})
@@ -100,10 +101,11 @@ func TestGitHubCodeReviewSource_ListRecentPRs_Open(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL,
-		Token:   "test-token",
-		Owner:   "octocat",
-		Repo:    "hello-world",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+		Token:      "test-token",
+		Owner:      "octocat",
+		Repo:       "hello-world",
 	})
 
 	results, err := src.ListRecentPRs(context.Background(), PRFilter{State: "open"})
@@ -125,10 +127,11 @@ func TestGitHubCodeReviewSource_ListRecentPRs_DefaultLimit(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL,
-		Token:   "t",
-		Owner:   "o",
-		Repo:    "r",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+		Token:      "t",
+		Owner:      "o",
+		Repo:       "r",
 	})
 
 	results, err := src.ListRecentPRs(context.Background(), PRFilter{Limit: 0})
@@ -146,10 +149,11 @@ func TestGitHubCodeReviewSource_ListRecentPRs_APIError(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL,
-		Token:   "t",
-		Owner:   "o",
-		Repo:    "r",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+		Token:      "t",
+		Owner:      "o",
+		Repo:       "r",
 	})
 
 	_, err := src.ListRecentPRs(context.Background(), PRFilter{})
@@ -205,10 +209,11 @@ func TestGitHubCodeReviewSource_GetPRReviews(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL,
-		Token:   "test-token",
-		Owner:   "octocat",
-		Repo:    "hello-world",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+		Token:      "test-token",
+		Owner:      "octocat",
+		Repo:       "hello-world",
 	})
 
 	reviews, err := src.GetPRReviews(context.Background(), 42)
@@ -246,10 +251,11 @@ func TestGitHubCodeReviewSource_GetPRReviews_Empty(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL,
-		Token:   "t",
-		Owner:   "o",
-		Repo:    "r",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+		Token:      "t",
+		Owner:      "o",
+		Repo:       "r",
 	})
 
 	reviews, err := src.GetPRReviews(context.Background(), 1)
@@ -267,10 +273,11 @@ func TestGitHubCodeReviewSource_GetPRReviews_APIError(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL,
-		Token:   "t",
-		Owner:   "o",
-		Repo:    "r",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+		Token:      "t",
+		Owner:      "o",
+		Repo:       "r",
 	})
 
 	_, err := src.GetPRReviews(context.Background(), 1)
@@ -372,7 +379,8 @@ func TestGetPRReviews_PaginatesComments(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL, Token: "t", Owner: "o", Repo: "r",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL, Token: "t", Owner: "o", Repo: "r",
 	})
 
 	reviews, err := src.GetPRReviews(context.Background(), 1)
@@ -413,7 +421,8 @@ func TestGetPRReviews_PaginationSafetyCap(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL, Token: "t", Owner: "o", Repo: "r",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL, Token: "t", Owner: "o", Repo: "r",
 	})
 
 	_, err := src.GetPRReviews(context.Background(), 1)
@@ -464,7 +473,8 @@ func TestGetPRReviews_PaginationMidPageError(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL, Token: "t", Owner: "o", Repo: "r",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL, Token: "t", Owner: "o", Repo: "r",
 	})
 
 	reviews, err := src.GetPRReviews(context.Background(), 1)
@@ -507,9 +517,10 @@ func TestGitHubCodeReviewSource_TokenFunc_CachedAcrossCalls(t *testing.T) {
 
 	var resolveCount atomic.Int32
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL,
-		Owner:   "o",
-		Repo:    "r",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+		Owner:      "o",
+		Repo:       "r",
 		TokenFunc: func(ctx context.Context) (string, error) {
 			resolveCount.Add(1)
 			return "dynamic-token", nil
@@ -595,10 +606,11 @@ func TestGitHubCodeReviewSource_StaticTokenWinsOverFunc(t *testing.T) {
 	defer server.Close()
 
 	src := NewGitHubCodeReviewSource(GitHubCodeReviewConfig{
-		BaseURL: server.URL,
-		Token:   "static-token",
-		Owner:   "o",
-		Repo:    "r",
+		HTTPClient: server.Client(),
+		BaseURL:    server.URL,
+		Token:      "static-token",
+		Owner:      "o",
+		Repo:       "r",
 		TokenFunc: func(ctx context.Context) (string, error) {
 			t.Fatal("TokenFunc should not be called when static Token is set")
 			return "", nil
