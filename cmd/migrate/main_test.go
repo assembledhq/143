@@ -69,6 +69,21 @@ func TestRepairKnownDirtyMigration(t *testing.T) {
 			expectError: true,
 		},
 		{
+			name:        "refuses dirty concurrent thread reference key migration 329",
+			repairer:    fakeDirtyMigrationRepairer{version: 329, dirty: true},
+			expectError: true,
+		},
+		{
+			name:        "refuses dirty concurrent request reference key migration 330",
+			repairer:    fakeDirtyMigrationRepairer{version: 330, dirty: true},
+			expectError: true,
+		},
+		{
+			name:        "refuses dirty concurrent runtime reference key migration 331",
+			repairer:    fakeDirtyMigrationRepairer{version: 331, dirty: true},
+			expectError: true,
+		},
+		{
 			name:        "returns version read failure",
 			repairer:    fakeDirtyMigrationRepairer{versionErr: errors.New("version unavailable")},
 			expectError: true,
@@ -234,24 +249,30 @@ func TestMigrationsRestrictConcurrentIndexes(t *testing.T) {
 	// PostgreSQL accepts CONCURRENTLY only when the file contains one statement.
 	// Allow only explicitly reviewed single-statement indexes on hot tables.
 	allowedStandalone := map[string]string{
-		"000294_code_review_preparation_job_lookup.up.sql":     "CREATE INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
-		"000294_code_review_preparation_job_lookup.down.sql":   "DROP INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
-		"000301_job_retention_succeeded_index.down.sql":        "DROP INDEX CONCURRENTLY idx_jobs_retention_succeeded",
-		"000301_job_retention_succeeded_index.up.sql":          "CREATE INDEX CONCURRENTLY idx_jobs_retention_succeeded",
-		"000302_session_executor_job_fk_index.down.sql":        "DROP INDEX CONCURRENTLY idx_session_executors_retention_job",
-		"000302_session_executor_job_fk_index.up.sql":          "CREATE INDEX CONCURRENTLY idx_session_executors_retention_job",
-		"000303_slack_webhook_delivery_fk_index.down.sql":      "DROP INDEX CONCURRENTLY idx_slack_inbound_events_retention_delivery",
-		"000303_slack_webhook_delivery_fk_index.up.sql":        "CREATE INDEX CONCURRENTLY idx_slack_inbound_events_retention_delivery",
-		"000304_pagerduty_webhook_delivery_fk_index.down.sql":  "DROP INDEX CONCURRENTLY idx_pagerduty_inbound_events_retention_delivery",
-		"000304_pagerduty_webhook_delivery_fk_index.up.sql":    "CREATE INDEX CONCURRENTLY idx_pagerduty_inbound_events_retention_delivery",
-		"000305_session_preview_prewarm_job_fk_index.down.sql": "DROP INDEX CONCURRENTLY idx_session_preview_prewarm_runs_retention_job",
-		"000305_session_preview_prewarm_job_fk_index.up.sql":   "CREATE INDEX CONCURRENTLY idx_session_preview_prewarm_runs_retention_job",
-		"000306_preview_cache_prewarm_job_fk_index.down.sql":   "DROP INDEX CONCURRENTLY idx_preview_cache_prewarm_runs_retention_job",
-		"000306_preview_cache_prewarm_job_fk_index.up.sql":     "CREATE INDEX CONCURRENTLY idx_preview_cache_prewarm_runs_retention_job",
-		"000307_webhook_retention_ordered_index.down.sql":      "DROP INDEX CONCURRENTLY idx_webhook_deliveries_retention_ordered",
-		"000307_webhook_retention_ordered_index.up.sql":        "CREATE INDEX CONCURRENTLY idx_webhook_deliveries_retention_ordered",
-		"000313_terminal_review_executor_lookup.up.sql":        "CREATE INDEX CONCURRENTLY idx_session_executors_terminal_review_lookup",
-		"000313_terminal_review_executor_lookup.down.sql":      "DROP INDEX CONCURRENTLY idx_session_executors_terminal_review_lookup",
+		"000294_code_review_preparation_job_lookup.up.sql":       "CREATE INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
+		"000294_code_review_preparation_job_lookup.down.sql":     "DROP INDEX CONCURRENTLY idx_jobs_org_queue_dedupe_created",
+		"000301_job_retention_succeeded_index.down.sql":          "DROP INDEX CONCURRENTLY idx_jobs_retention_succeeded",
+		"000301_job_retention_succeeded_index.up.sql":            "CREATE INDEX CONCURRENTLY idx_jobs_retention_succeeded",
+		"000302_session_executor_job_fk_index.down.sql":          "DROP INDEX CONCURRENTLY idx_session_executors_retention_job",
+		"000302_session_executor_job_fk_index.up.sql":            "CREATE INDEX CONCURRENTLY idx_session_executors_retention_job",
+		"000303_slack_webhook_delivery_fk_index.down.sql":        "DROP INDEX CONCURRENTLY idx_slack_inbound_events_retention_delivery",
+		"000303_slack_webhook_delivery_fk_index.up.sql":          "CREATE INDEX CONCURRENTLY idx_slack_inbound_events_retention_delivery",
+		"000304_pagerduty_webhook_delivery_fk_index.down.sql":    "DROP INDEX CONCURRENTLY idx_pagerduty_inbound_events_retention_delivery",
+		"000304_pagerduty_webhook_delivery_fk_index.up.sql":      "CREATE INDEX CONCURRENTLY idx_pagerduty_inbound_events_retention_delivery",
+		"000305_session_preview_prewarm_job_fk_index.down.sql":   "DROP INDEX CONCURRENTLY idx_session_preview_prewarm_runs_retention_job",
+		"000305_session_preview_prewarm_job_fk_index.up.sql":     "CREATE INDEX CONCURRENTLY idx_session_preview_prewarm_runs_retention_job",
+		"000306_preview_cache_prewarm_job_fk_index.down.sql":     "DROP INDEX CONCURRENTLY idx_preview_cache_prewarm_runs_retention_job",
+		"000306_preview_cache_prewarm_job_fk_index.up.sql":       "CREATE INDEX CONCURRENTLY idx_preview_cache_prewarm_runs_retention_job",
+		"000307_webhook_retention_ordered_index.down.sql":        "DROP INDEX CONCURRENTLY idx_webhook_deliveries_retention_ordered",
+		"000307_webhook_retention_ordered_index.up.sql":          "CREATE INDEX CONCURRENTLY idx_webhook_deliveries_retention_ordered",
+		"000313_terminal_review_executor_lookup.up.sql":          "CREATE INDEX CONCURRENTLY idx_session_executors_terminal_review_lookup",
+		"000313_terminal_review_executor_lookup.down.sql":        "DROP INDEX CONCURRENTLY idx_session_executors_terminal_review_lookup",
+		"000329_session_thread_lifecycle_reference_key.up.sql":   "CREATE UNIQUE INDEX CONCURRENTLY idx_session_threads_org_session_id",
+		"000329_session_thread_lifecycle_reference_key.down.sql": "DROP INDEX CONCURRENTLY idx_session_threads_org_session_id",
+		"000330_human_input_lifecycle_reference_key.up.sql":      "CREATE UNIQUE INDEX CONCURRENTLY idx_session_human_input_requests_org_session_id",
+		"000330_human_input_lifecycle_reference_key.down.sql":    "DROP INDEX CONCURRENTLY idx_session_human_input_requests_org_session_id",
+		"000331_thread_runtime_lifecycle_reference_key.up.sql":   "CREATE UNIQUE INDEX CONCURRENTLY idx_thread_runtimes_org_session_thread_id",
+		"000331_thread_runtime_lifecycle_reference_key.down.sql": "DROP INDEX CONCURRENTLY idx_thread_runtimes_org_session_thread_id",
 	}
 
 	for _, path := range files {
@@ -270,18 +291,49 @@ func TestMigrationsRestrictConcurrentIndexes(t *testing.T) {
 				require.NotContains(t, upperSQL, "IF NOT EXISTS", "concurrent index migration should fail on a leftover invalid index")
 				return
 			}
-			require.NotContains(
-				t,
-				upperSQL,
-				"CREATE INDEX CONCURRENTLY",
-				"new concurrent index migrations require an explicit single-statement exception",
-			)
-			require.NotContains(
-				t,
-				upperSQL,
-				"DROP INDEX CONCURRENTLY",
-				"new concurrent index migrations require an explicit single-statement exception",
-			)
+			require.False(t, migrationHasConcurrentIndexStatement(sql), "new plain or unique concurrent index migrations require an explicit single-statement exception")
+		})
+	}
+}
+
+func migrationHasConcurrentIndexStatement(sql string) bool {
+	pattern := regexp.MustCompile(`(?i)\b(?:CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX)\s+CONCURRENTLY\b`)
+	return pattern.MatchString(stripSQLLineComments(sql))
+}
+
+func TestMigrationHasConcurrentIndexStatement(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{name: "plain create", sql: "CREATE INDEX CONCURRENTLY idx ON items(id);", want: true},
+		{name: "unique create", sql: "CREATE UNIQUE INDEX CONCURRENTLY idx ON items(id);", want: true},
+		{name: "concurrent drop", sql: "DROP INDEX CONCURRENTLY idx;", want: true},
+		{name: "plain create across whitespace", sql: "CREATE\n\tINDEX \nCONCURRENTLY idx ON items(id);", want: true},
+		{name: "unique create across whitespace and case", sql: "cReAtE\nUnIqUe\tInDeX\nCoNcUrReNtLy idx ON items(id);", want: true},
+		{name: "drop across whitespace and case", sql: "dRoP\n\tInDeX\nconcurrently idx;", want: true},
+		{name: "comments between keywords", sql: "CREATE -- reviewed index\nUNIQUE INDEX CONCURRENTLY idx ON items(id);", want: true},
+		{name: "concurrent create after another statement", sql: "SET lock_timeout='5s'; CREATE UNIQUE INDEX CONCURRENTLY idx ON items(id);", want: true},
+		{name: "concurrent drop inside explicit transaction", sql: "BEGIN; DROP INDEX CONCURRENTLY idx; COMMIT;", want: true},
+		{name: "concurrent create after ordinary index", sql: "CREATE INDEX first ON items(id);\nCREATE INDEX CONCURRENTLY second ON items(name);", want: true},
+		{name: "line comment only", sql: "-- CREATE UNIQUE INDEX CONCURRENTLY idx ON items(id);"},
+		{name: "trailing comment only", sql: "CREATE INDEX idx ON items(id); -- DROP INDEX CONCURRENTLY old_idx;"},
+		{name: "ordinary create", sql: "CREATE INDEX idx ON items(id);"},
+		{name: "ordinary unique create", sql: "CREATE UNIQUE INDEX idx ON items(id);"},
+		{name: "ordinary drop", sql: "DROP INDEX idx;"},
+		{name: "other concurrent operation", sql: "REFRESH MATERIALIZED VIEW CONCURRENTLY items;"},
+		{name: "index name is not keyword", sql: "CREATE INDEX concurrently_named ON items(id);"},
+		{name: "keyword prefix is not keyword", sql: "CREATE INDEX CONCURRENTLY_named ON items(id);"},
+		{name: "empty migration"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.want, migrationHasConcurrentIndexStatement(tt.sql), "policy must recognize complete concurrent index keywords independently of case whitespace or other statements")
 		})
 	}
 }

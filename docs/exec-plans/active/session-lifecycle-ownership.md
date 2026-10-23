@@ -1794,7 +1794,11 @@ revision; it must not reinterpret new durable records or trigger replay.
 - [x] Add passive runtime/executor/inbox-batch admission epochs and raw runtime
   drain metadata in separate single-table migrations. Prove exact nullable-lane
   reads and unchanged legacy allocation, heartbeat, terminal, reclaim and batch
-  behavior; lease expiry never supplies physical drain proof.
+  behavior; the existing lease reclaimer leaves drain proof absent.
+- [x] Establish exact tenant/session/lane referenced-key prerequisites with three
+  standalone concurrent unique indexes. Prove index shape, row preservation,
+  synthetic composite-FK scope and visible dirty-state refusal without installing
+  production foreign keys, changing retention or creating lifecycle authority.
 - [ ] Add remaining passive versioned schema and composable persistence with
   their concrete consumers, then wire canonical mutations by inventoried family.
 - [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
@@ -2582,6 +2586,52 @@ These are representation and compatibility proofs, not immutable allocation,
 dispatch binding, physical process drain, launch permission, historical settlement,
 writer-floor or activation proof. No metadata author, runtime consumer, public
 model field or lifecycle authority is added.
+
+### 0a scoped referenced-key prerequisite validation
+
+`go test ./cmd/migrate -run 'TestSessionLifecycleReference' -count=1` with a
+disposable PostgreSQL 15+ `TEST_DATABASE_URL` exercises the real migration driver.
+PostgreSQL 17.10 fixtures cover fresh schema, populated 328 → 329 → 330 → 331,
+reverse rollback and reapply. Each migration contains one standalone
+`CREATE UNIQUE INDEX CONCURRENTLY`; each rollback contains one standalone
+`DROP INDEX CONCURRENTLY`. No transaction wrapper, conditional name masking or
+cascading drop is added. The keys are `(org_id, session_id, id)` for threads and
+human-input requests, and `(org_id, session_id, thread_id, id)` for runtimes.
+
+Catalog checks verify exact ordered columns, uniqueness, validity, readiness,
+access method and the absence of predicates, expressions or included columns.
+Every preexisting parent index, complete legacy row graph, previously installed
+passive metadata field and existing API projection survives. Exact JSON bytes
+preserve adjacent large bigint values without floating-point normalization.
+Real unchanged thread, request and runtime creation remains accepted, with new
+passive metadata still unknown.
+
+Twenty-four synthetic PostgreSQL cases cover valid and rejected tenant, session,
+lane and resource references, explicit optional-runtime null handling, and the
+limits of these indexes. A request's tenant/session/id FK does not enforce its
+nullable lane or validate a job's JSON session route. Canonical writers must
+still check both under their eventual lock/fence contract. A runtime reference
+using `MATCH SIMPLE` needs an explicit nonnull lane when the runtime is present;
+otherwise a NULL lane skips its composite FK. No implicit primary lane is proved.
+These child tables exist only in owned disposable test databases, not migrations.
+
+For each new index name, a failed concurrent unique build on a separate synthetic
+duplicate table leaves a real invalid conflicting index. The actual migration
+then fails visibly, retains its dirty marker and invalid index, and is refused
+by the existing automatic-repair allowlist. This proves name-conflict handling,
+not interruption during a build on the intended parent. Separate direct drop
+probes preserve valid indexes and dependent FKs when ordinary or cascading
+concurrent drops are refused; they do not claim a clean migration-ledger outcome
+after a failed down migration. Policy tests recognize both ordinary and unique
+concurrent-index syntax, enforce the six explicit single-statement exceptions,
+and reject automatic repair of versions 329–331.
+
+These index-only prerequisites add no production FK, consumer, metadata author,
+retention change, writer guard or activation. Concurrent builds can still wait on
+older transactions; local small-fixture timings do not prove production timing.
+Dependent FKs must be removed before these indexes can be rolled back. Future
+children also need lookup indexes and evidence-retention protection before their
+first active writer; no cascading evidence deletion is authorized here.
 
 ## Surprises & Discoveries
 
