@@ -280,6 +280,8 @@ func TestMigrationsRestrictConcurrentIndexes(t *testing.T) {
 		"000331_thread_runtime_lifecycle_reference_key.down.sql": "DROP INDEX CONCURRENTLY idx_thread_runtimes_org_session_thread_id",
 		"000342_dispatch_lane_claim_reference_key.up.sql":        "CREATE UNIQUE INDEX CONCURRENTLY idx_session_input_dispatches_lane_claim",
 		"000342_dispatch_lane_claim_reference_key.down.sql":      "DROP INDEX CONCURRENTLY idx_session_input_dispatches_lane_claim",
+		"000345_automation_runs_legacy_reaper_lookup.up.sql":     "CREATE INDEX CONCURRENTLY idx_automation_runs_legacy_reaper_lookup",
+		"000345_automation_runs_legacy_reaper_lookup.down.sql":   "DROP INDEX CONCURRENTLY idx_automation_runs_legacy_reaper_lookup",
 	}
 
 	for _, path := range files {

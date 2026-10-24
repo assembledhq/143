@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_automation_runs_legacy_reaper_lookup;
