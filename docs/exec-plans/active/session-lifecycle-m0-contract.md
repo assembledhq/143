@@ -6,7 +6,11 @@ implements the design-output portion of Milestone 0 in
 [the ownership plan](session-lifecycle-ownership.md). Proposed tables, methods,
 API outcomes, bounds, and deployment gates below do not exist merely because
 they are specified here. No production inspection or operational evidence is
-included. Milestone 0 changes no runtime behavior or schema.
+included. The original M0 characterization changed no runtime behavior or schema;
+subsequent passive 0a schema and persistence foundations are now implemented.
+[The 0a delivery plan](session-lifecycle-0a.md) records their current source baseline
+and remaining packages. Proposed authority and activation below remain unimplemented;
+this contract does not establish a compatible release.
 
 The executable writer inventory is produced by `cmd/lint-lifecycle`; its
 function-level manifest records reviewed syntax candidates, not a whole-program
@@ -1900,17 +1904,18 @@ An empty scan or green unit tests alone do not establish a deployed floor.
 
 ## 10. Evidence ledger and remaining proof
 
-This companion originated in source inspection; the parent plan records the
-M0 validation commands and results. No runtime/schema change, production query
-or migration is included. Keep source facts, isolated query probes and proposed
-implementation gates distinct:
+This companion originated in source inspection; the parent plan records historical
+M0 and passive-foundation validation. The 0a delivery plan distinguishes implemented
+schema/persistence from missing canonical behavior. No new runtime/schema change,
+production query or migration accompanies this planning re-baseline. Keep source
+facts, historical validation, isolated query probes and implementation gates distinct:
 
 | Evidence | State here | Required next proof |
 | --- | --- | --- |
 | Function/writer/producer inventory | Executable manifest owned by M0 inventory change; references above are source-derived | Run inventory/tests and review every expanded caller before its migration slice. |
 | Existing-entry behavior tests | Existing test names in parent plan; M0 adds characterization only | Record exact focused commands, exits, revisions and skips in parent. |
 | F1/F2 contract | Selected above, no unresolved lane-local reset or blanket rejection rule | 0a typed outcome/wholeworkspace acknowledgement tests, plus all terminal caller call-throughs. |
-| SQL/schema and readiness/discovery | Proposed schema; canonical minimal-schema readiness/workspace-state/start-control examples in test source (case counts/results in the parent validation section) | Disposable migrated PG: production indexes/explain, atomic dispositions, cutoff/normalization, uniqueness, nonterminal parked exclusion versus runnable sets, exact consumer exclusion and set-based all-request metadata updates. |
+| SQL/schema and readiness/discovery | Partial passive representation exists as itemized in the 0a baseline; behavioral fields and canonical consumers remain proposed. Minimal-schema readiness/workspace-state/start-control examples are synthetic (historical counts/results in the parent validation section) | Disposable migrated PG: production indexes/explain, atomic dispositions, cutoff/normalization, uniqueness, nonterminal parked exclusion versus runnable sets, exact consumer exclusion and set-based all-request metadata updates. |
 | Lock progress/activation/rollback | Minimal-schema lock-pattern probes (counts/results in the parent validation section); actual rolling callers not tested | Independent connection barriers for all baseline pairs, pre-floor/floor and floor/new; no effects on abort; unknown commit no automatic replay. |
 | Native resume / cleanup | Source confirms ID-based resume, reconstruction fallbacks, mutable ordinary key and delete-before-metadata cleanup; proposed trusted same-session checks/handshake and unique-publication-key discipline only | Tested exact provider/build/ResumeIdentity activation tuples; actual target/preparation/final authorization and sealed outcomes, bound-answer no-fallback; durable park/control beyond execution TTL, all-source FIRST/invocation fences and post-permit running effects; all named PR-upload/cleanup call-throughs, fresh-key receipt/GC and tombstone-before-delete proof. |
 | Recovery user journey | Proposed request/control/API/tool contract | Paused notice -> action -> blocked/safe restore -> fresh request -> new consent; checkpoint re-ask unsupported until proved, not a private-context program requirement. |
