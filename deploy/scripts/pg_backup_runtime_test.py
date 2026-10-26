@@ -151,6 +151,80 @@ class KernelParsingTests(unittest.TestCase):
                     with self.assertRaises(Refused): runtime.cgroup_path(42)
 
 
+class DumpOutputTests(unittest.TestCase):
+    def test_writeback_is_bounded_page_aligned_and_revisits_previous_range(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'owned.partial'
+            path.touch(mode=0o600)
+            output = runtime.DumpOutput()
+            expected = identity(path)
+            chunk = runtime.DUMP_WRITEBACK_BYTES
+            cases = [(0, [], 0, 0), (4095, [], 0, 0),
+                     (chunk * 3 + 123, [(0, chunk)], chunk, chunk),
+                     (chunk * 3 + 123, [(0, chunk), (chunk, chunk)], chunk * 2, chunk),
+                     (chunk * 3 + 123, [(chunk, chunk), (chunk * 2, chunk)], chunk * 3, chunk),
+                     (chunk * 3 + 123, [(chunk * 2, chunk)], chunk * 3, 0),
+                     (chunk * 3 + 123, [], chunk * 3, 0)]
+            with (mock.patch.object(runtime.os, 'posix_fadvise', create=True) as advise,
+                  mock.patch.object(runtime.os, 'POSIX_FADV_DONTNEED', 4, create=True),
+                  mock.patch.object(runtime.os, 'sysconf', return_value=4096)):
+                for size, ranges, through, requested in cases:
+                    with self.subTest(size=size, through=through):
+                        with path.open('r+b') as stream:
+                            stream.truncate(size)
+                        advise.reset_mock()
+                        result = output.tick(path, expected)
+                        self.assertEqual([(c.args[1], c.args[2]) for c in advise.call_args_list], ranges,
+                                         'only new completed pages and the preceding bounded range receive hints')
+                        self.assertTrue(all(c.args[3] == 4 for c in advise.call_args_list))
+                        self.assertEqual(result, dict(observed_bytes=size, advised_through_bytes=through,
+                                         requested_bytes=requested,
+                                         max_range_bytes=chunk))
+                        self.assertEqual(path.stat().st_size, size, 'hints must never truncate the dump')
+
+    def test_rejects_unowned_unsafe_and_shrinking_output_before_advice(self):
+        for case in ('replaced', 'symlink', 'public', 'hardlink', 'shrunk', 'fifo'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'owned.partial'
+                path.touch(mode=0o600)
+                expected = identity(path)
+                output = runtime.DumpOutput()
+                if case == 'replaced':
+                    path.rename(path.with_suffix('.old'))
+                    path.touch(mode=0o600)
+                elif case == 'symlink':
+                    path.rename(path.with_suffix('.old'))
+                    path.symlink_to(path.with_suffix('.old'))
+                elif case == 'public':
+                    path.chmod(0o644)
+                elif case == 'hardlink':
+                    os.link(path, path.with_suffix('.link'))
+                elif case == 'shrunk':
+                    output.size = 4096
+                elif case == 'fifo':
+                    path.unlink()
+                    os.mkfifo(path, 0o600)
+                with mock.patch.object(runtime.os, 'posix_fadvise', create=True) as advise:
+                    with self.assertRaises((Refused, OSError)):
+                        output.tick(path, expected)
+                    advise.assert_not_called()
+
+    def test_advice_error_closes_descriptor_and_does_not_advance_cursor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'owned.partial'
+            path.write_bytes(b'x' * 8192)
+            path.chmod(0o600)
+            output = runtime.DumpOutput()
+            with (mock.patch.object(runtime.os, 'posix_fadvise', side_effect=OSError('writeback failed'), create=True),
+                  mock.patch.object(runtime.os, 'POSIX_FADV_DONTNEED', 4, create=True),
+                  mock.patch.object(runtime.os, 'sysconf', return_value=4096),
+                  mock.patch.object(runtime.os, 'close', wraps=os.close) as close):
+                with self.assertRaisesRegex(OSError, 'writeback failed'):
+                    output.tick(path, identity(path))
+                close.assert_called_once()
+                self.assertEqual((output.offset, output.previous, output.size), (0, None, 0))
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -171,6 +245,11 @@ class RuntimeTests(unittest.TestCase):
         patch = mock.patch.object(runtime, 'proc_identity', return_value=['boot', 'start'])
         patch.start()
         self.addCleanup(patch.stop)
+        # Production is Linux; unit fixtures on other hosts never issue advice.
+        for name, value in (('posix_fadvise', mock.Mock()), ('POSIX_FADV_DONTNEED', 4)):
+            patch = mock.patch.object(runtime.os, name, value, create=True)
+            patch.start()
+            self.addCleanup(patch.stop)
         self.guard = runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)
         self.guard.run.mkdir(mode=0o700)
         self.db = dict(id='d' * 64, pid=123, started_at='start', restarts=0)
@@ -459,12 +538,88 @@ class RuntimeTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(self.guard, 'database'))
             stack.enter_context(mock.patch.object(self.guard, 'backends'))
             stack.enter_context(mock.patch.object(self.guard, 'observe_client_memory'))
+            maintain = stack.enter_context(mock.patch.object(self.guard, 'maintain_dump_output'))
             stack.enter_context(mock.patch.object(runtime, 'resources', side_effect=samples))
             stack.enter_context(mock.patch.object(runtime.time, 'sleep'))
             stop = stack.enter_context(mock.patch.object(self.guard, 'stop',
                 side_effect=lambda owned: self.guard.cleanup_beat('confirm_owned_stop')))
             self.guard.supervise()
         stop.assert_called_once_with(self.owned)
+        return maintain
+
+    def test_pressure_refusal_precedes_output_writeback(self):
+        sample = dict(safe_resources(), db_io={'some': 20.01, 'full': 0})
+        maintain = self.supervise_samples([sample])
+        maintain.assert_not_called()
+        self.assertFalse(self.partial.exists(), 'existing owned cleanup must finish after pressure refusal')
+        self.assertEqual(self.completed.read_bytes(), b'previous verified backup')
+
+    def test_healthy_ticks_maintain_owned_output_once_per_sample(self):
+        samples = [dict(safe_resources(), monotonic=10 + 5 * i) for i in range(3)]
+        maintain = self.supervise_samples(samples)
+        self.assertEqual(maintain.call_count, 3, 'each healthy guarded tick must maintain output')
+        self.assertEqual([call.args[0] for call in maintain.call_args_list], [self.owned] * 3,
+                         'all hints must remain bound to the captured dump ownership')
+        self.assertEqual(read_json(self.guard.result)['status'], 'completed')
+
+    def test_client_exit_during_writeback_uses_fresh_terminal_state(self):
+        running = {'State': {'Status': 'running', 'Running': True}}
+        exited = {'State': {'Status': 'exited', 'ExitCode': 0, 'OOMKilled': False}}
+        with (mock.patch.object(self.guard, 'prepare', return_value=self.owned),
+              mock.patch.object(runtime, 'invoke', return_value=''),
+              mock.patch.object(self.guard, 'inspect', side_effect=[running, exited, exited]),
+              mock.patch.object(self.guard, 'database'),
+              mock.patch.object(self.guard, 'observe_client_memory'),
+              mock.patch.object(runtime, 'resources', return_value=safe_resources()),
+              mock.patch.object(self.guard, 'maintain_dump_output', side_effect=FileNotFoundError('exited')),
+              mock.patch.object(self.guard, 'stop') as stop):
+            self.guard.supervise()
+        stop.assert_called_once_with(self.owned)
+        self.assertEqual(read_json(self.guard.result)['status'], 'completed',
+                         'a proven normal exit must not become a writeback telemetry failure')
+        self.assertTrue(self.partial.exists(), 'normal exit must preserve the archive for verification')
+
+    def test_writeback_error_uses_existing_owned_stop_and_cleanup(self):
+        running = {'State': {'Status': 'running', 'Running': True}}
+        with (mock.patch.object(self.guard, 'prepare', return_value=self.owned),
+              mock.patch.object(runtime, 'invoke', return_value=''),
+              mock.patch.object(self.guard, 'inspect', return_value=running),
+              mock.patch.object(self.guard, 'database'),
+              mock.patch.object(self.guard, 'observe_client_memory'),
+              mock.patch.object(runtime, 'resources', return_value=safe_resources()),
+              mock.patch.object(self.guard, 'maintain_dump_output', side_effect=OSError('writeback unavailable')),
+              mock.patch.object(self.guard, 'stop') as stop):
+            self.guard.supervise()
+        stop.assert_called_once_with(self.owned)
+        result = read_json(self.guard.result)
+        self.assertEqual((result['status'], result['error'], result['cleanup_verified']),
+                         ('failed', 'writeback unavailable', True))
+        self.assertFalse(self.partial.exists())
+        self.assertEqual(self.completed.read_bytes(), b'previous verified backup')
+
+    def test_dump_writeback_telemetry_survives_terminal_result(self):
+        cg = self.root / ('cgroup-' + 'c' * 64)
+        cg.mkdir()
+        files = {'memory.stat': 'file_dirty 8192\nfile_writeback 4096\n',
+                 'memory.events': 'high 0\nmax 3\noom 0\noom_kill 0\n',
+                 'io.stat': '8:0 rbytes=0 wbytes=4096 rios=0 wios=1\n'}
+        for name, value in files.items():
+            (cg / name).write_text(value)
+        original = Path.read_text
+        def read(path, *args, **kwargs):
+            if str(path) == '/proc/vmstat':
+                return 'nr_dirty 2\nnr_writeback 1\n'
+            return original(path, *args, **kwargs)
+        with (mock.patch.object(runtime, 'cgroup_path', return_value=cg),
+              mock.patch.object(Path, 'read_text', read), mock.patch.object(runtime, 'now', return_value='observed')):
+            self.guard.maintain_dump_output(self.owned, {'Id': 'c' * 64, 'State': {'Pid': 123}})
+        expected = dict(at='observed', counters=dict(file_dirty=8192, file_writeback=4096,
+                        high=0, max=3, oom=0, oom_kill=0, nr_dirty=2, nr_writeback=1),
+                        client_io_stat=files['io.stat'], observed_bytes=7, advised_through_bytes=0,
+                        requested_bytes=0, max_range_bytes=64 * 1024 ** 2)
+        self.guard.terminal(dict(status='completed'))
+        self.assertEqual(read_json(self.guard.result)['dump_output'], expected,
+                         'bounded terminal evidence must retain writeback and reclaim counters')
 
     def test_dump_violation_survives_bounded_history_cleanup_and_terminal(self):
         samples = [dict(safe_resources(), monotonic=10 + 5 * i,
@@ -732,6 +887,7 @@ class RuntimeTests(unittest.TestCase):
                         mock.patch.object(self.guard, 'inspect', return_value=running), \
                         mock.patch.object(self.guard, 'database'), \
                         mock.patch.object(self.guard, 'observe_client_memory'), \
+                        mock.patch.object(self.guard, 'maintain_dump_output'), \
                         mock.patch.object(runtime, 'resources', side_effect=problem, return_value=safe_resources()), \
                         mock.patch.object(self.guard, 'fail') as fail:
                     self.guard.supervise()
@@ -766,6 +922,20 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn('172.18.0.2', command)
         self.assertNotIn('127.0.0.1', command)
         self.assertTrue(result['creation_complete'])
+
+    def test_dump_writeback_intent_survives_ambiguous_container_creation(self):
+        db = dict(Image='sha256:immutable', Config={'Volumes': {}},
+                  NetworkSettings={'Networks': {'db': {'IPAddress': '172.18.0.2'}}})
+        with mock.patch.object(self.guard, 'database', return_value=(db, self.db)), \
+                mock.patch.object(runtime, 'resources', return_value=safe_resources()), \
+                mock.patch.dict(os.environ, {'DOCKER_HOST': '', 'DOCKER_CONTEXT': ''}), \
+                mock.patch.object(runtime, 'invoke', side_effect=['unix:///var/run/docker.sock', Refused('create timeout')]):
+            with self.assertRaisesRegex(Refused, 'create timeout'):
+                self.guard.prepare()
+        owned = read_json(self.guard.record)
+        self.assertEqual(owned['dump_writeback_max_range_bytes'], 64 * 1024 ** 2)
+        self.assertTrue(owned['creation_started'])
+        self.assertFalse(owned['creation_complete'])
 
     def test_lower_cpu_changes_only_dump_quota(self):
         self.p.dump_cpus = 0.75
@@ -879,7 +1049,7 @@ with mock.patch.object(r,'proc_identity',side_effect=process), mock.patch.object
  mock.patch.object(r.Guard,'stop',stop), mock.patch.object(r,'invoke',return_value=''), \
  mock.patch.object(r.Guard,'inspect',return_value={'State':{'Running':True,'Status':'running'}}), \
  mock.patch.object(r.Guard,'database'), mock.patch.object(r.Guard,'backends'), \
- mock.patch.object(r.Guard,'observe_client_memory'), mock.patch.object(r.Guard,'terminal',terminal), \
+ mock.patch.object(r.Guard,'observe_client_memory'), mock.patch.object(r.Guard,'maintain_dump_output'), mock.patch.object(r.Guard,'terminal',terminal), \
  mock.patch.object(r,'resources',side_effect=sample), mock.patch.object(r,'INTERVAL',.05):
  r.protect_dump(p,partial,app,18*r.GIB)
 '''
