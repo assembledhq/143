@@ -87,7 +87,7 @@ BEGIN
            OR (OLD.activated_at IS NOT NULL AND NEW.activated_at IS DISTINCT FROM OLD.activated_at)
            OR (OLD.legacy_input_cutoff_id IS NOT NULL AND NEW.legacy_input_cutoff_id IS DISTINCT FROM OLD.legacy_input_cutoff_id)
            OR (OLD.normalization IS NOT NULL AND NEW.normalization IS NULL)
-           OR (OLD.state = 'active' AND NEW.normalization IS DISTINCT FROM OLD.normalization)
+           OR (OLD.state = 'active' AND NEW.normalization::text IS DISTINCT FROM OLD.normalization::text)
            OR (OLD.resumability_capability IS NOT NULL AND NEW.resumability_capability IS NULL)
            OR (OLD.minimum_writer_version IS NOT NULL AND
                (NEW.minimum_writer_version IS NULL OR NEW.minimum_writer_version < OLD.minimum_writer_version)) THEN
