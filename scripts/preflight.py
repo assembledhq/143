@@ -1,10 +1,24 @@
 #!/usr/bin/env python3
 """Select local checks from an explicit diff or Git's pre-push ref updates."""
 import argparse
+import importlib.util
+from pathlib import Path
 import os
 import shlex
 import subprocess
 import sys
+
+
+_SPEC = importlib.util.spec_from_file_location(
+    'select_frontend_tests', Path(__file__).resolve().parents[1] / '.github/scripts/select_frontend_tests.py')
+_FRONTEND_SELECTOR = importlib.util.module_from_spec(_SPEC)
+# Keep normal CLI/hook invocations from creating untracked bytecode files.
+_previous_bytecode = sys.dont_write_bytecode
+try:
+    sys.dont_write_bytecode = True
+    _SPEC.loader.exec_module(_FRONTEND_SELECTOR)
+finally:
+    sys.dont_write_bytecode = _previous_bytecode
 
 
 def git(*args):
@@ -47,7 +61,13 @@ def push_ranges(lines):
     return ranges
 
 
-def plan(files, bases, extended=False):
+def requires_full_frontend(bases):
+    # Vitest uses a merge-base diff; rewinds and rewrites need a full run to
+    # cover changes present only in the old destination tree.
+    return any(git('merge-base', base, 'HEAD') != base for base in bases)
+
+
+def plan(files, bases, extended=False, full_frontend=False):
     shared_inputs = {
         'Makefile', 'go.mod', 'go.sum', '.golangci.yml',
         'scripts/preflight.py', 'scripts/test_preflight.py', 'setup.sh',
@@ -64,7 +84,7 @@ def plan(files, bases, extended=False):
         commands.append((['make', 'lint'], '.'))
     if frontend:
         commands += [(['npm', 'run', 'typecheck'], 'frontend'), (['npm', 'run', 'lint'], 'frontend')]
-        full = broad or any(
+        full = broad or full_frontend or _FRONTEND_SELECTOR.needs_full_suite(files) or any(
             f.startswith(('frontend/package', 'frontend/src/test/', 'frontend/docs/', 'frontend/src/app/'))
             or 'config.' in f or f.endswith(('.md', '.mdx'))
             for f in files
@@ -115,7 +135,7 @@ def main():
         base = git('rev-parse', '--verify', args.base + '^{commit}')
         files = changed(base) | set(filter(None, git('ls-files', '--others', '--exclude-standard', '-z').split('\0')))
         bases = [base]
-    commands, backend = plan(files, bases, args.extended)
+    commands, backend = plan(files, bases, args.extended, requires_full_frontend(bases))
     environment = check_environment()
     for command, cwd in commands:
         print(f'[preflight] {cwd}: {shlex.join(command)}', flush=True)

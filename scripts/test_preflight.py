@@ -18,12 +18,19 @@ class RoutingTests(unittest.TestCase):
             ({'README.md'}, set()),
             ({'internal/cli/client.go'}, {'make lint'}),
             ({'migrations/000001_example.up.sql'}, {'make lint'}),
-            ({'frontend/src/components/example.tsx'}, {'npm run typecheck', 'npm run lint', 'npx --no-install vitest run --changed=base --passWithNoTests'}),
+            ({'frontend/src/features/example.tsx'}, {'npm run typecheck', 'npm run lint', 'npx --no-install vitest run --changed=base --passWithNoTests'}),
         ]
         for files, expected in cases:
             with self.subTest(files=files):
                 commands, _ = preflight.plan(files, ['base'])
                 self.assertEqual({' '.join(cmd) for cmd, _ in commands}, expected)
+
+    def test_frontend_shared_paths_use_ci_full_suite(self):
+        for path in ['frontend/src/components/example.tsx', 'frontend/src/lib/api.ts', 'frontend/components.json']:
+            with self.subTest(path=path):
+                commands, _ = preflight.plan({path}, ['base'])
+                self.assertIn((['npx', '--no-install', 'vitest', 'run'], 'frontend'), commands)
+                self.assertFalse(any('--changed=' in arg for cmd, _ in commands for arg in cmd))
 
     def test_shared_inputs_expand_checks(self):
         for path in ['Makefile', '.github/workflows/ci.yml', '.githooks/pre-push', 'scripts/preflight.py']:
@@ -66,6 +73,8 @@ class GitTests(unittest.TestCase):
         # must never inherit those and accidentally target the real checkout.
         environment = patch.dict(os.environ, {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}, clear=True)
         environment.start()
+        os.environ['GIT_CONFIG_GLOBAL'] = os.devnull
+        os.environ['GIT_CONFIG_NOSYSTEM'] = '1'
         self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -122,7 +131,11 @@ class GitTests(unittest.TestCase):
             preflight.push_ranges([f'refs/heads/topic {self.head} refs/heads/topic {"0" * 40}'])
 
     def test_force_push_compares_destination_tree(self):
+        self.assertFalse(preflight.requires_full_frontend([self.base]))
         self.run_git('reset', '--hard', self.base)
+        self.assertTrue(preflight.requires_full_frontend([self.head]))
+        commands, _ = preflight.plan({'frontend/src/features/example.tsx'}, [self.head], full_frontend=preflight.requires_full_frontend([self.head]))
+        self.assertIn((['npx', '--no-install', 'vitest', 'run'], 'frontend'), commands)
         self.assertEqual(preflight.push_ranges([f'refs/heads/topic {self.base} refs/heads/topic {self.head}']), [(self.head, self.base)])
 
     def test_hooks_install_and_preserve_custom_configuration(self):
@@ -149,6 +162,8 @@ class GitTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         (self.root / 'scripts').mkdir()
         (self.root / 'scripts/preflight.py').write_text((root / 'scripts/preflight.py').read_text())
+        (self.root / '.github/scripts').mkdir(parents=True)
+        (self.root / '.github/scripts/select_frontend_tests.py').write_text((root / '.github/scripts/select_frontend_tests.py').read_text())
         (self.root / '.githooks').mkdir()
         hook = self.root / '.githooks/pre-push'
         hook.write_text((root / '.githooks/pre-push').read_text())
