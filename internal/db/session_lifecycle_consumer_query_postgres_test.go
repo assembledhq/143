@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	testpostgres "github.com/assembledhq/143/internal/testutil/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -41,19 +43,18 @@ func TestLifecycleConsumerOwnLeaseUsesFreshDatabaseClockPostgres(t *testing.T) {
 			require.NoError(t, owner.QueryRow(ctx, "SELECT id FROM jobs WHERE org_id=$1 AND id=$2 FOR NO KEY UPDATE", f.org, f.own.binding.jobID).Scan(&job), "hold the known job before parent and lane locks")
 			_, err = lockLifecycleScopeInTx(ctx, owner, f.org, lifecycleScope{sessionID: f.session, threadIDs: []uuid.UUID{f.lane}})
 			require.NoError(t, err, "hold the exact parent and lane throughout the database-clock proof")
-			var expiry time.Time
-			require.NoError(t, owner.QueryRow(ctx, "SELECT clock_timestamp()+interval '500 milliseconds'").Scan(&expiry), "derive the precise short lease expiry from the database clock, not an application sleep estimate")
-			if expired == "job" {
-				_, err = owner.Exec(ctx, "UPDATE jobs SET lease_expires_at=$3 WHERE org_id=$1 AND id=$2", f.org, job, expiry)
-			} else {
-				_, err = owner.Exec(ctx, "UPDATE thread_runtimes SET lease_expires_at=$3 WHERE org_id=$1 AND id=$2", f.org, f.own.attempt.runtimeID, expiry)
-			}
-			require.NoError(t, err, "stage exactly one short lease while its counterpart remains long-lived")
 			before, err := proveOwnLifecycleConsumerInTx(ctx, owner, f.org, f.fence, f.own, 512)
-			require.NoError(t, err, "the exact allocation must have positive live-lease proof before the database expiry target")
+			require.NoError(t, err, "prove the exact live allocation before shortening a lease, without requiring its proof queries to fit inside a fixed short expiry window")
 			require.NotNil(t, before.binding, "the pre-expiry observation must be a real successful own-consumer proof")
 			require.Equal(t, f.own.binding, *before.binding, "the pre-expiry proof must retain the complete exact input binding")
 			require.Equal(t, f.own.attempt.runtimeID, before.runtimeID, "the pre-expiry proof must establish the exact runtime allocation")
+			var expiry time.Time
+			if expired == "job" {
+				err = owner.QueryRow(ctx, "UPDATE jobs SET lease_expires_at=clock_timestamp()+interval '100 milliseconds' WHERE org_id=$1 AND id=$2 RETURNING lease_expires_at", f.org, job).Scan(&expiry)
+			} else {
+				err = owner.QueryRow(ctx, "UPDATE thread_runtimes SET lease_expires_at=clock_timestamp()+interval '100 milliseconds' WHERE org_id=$1 AND id=$2 RETURNING lease_expires_at", f.org, f.own.attempt.runtimeID).Scan(&expiry)
+			}
+			require.NoError(t, err, "derive and install exactly one shortened lease from the database clock after positive proof, leaving its counterpart long-lived")
 			_, err = owner.Exec(ctx, "SELECT pg_sleep(GREATEST(EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp())),0))", expiry.Add(25*time.Millisecond))
 			require.NoError(t, err, "wait against the exact database-derived expiry within the unchanged statement and transaction budgets")
 			var transactionStillBefore, statementAfter, clockAfter bool
@@ -90,14 +91,25 @@ func TestLifecycleConsumerScopeArmsDoNotDoubleCountPostgres(t *testing.T) {
 }
 
 type lifecycleConsumerQueryPlan struct {
-	NodeType         string                       `json:"Node Type"`
-	RelationName     string                       `json:"Relation Name"`
-	IndexName        string                       `json:"Index Name"`
-	ActualRows       float64                      `json:"Actual Rows"`
-	ActualLoops      float64                      `json:"Actual Loops"`
-	SharedHitBlocks  int                          `json:"Shared Hit Blocks"`
-	SharedReadBlocks int                          `json:"Shared Read Blocks"`
-	Plans            []lifecycleConsumerQueryPlan `json:"Plans"`
+	NodeType                  string                       `json:"Node Type"`
+	RelationName              string                       `json:"Relation Name"`
+	IndexName                 string                       `json:"Index Name"`
+	PlanRows                  float64                      `json:"Plan Rows"`
+	PlanWidth                 int                          `json:"Plan Width"`
+	StartupCost               float64                      `json:"Startup Cost"`
+	TotalCost                 float64                      `json:"Total Cost"`
+	IndexCondition            string                       `json:"Index Cond"`
+	Filter                    string                       `json:"Filter"`
+	HeapFetches               float64                      `json:"Heap Fetches"`
+	TempReadBlocks            int                          `json:"Temp Read Blocks"`
+	TempWrittenBlocks         int                          `json:"Temp Written Blocks"`
+	ActualRows                float64                      `json:"Actual Rows"`
+	ActualLoops               float64                      `json:"Actual Loops"`
+	RowsRemovedByFilter       float64                      `json:"Rows Removed by Filter"`
+	RowsRemovedByIndexRecheck float64                      `json:"Rows Removed by Index Recheck"`
+	SharedHitBlocks           int                          `json:"Shared Hit Blocks"`
+	SharedReadBlocks          int                          `json:"Shared Read Blocks"`
+	Plans                     []lifecycleConsumerQueryPlan `json:"Plans"`
 }
 
 type lifecycleConsumerQueryObservation struct {
@@ -112,7 +124,8 @@ type lifecycleConsumerQueryWork struct {
 }
 
 // The recorder explains each actual production scope/evidence read with its
-// exact arguments before forwarding that same read. Keeping the anchors here
+// exact arguments before forwarding that same read, including legacy jobs.
+// Keeping the anchors here
 // prevents a bounded final query from hiding an unmeasured history scan while
 // the production reader builds its lane, runtime or generation key arrays.
 type lifecycleConsumerExplainTx struct {
@@ -136,10 +149,17 @@ func (tx *lifecycleConsumerExplainTx) Query(ctx context.Context, query string, a
 		name = "evidence"
 	case lifecycleConsumerGenerationEvidenceQuery:
 		name = "generation evidence"
+	case lifecycleConsumerLegacyJobsQuery:
+		name = "legacy jobs"
 	}
 	if name != "" {
-		require.NotEmpty(tx.t, args, "each skew-sensitive production query must select its planning mode explicitly")
-		require.Equal(tx.t, pgx.QueryExecModeExec, args[0], "the EXPLAIN and production reads must both custom-plan the exact scope values")
+		require.NotEmpty(tx.t, args, "each production query must retain its real bound arguments")
+		if query != lifecycleConsumerLegacyJobsQuery {
+			require.Equal(tx.t, pgx.QueryExecModeExec, args[0], "the EXPLAIN and skew-sensitive production reads must both custom-plan the exact scope values")
+		} else {
+			_, isOrg := args[0].(uuid.UUID)
+			require.True(tx.t, isOrg, "the legacy reader's real first argument remains its tenant UUID, without silently changing production execution mode")
+		}
 		var raw json.RawMessage
 		err := tx.Tx.QueryRow(ctx, "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON,TIMING OFF) "+query, args...).Scan(&raw)
 		require.NoError(tx.t, err, "explain every production scope/evidence query without changing planner settings")
@@ -179,10 +199,19 @@ func explainLifecycleConsumerEvidence(t *testing.T, conn *pgxpool.Conn, f lifecy
 	recorder := &lifecycleConsumerExplainTx{Tx: tx, t: t}
 	blocked, readErr := HasCompetingInputConsumerInTx(ctx, recorder, f.org, f.fence, nil)
 	var stillOpen int
-	require.NoError(t, tx.QueryRow(ctx, "SELECT 1").Scan(&stillOpen), "scope overflow and negative results must both preserve the caller's transaction")
+	probeErr := tx.QueryRow(ctx, "SELECT 1").Scan(&stillOpen)
+	if probeErr != nil {
+		var serverErr *pgconn.PgError
+		code := ""
+		if errors.As(readErr, &serverErr) {
+			code = serverErr.Code
+		}
+		t.Logf("consumer transaction probe failed: reader_error=%v reader_sqlstate=%q probe_error=%v", readErr, code, probeErr)
+	}
+	require.NoError(t, probeErr, "scope overflow and negative results must both preserve the caller's transaction")
 	require.Equal(t, 1, stillOpen, "the reader must not settle the caller's transaction while gathering query evidence")
 	require.NoError(t, tx.Rollback(ctx), "only the caller may settle the explained consumer observation")
-	t.Logf("consumer reader work: total_statements=%d explained_scope_evidence_statements=%d scope_evidence_shared_buffers=%d", recorder.work.statements, len(recorder.work.observations), recorder.work.sharedBuffers)
+	t.Logf("consumer reader work: total_statements=%d explained_scope_evidence_legacy_statements=%d explained_shared_buffers=%d", recorder.work.statements, len(recorder.work.observations), recorder.work.sharedBuffers)
 	return recorder.work, lifecycleConsumerResult(blocked, readErr)
 }
 
@@ -233,8 +262,8 @@ func TestLifecycleConsumerEmptyScopeHistoryWorkPostgres(t *testing.T) {
 	other := seedLifecycleConsumerSession(t, pool, f.org)
 	heavyFixture := lifecyclePredicateFixture{org: f.org, session: other.ID, lane: *other.PrimaryThreadID, fence: AdmissionFence{sessionID: other.ID, threadID: *other.PrimaryThreadID, threaded: true}}
 	// One target has no generation keys; the other retains an exact generation
-	// with no runs. This makes the resource proof measure both the four-query
-	// base path and a real scalar generation probe.
+	// with no runs. This makes the resource proof measure both the five-query
+	// scope/structured/legacy base path and a real scalar generation probe.
 	automation, target := seedLifecycleConsumerQueryTarget(t, pool, f.org)
 	predicateExec(t, pool, "INSERT INTO automation_target_sessions(org_id,target_id,generation,session_id) VALUES($1,$2,1,$3)", f.org, target, second.ID)
 	conn, err := pool.Acquire(context.Background())
@@ -242,11 +271,11 @@ func TestLifecycleConsumerEmptyScopeHistoryWorkPostgres(t *testing.T) {
 	defer conn.Release()
 	beforeFirst, result := explainLifecycleConsumerEvidence(t, conn, f)
 	require.Equal(t, lifecycleConsumerTestResult{}, result, "the first target must start with no consumer evidence")
-	require.Len(t, beforeFirst.observations, 4, "the base path must measure all three key reads and the final evidence query")
+	require.Len(t, beforeFirst.observations, 5, "the base path must measure all three key reads, structured evidence and legacy jobs")
 	require.Equal(t, 7, beforeFirst.statements, "the empty base path must also count policy, parent and legacy-job reads rather than advertise only explained statements")
 	beforeSecond, result := explainLifecycleConsumerEvidence(t, conn, secondFixture)
 	require.Equal(t, lifecycleConsumerTestResult{}, result, "a retained generation with no runs must not create consumer evidence")
-	require.Len(t, beforeSecond.observations, 5, "the generation path must also measure its exact scalar evidence probe")
+	require.Len(t, beforeSecond.observations, 6, "the generation path must also measure its exact scalar evidence probe and legacy jobs")
 	require.Equal(t, 8, beforeSecond.statements, "each retained exact generation pair adds one statement to the entire production reader")
 	lane := *other.PrimaryThreadID
 	const historyRows = 12000
@@ -338,7 +367,7 @@ func TestLifecycleConsumerGenerationPairsDoNotCrossProductPostgres(t *testing.T)
 	defer conn.Release()
 	work, actual := explainLifecycleConsumerEvidence(t, conn, f)
 	require.Equal(t, lifecycleConsumerTestResult{}, actual, "target A generation 2 and target B generation 1 must not import target A generation 1 from another session")
-	require.Len(t, work.observations, 6, "two exact retained generation pairs must produce two separate scalar probes after the four base reads")
+	require.Len(t, work.observations, 7, "two exact retained generation pairs must produce two scalar probes as well as all five base scope, structured and legacy reads")
 	require.Equal(t, 9, work.statements, "two exact retained generation pairs must add exactly two reads to the seven-statement base reader")
 	for _, observation := range work.observations {
 		if observation.name == "generation evidence" {

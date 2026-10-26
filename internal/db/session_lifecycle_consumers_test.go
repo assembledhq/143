@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -224,6 +226,190 @@ func TestLifecycleConsumerUUIDArray(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, tt.expected, lifecycleConsumerUUIDArray(tt.ids), "custom-plan UUID-array parameters must be exact canonical bound text without connection-wide codec changes")
 		})
+	}
+}
+
+func TestLifecycleConsumerLegacyQueryContract(t *testing.T) {
+	t.Parallel()
+	const expected = `SELECT eligible.id,octet_length(j.payload::text),
+	 CASE WHEN octet_length(j.payload::text)<=$3 THEN j.payload ELSE NULL END
+	 FROM (SELECT id FROM jobs WHERE (CASE WHEN job_type IN ('run_agent','continue_session')
+	 AND status IN ('pending', 'running', 'awaiting_start_control') THEN org_id END)=$1 ORDER BY id LIMIT $2) eligible
+	 CROSS JOIN LATERAL (SELECT payload FROM jobs WHERE org_id=$1 AND id=eligible.id OFFSET 0) j
+	 ORDER BY eligible.id`
+	require.Equal(t, strings.Join(strings.Fields(expected), " "), strings.Join(strings.Fields(lifecycleConsumerLegacyJobsQuery), " "), "legacy selection must cap eligible ordered IDs before same-tenant payload probes while preserving exact static eligibility, size/null semantics and bound arguments")
+}
+
+func TestLifecycleConsumerLegacyStreamCollection(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                           string
+		rows, rowCap                   int
+		onePayloadBudget               bool
+		oversized, routeCap, anchorCap bool
+		scanError, closeError, cancel  bool
+		expected                       lifecycleConsumerTestResult
+	}{
+		{name: "complete raw stream is classified", rows: 1, expected: lifecycleConsumerTestResult{blocked: true}},
+		{name: "row cap refuses a partial result", rows: 2, rowCap: 1, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerDiscoveryIncomplete}},
+		{name: "aggregate cap refuses a partial result", rows: 2, onePayloadBudget: true, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerDiscoveryIncomplete}},
+		{name: "oversized row refuses without parsing", rows: 1, oversized: true, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerDiscoveryIncomplete}},
+		{name: "route cap is interpreted only after a clean close", rows: 1, routeCap: true, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerDiscoveryIncomplete}},
+		{name: "lane anchor cap follows a clean close", rows: 1, anchorCap: true, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerDiscoveryIncomplete}},
+		{name: "aggregate cap cannot hide a drain error", rows: 2, onePayloadBudget: true, closeError: true},
+		{name: "row cap cannot hide a drain error", rows: 2, rowCap: 1, closeError: true},
+		{name: "oversized row cannot hide a drain error", rows: 1, oversized: true, closeError: true},
+		{name: "route cap cannot hide a drain error", rows: 1, routeCap: true, closeError: true},
+		{name: "scan and close errors are both retained", rows: 1, scanError: true, closeError: true},
+		{name: "context cancellation at close precedes decoding", rows: 1, routeCap: true, cancel: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create a separate raw-stream expectation for each collection boundary")
+			t.Cleanup(mock.Close)
+			org, session, lane := legacyJobRouteTestIDs()
+			payload := []byte(fmt.Sprintf(`{"session_id":"%s"}`, session))
+			if tt.routeCap {
+				payload = []byte("{" + strings.Repeat(fmt.Sprintf(`"thread_id":"%s",`, lane), legacyJobRouteMaxOccurrences+1) + `"session_id":"` + session.String() + `"}`)
+			} else if tt.anchorCap {
+				payload = []byte(fmt.Sprintf(`{"session_id":"%s","thread_id":"%s"}`, session, lane))
+			}
+			limits := defaultLifecycleConsumerLimits()
+			if tt.rowCap != 0 {
+				limits.legacyJobs = tt.rowCap
+			}
+			if tt.onePayloadBudget {
+				limits.payloadBytes = len(payload)
+			}
+			if tt.anchorCap {
+				limits.laneAnchors = 0
+			}
+			rows := pgxmock.NewRows([]string{"id", "size", "payload"})
+			for i := range tt.rows {
+				id := uuid.UUID{15: byte(i + 1)}
+				if tt.oversized {
+					rows.AddRow(id, legacyJobRouteMaxBytes+1, nil)
+				} else {
+					rows.AddRow(id, len(payload), payload)
+				}
+			}
+			scanFailure := errors.New("synthetic legacy row scan failure")
+			closeFailure := &pgconn.PgError{Code: "57014", Message: "synthetic legacy stream drain timeout"}
+			if tt.scanError {
+				rows.RowError(0, scanFailure)
+			}
+			if tt.closeError {
+				rows.CloseError(closeFailure)
+			}
+			mock.ExpectQuery(regexp.QuoteMeta(lifecycleConsumerLegacyJobsQuery)).WithArgs(org, limits.legacyJobs+1, legacyJobRouteMaxBytes).WillReturnRows(rows).RowsWillBeClosed()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			tx := &lifecycleConsumerRawScanTx{Tx: mock, t: t}
+			if tt.cancel {
+				tx.onClose = cancel
+			}
+			blocked, readErr := readLegacyLifecycleConsumersInTx(ctx, tx, org, AdmissionFence{sessionID: session, threadID: lane, threaded: true}, lifecycleOwnConsumerProof{}, nil, limits)
+			if tt.scanError || tt.closeError || tt.cancel {
+				if tt.scanError {
+					require.ErrorIs(t, readErr, scanFailure, "a row decode failure must survive the subsequent stream close")
+				}
+				if tt.closeError {
+					require.ErrorIs(t, readErr, closeFailure, "a drain failure must not become semantic discovery-incomplete or a negative result")
+					var serverErr *pgconn.PgError
+					require.ErrorAs(t, readErr, &serverErr, "the actual PostgreSQL error type must survive stream-error propagation")
+					require.Equal(t, "57014", serverErr.Code, "callers and diagnostics must retain the original PostgreSQL timeout SQLSTATE")
+				}
+				if tt.cancel {
+					require.ErrorIs(t, readErr, context.Canceled, "a cancelled owner must not parse a buffered route into a semantic outcome")
+				}
+				require.NotErrorIs(t, readErr, ErrLifecycleConsumerDiscoveryIncomplete, "underlying stream and context failures take precedence over semantic caps")
+				require.False(t, blocked, "a stream failure must expose no partial ownership conclusion")
+			} else {
+				require.Equal(t, tt.expected, lifecycleConsumerResult(blocked, readErr), "only a completely read and closed raw stream may produce a semantic consumer result")
+			}
+			require.NotNil(t, tx.rows, "the supplied transaction must have executed its exact production legacy query")
+			require.True(t, tx.rows.closed, "all semantic, error and overflow exits must finish the statement")
+			require.NoError(t, mock.ExpectationsWereMet(), "buffering and classification must add no SQL or transaction ownership")
+		})
+	}
+}
+
+type lifecycleConsumerRawScanTx struct {
+	pgx.Tx
+	t       *testing.T
+	rows    *lifecycleConsumerRawScanRows
+	onClose func()
+}
+
+func TestLifecycleConsumerLegacyLaneStreamErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		scanError bool
+	}{
+		{name: "lane stream close error"},
+		{name: "lane scan and close errors", scanError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create isolated raw and actual-lane membership streams")
+			t.Cleanup(mock.Close)
+			org, session, lane := legacyJobRouteTestIDs()
+			payload := []byte(fmt.Sprintf(`{"session_id":"%s","thread_id":"%s"}`, session, lane))
+			mock.ExpectQuery(regexp.QuoteMeta(lifecycleConsumerLegacyJobsQuery)).WithArgs(org, 513, legacyJobRouteMaxBytes).
+				WillReturnRows(pgxmock.NewRows([]string{"id", "size", "payload"}).AddRow(uuid.New(), len(payload), payload)).RowsWillBeClosed()
+			closeFailure := errors.New("synthetic lane membership drain failure")
+			scanFailure := errors.New("synthetic lane membership scan failure")
+			rows := pgxmock.NewRows([]string{"id", "session_id"}).AddRow(lane, session).CloseError(closeFailure)
+			if tt.scanError {
+				rows.RowError(0, scanFailure)
+			}
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT id,session_id FROM session_threads WHERE org_id=$1 AND id=ANY($2::uuid[])")).WithArgs(org, []uuid.UUID{lane}).WillReturnRows(rows).RowsWillBeClosed()
+			blocked, readErr := readLegacyLifecycleConsumersInTx(context.Background(), mock, org, AdmissionFence{sessionID: session, threadID: lane, threaded: true}, lifecycleOwnConsumerProof{}, nil, defaultLifecycleConsumerLimits())
+			require.ErrorIs(t, readErr, closeFailure, "membership drain failures must never erase actual-lane uncertainty")
+			if tt.scanError {
+				require.ErrorIs(t, readErr, scanFailure, "a membership scan failure must survive closing the result stream")
+			}
+			require.False(t, blocked, "failed membership observations must expose no partial consumer conclusion")
+			require.NoError(t, mock.ExpectationsWereMet(), "route resolution must use only its bounded exact tenant/lane membership query")
+		})
+	}
+}
+
+func (tx *lifecycleConsumerRawScanTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	rows, err := tx.Tx.Query(ctx, sql, args...)
+	if err != nil || sql != lifecycleConsumerLegacyJobsQuery {
+		return rows, err
+	}
+	tx.rows = &lifecycleConsumerRawScanRows{Rows: rows, t: tx.t, onClose: tx.onClose}
+	return tx.rows, nil
+}
+
+type lifecycleConsumerRawScanRows struct {
+	pgx.Rows
+	t       *testing.T
+	closed  bool
+	onClose func()
+}
+
+func (rows *lifecycleConsumerRawScanRows) Scan(dest ...any) error {
+	_, rawBytes := dest[2].(*[]byte)
+	require.True(rows.t, rawBytes, "payload collection must use pgx's raw byte-copy path rather than JSON validation during streaming")
+	return rows.Rows.Scan(dest...)
+}
+
+func (rows *lifecycleConsumerRawScanRows) Close() {
+	if rows.closed {
+		return
+	}
+	rows.Rows.Close()
+	rows.closed = true
+	if rows.onClose != nil {
+		rows.onClose()
 	}
 }
 
