@@ -20,6 +20,272 @@
   ],
   "entries": [
     {
+      "owner": "DB protocol observation only; caller owns the complete admission transaction",
+      "lock": "One existing G.1 shared cutover try-lock and fresh bounded READ COMMITTED provenance read. No settings writer, parent/lane acquisition, transaction settlement, retry or external effect.",
+      "stale_result": "Resolver failures retain their exact cause and no mode; the owner must roll back the entire unit. A valid observed mode is not reusable permission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 protocol boundary prerequisite only. Production entry routing, fresh scope/epoch/domain guards and the complete canonical mutation remain required; no activation or writer-floor claim.",
+      "canonical_target": "AdmitMessageInTx and fixed compatible-legacy SendMessage units",
+      "authority": "None. Typed mode shape supplies no actor, domain owner, epoch, consumer, capacity, target or fleet authority.",
+      "fence_outcome": "Errors cannot become legacy or accepted work. A fixed-branch mismatch rejects the unit without routing to another branch.",
+      "prerequisite_0a": "Compose the real router and original legacy units with canonical scope locks and whole-unit rollback; retain G/H mixed-writer and activation gates.",
+      "evidence": [
+        "internal/db/session_lifecycle_send_protocol.go",
+        "internal/db/session_lifecycle_send_protocol_test.go"
+      ],
+      "id": "internal/db/session_lifecycle_send_protocol.go:ObserveThreadSendModeInTx",
+      "source_sha256": "f52befc72c5482018af2297e7fa88700c95bd234e2d92d1e858e85dfe36de732",
+      "operation": "finite thread-send mode observation",
+      "predicate": "Delegate the exact tenant/session to the existing retained-provenance resolver, map only Legacy/Normalizing/Active, and refuse every invalid observation without inferring version zero."
+    },
+    {
+      "owner": "DB protocol observation only; caller owns the complete admission transaction",
+      "lock": "One existing G.1 shared cutover try-lock and fresh bounded READ COMMITTED provenance read. No settings writer, parent/lane acquisition, transaction settlement, retry or external effect.",
+      "stale_result": "Resolver failures retain their exact cause and no mode; the owner must roll back the entire unit. A valid observed mode is not reusable permission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 protocol boundary prerequisite only. Production entry routing, fresh scope/epoch/domain guards and the complete canonical mutation remain required; no activation or writer-floor claim.",
+      "canonical_target": "AdmitMessageInTx and fixed compatible-legacy SendMessage units",
+      "authority": "None. Typed mode shape supplies no actor, domain owner, epoch, consumer, capacity, target or fleet authority.",
+      "fence_outcome": "Errors cannot become legacy or accepted work. A fixed-branch mismatch rejects the unit without routing to another branch.",
+      "prerequisite_0a": "Compose the real router and original legacy units with canonical scope locks and whole-unit rollback; retain G/H mixed-writer and activation gates.",
+      "evidence": [
+        "internal/db/session_lifecycle_send_protocol.go",
+        "internal/db/session_lifecycle_send_protocol_test.go"
+      ],
+      "id": "internal/db/session_lifecycle_send_protocol.go:RequireLegacyThreadSendModeInTx",
+      "source_sha256": "5b2ff11aea4729b592b9c77d1fac5c8d6635837b7ceb9adedc64e2b3f720672c",
+      "operation": "fresh fixed-legacy mode prerequisite",
+      "predicate": "Resolve retained provenance afresh in this supplied transaction. Only exact Legacy succeeds; valid Active or Normalizing returns ErrThreadSendModeChanged. There is no fallback or mutation."
+    },
+    {
+      "owner": "DB protocol observation only; caller owns the complete admission transaction",
+      "lock": "One existing G.1 shared cutover try-lock and fresh bounded READ COMMITTED provenance read. No settings writer, parent/lane acquisition, transaction settlement, retry or external effect.",
+      "stale_result": "Resolver failures retain their exact cause and no mode; the owner must roll back the entire unit. A valid observed mode is not reusable permission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 protocol boundary prerequisite only. Production entry routing, fresh scope/epoch/domain guards and the complete canonical mutation remain required; no activation or writer-floor claim.",
+      "canonical_target": "AdmitMessageInTx and fixed compatible-legacy SendMessage units",
+      "authority": "None. Typed mode shape supplies no actor, domain owner, epoch, consumer, capacity, target or fleet authority.",
+      "fence_outcome": "Errors cannot become legacy or accepted work. A fixed-branch mismatch rejects the unit without routing to another branch.",
+      "prerequisite_0a": "Compose the real router and original legacy units with canonical scope locks and whole-unit rollback; retain G/H mixed-writer and activation gates.",
+      "evidence": [
+        "internal/db/session_lifecycle_send_protocol.go",
+        "internal/db/session_lifecycle_send_protocol_test.go"
+      ],
+      "id": "internal/db/session_lifecycle_send_protocol.go:RequireActiveThreadSendModeInTx",
+      "source_sha256": "5b2ff11aea4729b592b9c77d1fac5c8d6635837b7ceb9adedc64e2b3f720672c",
+      "operation": "fresh fixed-active mode prerequisite",
+      "predicate": "Resolve retained provenance afresh in this supplied transaction. Only exact Active succeeds; valid Legacy or Normalizing returns ErrThreadSendModeChanged. There is no second version switch or mutation."
+    },
+    {
+      "id": "internal/db/session_lifecycle_send_scope.go:RequireLegacyThreadSendScopeInTx",
+      "source_sha256": "6c7418fada2e6d16ba01f881f9b44c95255891c10e10802dcd9e39ceb277880f",
+      "operation": "fixed legacy original-unit mode and ordered-scope guard",
+      "owner": "Original SendMessage unit owner; DB acquires scope but does not authorize admission",
+      "predicate": "Validate exact nonzero tenant/session/lane and context/tx, freshly require Legacy, then acquire parent and all visible lanes plus the explicit target. Hidden target rows remain raw, not eligible.",
+      "lock": "Existing shared cutover interlock, parent NO KEY UPDATE NOWAIT, bounded visible-plus-target discovery, one UUID-ordered lane NO KEY UPDATE NOWAIT batch. No settings, settlement, effects or retry.",
+      "stale_result": "Any mode/provenance, context, discovery or membership error rejects the unit. Returned success establishes only fresh mode and scope locks, not current admission authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 composition prerequisite only. Every original mutation unit must invoke it afresh; do not enclose the entire legacy choreography in one transaction or reuse entry-mode observation.",
+      "canonical_target": "Compatible-legacy SendMessage units before each original persistence boundary",
+      "authority": "No actor, owner, epoch, consumer or execution authority. The unchanged legacy persistence predicates still apply inside the guarded unit.",
+      "fence_outcome": "Wrong mode never falls through or changes branches. Every failure requires whole-unit rollback and discarded effects.",
+      "prerequisite_0a": "Real SendMessage call-through, exact original-unit characterization and mixed-writer/topology floor remain required before activation.",
+      "evidence": [
+        "internal/db/session_lifecycle_send_scope.go",
+        "internal/db/session_lifecycle_send_scope_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_lifecycle_send_scope.go:lockThreadSendScopeInTx",
+      "source_sha256": "5fe9308b0f8d2bfb4e47a891ff4d8b2513bb4e5759c8263638b6697114039540",
+      "operation": "bounded visible-plus-explicit lane acquisition",
+      "owner": "Private DB observation; caller already resolved mode and higher-ranked domain/job rows",
+      "predicate": "Exact tenant/parent discovery includes every visible lane and the explicit requested lane even if hidden. Require a nonzero strictly increasing complete UUID set containing the target; overflow never clears an unqueried tail.",
+      "lock": "Verify existing policy and acquire parent first, then discover at most the shared lane budget plus one and lock one sorted exact lane batch. Parent serialization applies to cooperating topology writers only.",
+      "stale_result": "Query, scan, iteration, cancellation, overflow, missing target or changed membership returns a zero snapshot; no partially locked observation survives failure.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "Raw acquisition prerequisite for A.1, not eligibility or a new admission engine. No status, owner, epoch, primary-lane or workspace availability inference.",
+      "canonical_target": "Private ordered-scope implementation for AdmitMessageInTx and compatible legacy units",
+      "authority": "None. Raw rows and held NO KEY UPDATE locks do not prove permission, physical drain, topology coverage or exclusion of new FK children.",
+      "fence_outcome": "Every failure rejects the whole unit; ErrLifecycleConsumerDiscoveryIncomplete is conservative uncertainty, never a negative consumer proof.",
+      "prerequisite_0a": "Compose complete canonical policy and mutation; retain full mixed-writer/topology and stronger end/reset exclusion proofs in G/H.",
+      "evidence": [
+        "internal/db/session_lifecycle_send_scope.go",
+        "internal/db/session_lifecycle_send_scope_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_lifecycle_message_fence.go:CaptureThreadMessageFenceInTx",
+      "source_sha256": "3402d1a739ec5f20af99dcf4e54b46912c5205dff11a5e643d0680769fde5f2b",
+      "operation": "non-mutating active new-command epoch observation",
+      "owner": "Top-level non-mutating entry transaction; caller must check exact replay first",
+      "predicate": "Fresh Active provenance and canonical scope locks precede exact target epoch capture. Parent/target must be visible and the locked active protocol stamps consistent. Status, capacity, actor and owner policy are not evaluated.",
+      "lock": "Configured supplied transaction only, shared cutover interlock, higher-ranked caller-held domain/job rows, parent, then complete ordered visible-plus-target lanes. No reservation, Begin, settings, settlement, retry or effects.",
+      "stale_result": "Any failure exposes no fence. A returned raw fence is retained only after known successful outer completion, frozen outside mutation retries, and never recaptured to repair a stale command.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 entry prerequisite only; exact ingress replay and the actual canonical admission mutation still must be wired. No provider or workspace authority is created.",
+      "canonical_target": "New-command capture before AdmitMessageInTx, after exact-key receipt lookup",
+      "authority": "None. Expected epochs are command identity to revalidate, not durable permission or a persisted admission receipt.",
+      "fence_outcome": "Existing receipt replay takes precedence over capture and current eligibility. Frozen/current epoch mismatch must reject and roll back, never silently refresh the expectation.",
+      "prerequisite_0a": "Real entry replay ordering, immutable command installation and per-attempt stale comparison remain required; G/H activation stays separate.",
+      "evidence": [
+        "internal/db/session_lifecycle_message_fence.go",
+        "internal/db/session_lifecycle_message_fence_test.go"
+      ]
+    },
+    {
+      "id": "internal/db/session_lifecycle_message_fence.go:lockActiveThreadMessageScopeInTx",
+      "source_sha256": "47d15f6d907a083f3f32d2b92267bbd59eeed5d03b8ae4b74857784a4ac70abf",
+      "operation": "fresh active ordered-scope observation",
+      "owner": "Private DB scope observation; outer canonical owner retains policy and mutation",
+      "predicate": "Exact nonzero target, fresh fixed Active mode, ordered scope acquisition, visible parent/target, and locked parent/visible-lane version-one stamps. No absent or contradictory provenance may become legacy.",
+      "lock": "Existing configured policy/shared try-lock, parent then sorted complete visible-plus-target lane locks, without new settings, settlement or effects.",
+      "stale_result": "Hidden rows remain not-found; changed protocol stamps are provenance errors. Any failure returns a zero observation and requires whole-unit rollback.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 raw-scope prerequisite only. Owner, actor, input replay, expected epochs, status, capacity, consumer exclusion and atomic admission remain unimplemented here.",
+      "canonical_target": "Private scope acquisition for new-message fence capture and AdmitMessageInTx",
+      "authority": "None. Current observed version and rows cannot replace a frozen command expectation or historical receipt.",
+      "fence_outcome": "No valid snapshot on error, no stale-success mutation branch and no automatic legacy fallback.",
+      "prerequisite_0a": "Compose exact replay and full canonical checks/mutation before caller conversion; retain mixed-writer and activation gates.",
+      "evidence": [
+        "internal/db/session_lifecycle_message_fence.go",
+        "internal/db/session_lifecycle_message_fence_test.go"
+      ]
+    },
+    {
+      "owner": "Legacy persistence adapter only; Service owns fresh guards and each original transaction unit",
+      "lock": "Only the supplied concrete pgx.Tx. No Begin, transaction settings, retry, commit/rollback, receiver-pool mutation fallback or publisher.",
+      "stale_result": "Preserve delegated legacy errors and empty failure values. Results/effects are discarded on rollback or uncertain commit; a successful legacy write is not canonical admission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 persistence prerequisite only. Mandatory dependency construction is not production routing or durable authorization. Keep original compatible order and transaction boundaries.",
+      "canonical_target": "Compatible-legacy guarded SendMessage units; active admission belongs only to AdmitMessageInTx",
+      "authority": "None. Caller must freshly require Legacy and canonical parent/sorted-lane locks in every original mutation unit; old status or an opaque effect token supplies no epoch/input authority.",
+      "fence_outcome": "No lifecycle accepted/stale result is created by this adapter. Guard failure or persistence error rejects the whole owner unit; effects run only after known commit.",
+      "prerequisite_0a": "Wire the mandatory service runner and postcommit ownership, characterize original v0 behavior and prove actual caller composition before marking A.1 converted.",
+      "evidence": [
+        "internal/services/thread/send_persistence.go",
+        "internal/services/thread/send_persistence_test.go"
+      ],
+      "id": "internal/services/thread/send_persistence.go:sqlLegacySendPersistence.AppendInboxInTx",
+      "source_sha256": "052632e309a165e6fcb44678b69698e4fac7649fea7195bb4ab1565638ba5abf",
+      "operation": "supplied-transaction legacy inbox append",
+      "predicate": "Validate context, concrete dependencies, exact tenant/session/lane and tx, then call the existing tx-bound ThreadInboxStore.AppendForMessage. Preserve sequence/dedupe/delivery shape; no dispatch or consumer ownership is inferred."
+    },
+    {
+      "owner": "Legacy persistence adapter only; Service owns fresh guards and each original transaction unit",
+      "lock": "Only the supplied concrete pgx.Tx. No Begin, transaction settings, retry, commit/rollback, receiver-pool mutation fallback or publisher.",
+      "stale_result": "Preserve delegated legacy errors and empty failure values. Results/effects are discarded on rollback or uncertain commit; a successful legacy write is not canonical admission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 persistence prerequisite only. Mandatory dependency construction is not production routing or durable authorization. Keep original compatible order and transaction boundaries.",
+      "canonical_target": "Compatible-legacy guarded SendMessage units; active admission belongs only to AdmitMessageInTx",
+      "authority": "None. Caller must freshly require Legacy and canonical parent/sorted-lane locks in every original mutation unit; old status or an opaque effect token supplies no epoch/input authority.",
+      "fence_outcome": "No lifecycle accepted/stale result is created by this adapter. Guard failure or persistence error rejects the whole owner unit; effects run only after known commit.",
+      "prerequisite_0a": "Wire the mandatory service runner and postcommit ownership, characterize original v0 behavior and prove actual caller composition before marking A.1 converted.",
+      "evidence": [
+        "internal/services/thread/send_persistence.go",
+        "internal/services/thread/send_persistence_test.go"
+      ],
+      "id": "internal/services/thread/send_persistence.go:sqlLegacySendPersistence.ClaimIdleSessionInTx",
+      "source_sha256": "44169e48dab7db39c5c3de641474b211ff838ee113a52d9eaeea6686f9beab16",
+      "operation": "supplied-transaction legacy parent idle claim",
+      "predicate": "Validate concrete dependencies and exact scope, then delegate only SessionStore.ClaimIdleInTx. Preserve its original row-only status/sandbox/review-owner predicates and eventless claim behavior."
+    },
+    {
+      "owner": "Legacy persistence adapter only; Service owns fresh guards and each original transaction unit",
+      "lock": "Only the supplied concrete pgx.Tx. No Begin, transaction settings, retry, commit/rollback, receiver-pool mutation fallback or publisher.",
+      "stale_result": "Preserve delegated legacy errors and empty failure values. Results/effects are discarded on rollback or uncertain commit; a successful legacy write is not canonical admission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 persistence prerequisite only. Mandatory dependency construction is not production routing or durable authorization. Keep original compatible order and transaction boundaries.",
+      "canonical_target": "Compatible-legacy guarded SendMessage units; active admission belongs only to AdmitMessageInTx",
+      "authority": "None. Caller must freshly require Legacy and canonical parent/sorted-lane locks in every original mutation unit; old status or an opaque effect token supplies no epoch/input authority.",
+      "fence_outcome": "No lifecycle accepted/stale result is created by this adapter. Guard failure or persistence error rejects the whole owner unit; effects run only after known commit.",
+      "prerequisite_0a": "Wire the mandatory service runner and postcommit ownership, characterize original v0 behavior and prove actual caller composition before marking A.1 converted.",
+      "evidence": [
+        "internal/services/thread/send_persistence.go",
+        "internal/services/thread/send_persistence_test.go"
+      ],
+      "id": "internal/services/thread/send_persistence.go:sqlLegacySendPersistence.ClaimIdleThreadInTx",
+      "source_sha256": "a9d6b499a06e2cdc2b804b4d56f478d87e16eb6b36778644733c775b2ed45d00",
+      "operation": "supplied-transaction legacy lane idle claim",
+      "predicate": "Delegate exact tenant/session/lane and maxRunning to ClaimIdleForSessionInTx after shape validation. Preserve raw no-rows and opaque returned-snapshot effects; cap diagnosis happens after known unit commit."
+    },
+    {
+      "owner": "Legacy persistence adapter only; Service owns fresh guards and each original transaction unit",
+      "lock": "Only the supplied concrete pgx.Tx. No Begin, transaction settings, retry, commit/rollback, receiver-pool mutation fallback or publisher.",
+      "stale_result": "Preserve delegated legacy errors and empty failure values. Results/effects are discarded on rollback or uncertain commit; a successful legacy write is not canonical admission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 persistence prerequisite only. Mandatory dependency construction is not production routing or durable authorization. Keep original compatible order and transaction boundaries.",
+      "canonical_target": "Compatible-legacy guarded SendMessage units; active admission belongs only to AdmitMessageInTx",
+      "authority": "None. Caller must freshly require Legacy and canonical parent/sorted-lane locks in every original mutation unit; old status or an opaque effect token supplies no epoch/input authority.",
+      "fence_outcome": "No lifecycle accepted/stale result is created by this adapter. Guard failure or persistence error rejects the whole owner unit; effects run only after known commit.",
+      "prerequisite_0a": "Wire the mandatory service runner and postcommit ownership, characterize original v0 behavior and prove actual caller composition before marking A.1 converted.",
+      "evidence": [
+        "internal/services/thread/send_persistence.go",
+        "internal/services/thread/send_persistence_test.go"
+      ],
+      "id": "internal/services/thread/send_persistence.go:sqlLegacySendPersistence.ClaimResumeSessionInTx",
+      "source_sha256": "abb81a9c087f584ce8c69b1ede0999cb4ff15d23fc5ed44e8bb5931078039e62",
+      "operation": "supplied-transaction legacy parent resume claim",
+      "predicate": "Delegate exact tenant/session to ClaimForResumeInTx after shape validation, without changing resumable statuses, sandbox/review-owner checks or eventless returned-row behavior."
+    },
+    {
+      "owner": "Legacy persistence adapter only; Service owns fresh guards and each original transaction unit",
+      "lock": "Only the supplied concrete pgx.Tx. No Begin, transaction settings, retry, commit/rollback, receiver-pool mutation fallback or publisher.",
+      "stale_result": "Preserve delegated legacy errors and empty failure values. Results/effects are discarded on rollback or uncertain commit; a successful legacy write is not canonical admission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 persistence prerequisite only. Mandatory dependency construction is not production routing or durable authorization. Keep original compatible order and transaction boundaries.",
+      "canonical_target": "Compatible-legacy guarded SendMessage units; active admission belongs only to AdmitMessageInTx",
+      "authority": "None. Caller must freshly require Legacy and canonical parent/sorted-lane locks in every original mutation unit; old status or an opaque effect token supplies no epoch/input authority.",
+      "fence_outcome": "No lifecycle accepted/stale result is created by this adapter. Guard failure or persistence error rejects the whole owner unit; effects run only after known commit.",
+      "prerequisite_0a": "Wire the mandatory service runner and postcommit ownership, characterize original v0 behavior and prove actual caller composition before marking A.1 converted.",
+      "evidence": [
+        "internal/services/thread/send_persistence.go",
+        "internal/services/thread/send_persistence_test.go"
+      ],
+      "id": "internal/services/thread/send_persistence.go:sqlLegacySendPersistence.ClaimResumeThreadInTx",
+      "source_sha256": "210799824fc5b2c42dd4044ac1bf15dde4b0f84776d8ba43a664fc3caa0a8e5a",
+      "operation": "supplied-transaction legacy lane resume claim",
+      "predicate": "Delegate exact tenant/session/lane and maxRunning to ClaimForResumeInSessionInTx. Preserve resumable statuses, raw no-rows and opaque snapshot effects; any best-effort cap diagnosis belongs after known commit."
+    },
+    {
+      "owner": "Legacy persistence adapter only; Service owns fresh guards and each original transaction unit",
+      "lock": "Only the supplied concrete pgx.Tx. No Begin, transaction settings, retry, commit/rollback, receiver-pool mutation fallback or publisher.",
+      "stale_result": "Preserve delegated legacy errors and empty failure values. Results/effects are discarded on rollback or uncertain commit; a successful legacy write is not canonical admission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 persistence prerequisite only. Mandatory dependency construction is not production routing or durable authorization. Keep original compatible order and transaction boundaries.",
+      "canonical_target": "Compatible-legacy guarded SendMessage units; active admission belongs only to AdmitMessageInTx",
+      "authority": "None. Caller must freshly require Legacy and canonical parent/sorted-lane locks in every original mutation unit; old status or an opaque effect token supplies no epoch/input authority.",
+      "fence_outcome": "No lifecycle accepted/stale result is created by this adapter. Guard failure or persistence error rejects the whole owner unit; effects run only after known commit.",
+      "prerequisite_0a": "Wire the mandatory service runner and postcommit ownership, characterize original v0 behavior and prove actual caller composition before marking A.1 converted.",
+      "evidence": [
+        "internal/services/thread/send_persistence.go",
+        "internal/services/thread/send_persistence_test.go"
+      ],
+      "id": "internal/services/thread/send_persistence.go:sqlLegacySendPersistence.UpdateSessionStatusInTx",
+      "source_sha256": "d717e40ec93ab1c749f494050a9c32b8db5d015b375eee8f239289c38e153ca5",
+      "operation": "supplied-transaction legacy parent compensation",
+      "predicate": "Validate explicit scope and status shape, then delegate UpdateStatusInTx without broadening its legacy predicates. Returned session projection must publish only after this separate original compensation unit commits."
+    },
+    {
+      "owner": "Legacy persistence adapter only; Service owns fresh guards and each original transaction unit",
+      "lock": "Only the supplied concrete pgx.Tx. No Begin, transaction settings, retry, commit/rollback, receiver-pool mutation fallback or publisher.",
+      "stale_result": "Preserve delegated legacy errors and empty failure values. Results/effects are discarded on rollback or uncertain commit; a successful legacy write is not canonical admission.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A.1 persistence prerequisite only. Mandatory dependency construction is not production routing or durable authorization. Keep original compatible order and transaction boundaries.",
+      "canonical_target": "Compatible-legacy guarded SendMessage units; active admission belongs only to AdmitMessageInTx",
+      "authority": "None. Caller must freshly require Legacy and canonical parent/sorted-lane locks in every original mutation unit; old status or an opaque effect token supplies no epoch/input authority.",
+      "fence_outcome": "No lifecycle accepted/stale result is created by this adapter. Guard failure or persistence error rejects the whole owner unit; effects run only after known commit.",
+      "prerequisite_0a": "Wire the mandatory service runner and postcommit ownership, characterize original v0 behavior and prove actual caller composition before marking A.1 converted.",
+      "evidence": [
+        "internal/services/thread/send_persistence.go",
+        "internal/services/thread/send_persistence_test.go"
+      ],
+      "id": "internal/services/thread/send_persistence.go:sqlLegacySendPersistence.UpdateThreadStatusInTx",
+      "source_sha256": "08c02665b2e066480402097341597d1fe87c02bb3a6d0a30df120b30ff1e09f2",
+      "operation": "supplied-transaction legacy lane compensation",
+      "predicate": "Validate exact scope and status shape, then delegate UpdateStatusInTx and forward opaque current-row notification data unchanged. Do not combine parent and lane compensation into a new encompassing transaction."
+    },
+    {
       "id": "internal/db/session_claim_persistence.go:SessionStore.ClaimForResumeInTx",
       "source_sha256": "a4944c76759449ce3511869d8130418d8ff49304de99e1cd6b66a4a69b2046ad",
       "operation": "caller-owned legacy parent resume persistence",
@@ -44,7 +310,7 @@
       "lock": "Only the supplied concrete pgx.Tx and the shared UPDATE's ordinary row lock. No Begin, settings, settlement, retry, receiver-pool fallback or publication.",
       "stale_result": "Original wrapped query and collection errors return no accepted row. A matching stale resource can still be claimed because this is a legacy status CAS; outer failure, rollback or uncertain commit requires discarding the result.",
       "classification": "unfenced-needs-conversion",
-      "migration": "Persistence prerequisite only; retain the legacy claimed-but-not-executing projection while adding canonical current-epoch, availability, owner and exact input/dispatch checks in the real admission owner.",
+      "migration": "Persistence prerequisite only; retain the legacy claimed-but-not-executing projection while adding canonical current-epoch, exclusive-reservation, owner and exact input/dispatch checks in the real admission owner. Positive physical availability belongs at runtime start, not ordinary non-answer admission.",
       "canonical_target": "AdmitMessageInTx",
       "authority": "None established by this seam. Future OrdinaryAuthority requires exact input and scope identity, current shared epochs and all domain-owner guards.",
       "fence_outcome": "No lifecycle fence result exists here. Canonical admission must reject invalid or stale authority atomically and roll back all composed writes.",
@@ -64,7 +330,7 @@
       "canonical_target": "AdmitMessageInTx",
       "authority": "No canonical authority established. Future OrdinaryAuthority requires exact org/session/lane and input receipt plus current epochs and retained owner guards.",
       "fence_outcome": "Legacy SQL/no-row results only; the future canonical owner must reject invalid or stale authority and roll back the full operation.",
-      "prerequisite_0a": "A caller-supplied transaction is composition, not a fence. Retain all canonical admission, positive-availability and mixed-writer gates before activation.",
+      "prerequisite_0a": "A caller-supplied transaction is composition, not a fence. Retain all canonical admission, runtime-start availability and mixed-writer gates before activation.",
       "evidence": ["internal/db/session_store.go:1985", "internal/db/session_store.go:sessionResumeRuntimeResetAssignments", "internal/db/session_claim_persistence_test.go"]
     },
     {
