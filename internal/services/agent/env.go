@@ -108,15 +108,9 @@ type AgentEnv struct {
 	provider        SandboxProvider
 	logger          zerolog.Logger
 
-	// recentPicks remembers the credential id chosen for each (orgID, userID,
-	// provider) tuple by the most recent pickFromCodingProvider call. It feeds
-	// ShedRateLimited / ShedAuthRejected so the orchestrator can surface a
-	// 429/401 back to the unified store's in-process health cache without
-	// plumbing credential ids through every call site. The map is bounded by
-	// pickTrackerMax with simple time-based eviction; concurrent sessions for
-	// the same scope race to write the slot, which is acceptable per the
-	// design's eventual-consistency note (`docs/design/future/65-…` § health
-	// cache).
+	// recentPicks supports legacy callers that resolve environment and auth
+	// separately. New executions retain the selected credential on their own
+	// sandbox so long turns and concurrent resolutions cannot lose attribution.
 	recentPicks        map[pickKey]pickRecord
 	recentPicksMu      sync.Mutex
 	credentialBlocks   map[pickKey]credentialBlock
@@ -777,11 +771,20 @@ func (e *AgentEnv) Resolve(ctx context.Context, orgID uuid.UUID, agentType model
 }
 
 func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID, modelOverride string) map[string]string {
+	return e.ResolveForModelWithCredential(ctx, orgID, agentType, userID, modelOverride).Env
+}
+
+// ResolveForModelWithCredential captures the exact credential chosen for this
+// execution alongside its environment. Callers must keep the result private:
+// its credential config and environment contain decrypted secrets.
+func (e *AgentEnv) ResolveForModelWithCredential(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID, modelOverride string) *resolvedAgentEnv {
 	merged := make(map[string]string)
+	var picked *models.DecryptedCodingCredential
 
 	switch agentType {
 	case models.AgentTypeClaudeCode:
-		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderAnthropic)
+		cfg, credential := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderAnthropic)
+		picked = credential
 		if ac, ok := cfg.(models.AnthropicConfig); ok {
 			if ac.APIKey != "" {
 				merged["ANTHROPIC_API_KEY"] = ac.APIKey
@@ -804,7 +807,8 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 		//
 		// Inject the general OpenAI API key as OPENAI_API_KEY for other
 		// tools in the sandbox (not used by Codex CLI itself).
-		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenAI)
+		cfg, credential := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderOpenAI)
+		picked = credential
 		if oc, ok := cfg.(models.OpenAIConfig); ok {
 			if oc.APIKey != "" {
 				merged["OPENAI_API_KEY"] = oc.APIKey
@@ -822,21 +826,24 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 		// unprivileged user namespaces that bwrap requires.
 		merged["CODEX_UNSAFE_ALLOW_NO_SANDBOX"] = "1"
 	case models.AgentTypeAmp:
-		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderAmp)
+		cfg, credential := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderAmp)
+		picked = credential
 		if amp, ok := cfg.(models.AmpConfig); ok && amp.APIKey != "" {
 			merged["AMP_API_KEY"] = amp.APIKey
 		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderAmp); ok {
 			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypePi:
-		cfg := e.resolveProviderConfig(ctx, orgID, userID, models.ProviderPi)
+		cfg, credential := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderPi)
+		picked = credential
 		if pi, ok := cfg.(models.PiConfig); ok && pi.APIKey != "" {
 			merged["PI_API_KEY"] = pi.APIKey
 		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderPi); ok {
 			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypeOpenCode:
-		cfg := e.resolveOpenCodeProviderConfig(ctx, orgID, userID, modelOverride)
+		cfg, credential := e.resolveOpenCodeProviderConfigWithCredential(ctx, orgID, userID, modelOverride)
+		picked = credential
 		if oc, ok := cfg.(models.OpenCodeConfig); ok && oc.APIKey != "" {
 			// The resolver pins oc.Model to the chosen route's physical model
 			// id. Only the generic-fallback path (no curated route matched)
@@ -945,10 +952,13 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 	}
 
 	if len(merged) == 0 {
-		return nil
+		merged = nil
 	}
-
-	return merged
+	resolved := &resolvedAgentEnv{Env: merged}
+	if picked != nil {
+		resolved.Credential = captureRuntimeCredential(*picked, agentType, merged)
+	}
+	return resolved
 }
 
 // IsAgentAvailable reports whether the resolved coding-credential stack has
@@ -1170,6 +1180,11 @@ func (e *AgentEnv) effectiveOpenCodeModel(ctx context.Context, orgID uuid.UUID, 
 // Returns nil and records a structured credential block when no route is
 // runnable.
 func (e *AgentEnv) resolveOpenCodeProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) models.ProviderConfig {
+	cfg, _ := e.resolveOpenCodeProviderConfigWithCredential(ctx, orgID, userID, modelOverride)
+	return cfg
+}
+
+func (e *AgentEnv) resolveOpenCodeProviderConfigWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) (models.ProviderConfig, *models.DecryptedCodingCredential) {
 	selection, routes, modelAware := e.openCodeRuntimeRoutes(ctx, orgID, modelOverride)
 	if !modelAware {
 		// With no model preference (or an unknown bare slug), pick any runnable
@@ -1177,10 +1192,10 @@ func (e *AgentEnv) resolveOpenCodeProviderConfig(ctx context.Context, orgID uuid
 		// default model. This keeps orgs that configured a first-party-backed
 		// OpenCode key without a default model working — forcing the product
 		// default would route only to OpenRouter/native.
-		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
+		return e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderOpenCode)
 	}
 
-	return e.resolveAcrossOpenCodeRoutes(ctx, orgID, userID, selection, routes)
+	return e.resolveAcrossOpenCodeRoutesWithCredential(ctx, orgID, userID, selection, routes)
 }
 
 // openCodeRuntimeRoutes normalizes the requested/default OpenCode selection
@@ -1266,10 +1281,15 @@ func (e *AgentEnv) openCodeAllowNativeFallback(ctx context.Context, orgID uuid.U
 // the config's Model to that route's physical id. Records a rate-limit or
 // no-runnable-route block when nothing matches.
 func (e *AgentEnv) resolveAcrossOpenCodeRoutes(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, selection string, routes []models.OpenCodeRoute) models.ProviderConfig {
+	cfg, _ := e.resolveAcrossOpenCodeRoutesWithCredential(ctx, orgID, userID, selection, routes)
+	return cfg
+}
+
+func (e *AgentEnv) resolveAcrossOpenCodeRoutesWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, selection string, routes []models.OpenCodeRoute) (models.ProviderConfig, *models.DecryptedCodingCredential) {
 	providers := []models.ProviderName{models.ProviderOpenCode}
 	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
 	if !ok || !sawRows {
-		return e.resolveProviderConfig(ctx, orgID, userID, models.ProviderOpenCode)
+		return e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderOpenCode)
 	}
 
 	rows := append([]models.DecryptedCodingCredential(nil), rowsByProvider[models.ProviderOpenCode]...)
@@ -1306,7 +1326,7 @@ func (e *AgentEnv) resolveAcrossOpenCodeRoutes(ctx context.Context, orgID uuid.U
 			cfg.BackingProvider = route.Backing
 			cfg.Model = openCodeCLIModelID(route.PhysicalModelID, route.Backing)
 			e.recordCredentialPick(orgID, userID, models.ProviderOpenCode, cred)
-			return cfg
+			return cfg, &cred
 		}
 	}
 
@@ -1315,7 +1335,7 @@ func (e *AgentEnv) resolveAcrossOpenCodeRoutes(ctx context.Context, orgID uuid.U
 	} else {
 		e.recordCredentialBlock(orgID, userID, noRunnableOpenCodeRouteBlock(selection, routes))
 	}
-	return nil
+	return nil, nil
 }
 
 func (e *AgentEnv) openCodeModelFromAgentConfig(ctx context.Context, orgID uuid.UUID) string {
@@ -1677,8 +1697,23 @@ func (e *AgentEnv) loadAgentSettingsSnapshot(ctx context.Context, orgID uuid.UUI
 // subscription rows, and the first runnable row wins. With no unified store
 // wired (older test rigs) or no runnable rows, the resolver returns nil.
 func (e *AgentEnv) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
-	cfg, _ := e.resolveFromCodingCredentials(ctx, orgID, userID, provider)
+	cfg, _ := e.resolveProviderConfigWithCredential(ctx, orgID, userID, provider)
 	return cfg
+}
+
+func (e *AgentEnv) resolveProviderConfigWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.ProviderConfig, *models.DecryptedCodingCredential) {
+	if e.codingCredentials == nil {
+		return nil, nil
+	}
+	providers := []models.ProviderName{provider}
+	if twin := unifiedSubscriptionTwin(provider); twin != "" {
+		providers = append(providers, twin)
+	}
+	cfg, picked, _ := e.pickFromCodingProviderSet(ctx, orgID, userID, provider, providers)
+	if cfg == nil {
+		return nil, nil
+	}
+	return cfg, picked
 }
 
 // resolveFromCodingCredentials walks the unified resolver result, plus its

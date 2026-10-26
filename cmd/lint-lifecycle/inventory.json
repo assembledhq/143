@@ -7027,16 +7027,16 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.retrySessionOnCredentialRateLimit",
-      "source_sha256": "365f2ade0999501424f1cf351af8ada7405f8d837578165c997daaf851edb22b",
+      "source_sha256": "5cc31929ba5e87304d237e4b5bcf8a4297ca1e370fce3a5a9ce31fdd8cd15cb6",
       "operation": "Orchestrator.retrySessionOnCredentialRateLimit: indirect lifecycle caller",
       "owner": "Orchestrator in internal/services/agent",
-      "predicate": "Syntactic boundary/callee candidates: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry; o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, sandbox, refreshedEnv) -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry; no independent authorization proof inferred.",
-      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry; o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, sandbox, refreshedEnv) -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry",
+      "predicate": "Syntactic boundary/callee candidates: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry; o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, retrySandbox, refreshedEnv) -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry. Auth preparation uses a candidate credential-bound sandbox; only successful preparation publishes it to the execution handle. No independent authorization proof inferred.",
+      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry; o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, retrySandbox, refreshedEnv) -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry",
       "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:9963",
+        "internal/services/agent/orchestrator.go:10158",
         "Discovered: indirect-caller",
         "Boundary/call candidate: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry"
       ]

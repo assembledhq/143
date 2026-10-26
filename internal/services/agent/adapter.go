@@ -596,6 +596,9 @@ type Sandbox struct {
 	Env      map[string]string `json:"-"` // environment passed to agent CLI execs; never persist secrets
 	Metadata map[string]string // provider-specific metadata
 
+	// In-memory auth selection for this execution; never persisted or exported.
+	credentialResolution *resolvedAgentEnv
+
 	// Tracing identifiers copied from SandboxConfig at Create time. Providers
 	// attach these to every lifecycle log line so operators can find all
 	// sandbox logs for a given session in Grafana.

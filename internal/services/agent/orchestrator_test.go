@@ -6435,6 +6435,9 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 		return capturedSandbox, nil
 	}
 	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		// Auth metadata belongs to the execution's sandbox value, which is
+		// isolated from the provider's cached Create handle.
+		capturedSandbox = sb
 		if cmd == "claude --version" {
 			_, writeErr := stdout.Write([]byte("2.1.139\n"))
 			require.NoError(t, writeErr, "version mock should write stdout")
