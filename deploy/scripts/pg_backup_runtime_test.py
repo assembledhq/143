@@ -554,6 +554,31 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse(self.partial.exists(), 'existing owned cleanup must finish after pressure refusal')
         self.assertEqual(self.completed.read_bytes(), b'previous verified backup')
 
+    def test_healthy_ticks_maintain_owned_output_once_per_sample(self):
+        samples = [dict(safe_resources(), monotonic=10 + 5 * i) for i in range(3)]
+        maintain = self.supervise_samples(samples)
+        self.assertEqual(maintain.call_count, 3, 'each healthy guarded tick must maintain output')
+        self.assertEqual([call.args[0] for call in maintain.call_args_list], [self.owned] * 3,
+                         'all hints must remain bound to the captured dump ownership')
+        self.assertEqual(read_json(self.guard.result)['status'], 'completed')
+
+    def test_client_exit_during_writeback_uses_fresh_terminal_state(self):
+        running = {'State': {'Status': 'running', 'Running': True}}
+        exited = {'State': {'Status': 'exited', 'ExitCode': 0, 'OOMKilled': False}}
+        with (mock.patch.object(self.guard, 'prepare', return_value=self.owned),
+              mock.patch.object(runtime, 'invoke', return_value=''),
+              mock.patch.object(self.guard, 'inspect', side_effect=[running, exited, exited]),
+              mock.patch.object(self.guard, 'database'),
+              mock.patch.object(self.guard, 'observe_client_memory'),
+              mock.patch.object(runtime, 'resources', return_value=safe_resources()),
+              mock.patch.object(self.guard, 'maintain_dump_output', side_effect=FileNotFoundError('exited')),
+              mock.patch.object(self.guard, 'stop') as stop):
+            self.guard.supervise()
+        stop.assert_called_once_with(self.owned)
+        self.assertEqual(read_json(self.guard.result)['status'], 'completed',
+                         'a proven normal exit must not become a writeback telemetry failure')
+        self.assertTrue(self.partial.exists(), 'normal exit must preserve the archive for verification')
+
     def test_writeback_error_uses_existing_owned_stop_and_cleanup(self):
         running = {'State': {'Status': 'running', 'Running': True}}
         with (mock.patch.object(self.guard, 'prepare', return_value=self.owned),
