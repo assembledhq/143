@@ -114,6 +114,13 @@ deleted, contradictory, malformed or unsupported active provenance returns
 `LIFECYCLE_GUARD_PROVENANCE_REQUIRED`; it never falls back to version 0.
 Mode resolution alone is not admission, readiness or activation authority.
 
+A shadow row may retain a valid incomplete normalization envelope with its exact
+cutoff and floor receipt, but still resolves as legacy. Normalizing requires that
+envelope with `complete=false`; completion is published atomically with active
+cutover and protocol stamps, never as a completed normalizing intermediate state.
+Receipt UUIDs compare by decoded identity; canonical hexadecimal encoding applies
+to digest text, not alternate equivalent UUID spellings.
+
 The protocol core in `internal/db/session_lifecycle_protocol.go` reads the parent,
 optional cutover and visible lane stamps/providers only after acquiring the shared
 interlock. It validates the supported JSON envelopes and actual provider coverage;
@@ -129,6 +136,10 @@ guard set. They intentionally leave ordinary unversioned writes to inactive
 version-0 parents compatible. SQL advisory-lock refusal uses the same exact
 tenant/session key as Go; only an actual failed advisory try-lock is reported as
 `LIFECYCLE_CUTOVER_INTERLOCK_BUSY`.
+Once active, normalization is write-once: an exact no-op is allowed, replacement
+is refused. Capability update authority remains a later guard obligation; this
+core only prevents clearing it. Malformed replacement fails strict resolution,
+and a shape-valid replacement still proves no provider conformance or target authority.
 
 Bulk maintenance also retains provenance. TRUNCATE takes nonwaiting SHARE locks
 on both evidence tables before its fresh READ COMMITTED assertion, including the
@@ -146,6 +157,13 @@ or stamping. An activator waiting behind a successful down migration must fail
 that post-lock validation. The retention core supplies no activation controller
 and does not prove this later H integration gate. Once positive/active evidence
 exists, these down migrations refuse removal rather than reopening legacy mode.
+
+H must bound the distinct scope locks held by each bulk statement and measure
+shared lock-table pressure and forward progress. Row-level advisory acquisition
+does not provide an unbounded bulk-operation guarantee. H must also measure the
+rollback availability window: the retained-evidence check can scan the session
+table while the rollback holds exclusive relation locks. Neither capacity nor a
+table-size-independent rollback duration is established by this component.
 
 The decision matrix also fixes these error boundaries: missing exact parent is
 not-found, while a soft-deleted parent still retains provenance and is not hidden
