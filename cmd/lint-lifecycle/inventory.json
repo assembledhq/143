@@ -6145,7 +6145,7 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.ContinueSession",
-      "source_sha256": "8bb480d78410aadab5196963c8bb6bba3b4356f3e8868f8cf7472fd3a8578c44",
+      "source_sha256": "cad073bbc9c5ad58f058a0298c771290f47e689cb011c8b5ed67d69fe62a02a3",
       "operation": "ordinary/specialist continuation runtime projections and retry fallbacks",
       "owner": "Orchestrator in internal/services/agent",
       "predicate": "Selected continuation/input has several preflight checks; network/auth/wrong-node/reuse/start failures write generic idle/pending/fallbackStatus; fallback depends captured session state, not durable epoch. Direct UpdateSandboxState calls use only org/session: startup advertises running, and failure paths may restore a captured sandbox state without current key/container/epoch CAS.",
@@ -6297,7 +6297,7 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.RunAgent",
-      "source_sha256": "226269a07cc8fa4a2158842dfa8c353a3745348049ad419bd43e5fc452350f5e",
+      "source_sha256": "acbdc0790cf24f4a6282a3a66e6626a87ca45c519b7f929e8d4de259e7f2afc2",
       "operation": "initial runtime running/success/failure projections",
       "owner": "Orchestrator in internal/services/agent",
       "predicate": "beginRuntimeControl writes running; primary thread generic running; sandbox-hold loser diagnoses preview/stale container then generic pending. Completion may generic thread result. Direct UpdateSandboxState calls use only org/session: startup advertises running, and failure paths may restore a captured sandbox state without current key/container/epoch CAS.",
@@ -6583,6 +6583,27 @@
         "internal/services/agent/orchestrator.go:7743",
         "Discovered: boundary-caller",
         "Boundary/call candidate: o.sessionThreads.UpdateResult"
+      ]
+    },
+    {
+      "id": "internal/services/agent/orchestrator.go:Orchestrator.failPolicyStoppedCodeReviewThreadTurn",
+      "source_sha256": "1b1129e9d3bc4ab84d4f46b5e875c8d0f0f2e5f73b6a4a59db116842f4650c07",
+      "operation": "policy-stop failure of exact reviewer/synthesis thread without shared checkpoint or parent terminalization",
+      "owner": "Orchestrator in internal/services/agent",
+      "predicate": "Requires code_review origin and nonnil thread; constructs structured runtime-policy timeout diagnostics and delegates only to failCodeReviewThreadTurn. Does not snapshot, publish a parent checkpoint, or decide the overall review outcome.",
+      "lock": "Delegates to the existing detached bounded thread-result write; no new assessment/job/runtime fencing is introduced.",
+      "stale_result": "Inherits exact-thread result write limitations and handled/error contract: a failed persistence write must remain retryable rather than returning the terminal thread sentinel.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "0a: canonical thread result+phase conditional settlement under domain locks, preserving controller-only parent decision and handled/error contract.",
+      "canonical_target": "ProjectTurnInTx",
+      "authority": "ReviewAuthority + exact runtime/attempt allocation for this reviewer/synthesis thread; immutable own receipt only when stale.",
+      "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority.",
+      "prerequisite_0a": "0a: canonical thread result+phase conditional settlement under domain locks, preserving controller-only parent decision and handled/error contract.",
+      "evidence": [
+        "internal/services/agent/orchestrator.go:9563",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: o.failCodeReviewThreadTurn -> internal/services/agent/orchestrator.go:Orchestrator.failCodeReviewThreadTurn",
+        "Boundary/call candidate: o.failCodeReviewThreadTurn(ctx, session, threadID, result, errMsg, activityExecution, log) -> internal/services/agent/orchestrator.go:Orchestrator.failCodeReviewThreadTurn"
       ]
     },
     {

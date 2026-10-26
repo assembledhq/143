@@ -3959,13 +3959,13 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	streamErr := <-logErrCh
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, runtimeTracker, log)
 
 	// 10c. Shed the just-picked credential's in-process health-cache slot if
 	// the (possibly retried) result indicates a credential-level failure.
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
-	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, runtimeTracker, log)
 	automationTurn.markAgentEnded()
 	err = errors.Join(err, streamErr)
 	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, run, sandbox, authBillingMode, log); harvestErr != nil {
@@ -4640,6 +4640,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	runtimeTracker := newRuntimeProgressTracker(turnStartedAt)
 	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, session.OrgID, session.ID, maxConcurrent, o.isDraining, runtimeTracker)
 	runtimeController.SetStopFallback(cancel)
+	if isCodeReviewThreadTurn(session, threadID) {
+		runtimeController.SetThreadScope(*threadID, true)
+	}
 	fallbackStatus := session.Status
 	if fallbackStatus == "" {
 		fallbackStatus = models.SessionStatusIdle
@@ -6122,14 +6125,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// 6b. Retry once on token expiration for Codex agents.
 	if codeReviewTurn == nil {
-		result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
+		result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, runtimeTracker, log)
 	}
 
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
 	if codeReviewTurn == nil {
-		result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+		result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, runtimeTracker, log)
 	}
 	automationTurn.markAgentEnded()
 	err = errors.Join(err, streamErr)
@@ -6145,7 +6148,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	stopReason := StopReasonNone
 	if o.cancels != nil {
-		stopReason = o.cancels.StopReason(session.ID)
+		if isCodeReviewThreadTurn(session, threadID) {
+			stopReason = o.cancels.StopReasonScoped(session.ID, *threadID)
+		} else {
+			stopReason = o.cancels.StopReason(session.ID)
+		}
 	}
 	wasCancelled := stopReason == StopReasonUserCancel || isUserCancelContext(ctx)
 	systemStopReason := interruptedStopReason(ctx, stopReason)
@@ -6180,6 +6187,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
 			deregisterSessionCancel()
+			handled, persistErr := o.failPolicyStoppedCodeReviewThreadTurn(ctx, session, threadID, stopReason, activityExecution, log)
+			if persistErr != nil {
+				return errors.Join(err, persistErr)
+			}
+			if handled {
+				return fmt.Errorf("%w (%s): %w", ErrCodeReviewThreadFailed, stopReason, err)
+			}
 			o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, activityExecution, log)
 			return nil
 		}
@@ -6238,6 +6252,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop during continue")
 		deregisterSessionCancel()
+		handled, persistErr := o.failPolicyStoppedCodeReviewThreadTurn(ctx, session, threadID, stopReason, activityExecution, log)
+		if persistErr != nil {
+			return persistErr
+		}
+		if handled {
+			return fmt.Errorf("%w (%s)", ErrCodeReviewThreadFailed, stopReason)
+		}
 		o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, activityExecution, log)
 		return nil
 	}
@@ -9539,6 +9560,25 @@ func truncateForLog(s string, max int) string {
 	return s[:cut] + "…"
 }
 
+func (o *Orchestrator) failPolicyStoppedCodeReviewThreadTurn(ctx context.Context, session *models.Session, threadID *uuid.UUID, reason StopReason, activityExecution *activityPhaseExecution, log zerolog.Logger) (bool, error) {
+	if !isCodeReviewThreadTurn(session, threadID) {
+		return false, nil
+	}
+	// A reviewer has no independent resumable checkpoint. Snapshotting here
+	// would replace the shared parent's checkpoint while sibling reviewers may
+	// still be using the workspace. Leave parent lifecycle and fallback to the
+	// review controller, just as for provider and deadline failures.
+	errMsg, explanation, nextSteps := gracefulStopFailure(reason, false, false)
+	result := &models.SessionResult{
+		Error:               strPtr(errMsg),
+		FailureExplanation:  strPtr(explanation),
+		FailureCategory:     strPtr(FailureCategoryTimeout),
+		FailureNextSteps:    append([]string(nil), nextSteps...),
+		FailureRetryAdvised: true,
+	}
+	return o.failCodeReviewThreadTurn(ctx, session, threadID, result, errMsg, activityExecution, log)
+}
+
 func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, activityExecution *activityPhaseExecution, log zerolog.Logger) {
 	checkpointCtx, checkpointCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer checkpointCancel()
@@ -10015,6 +10055,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	prompt *AgentPrompt,
 	result *AgentResult,
 	err error,
+	runtimeTracker *runtimeProgressTracker,
 	log zerolog.Logger,
 ) (*AgentResult, error) {
 	if agentType != models.AgentTypeCodex || result == nil || !isTokenExpiredError(result.Error) {
@@ -10038,7 +10079,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		retryLogErrCh <- o.streamLogs(ctx, sessionID, orgID, agentType, writeCtx, retryLogCh, nil)
+		retryLogErrCh <- o.streamLogs(ctx, sessionID, orgID, agentType, writeCtx, retryLogCh, runtimeTracker)
 	}()
 
 	result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
@@ -10062,6 +10103,7 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	result *AgentResult,
 	err error,
 	createBlockedMessage bool,
+	runtimeTracker *runtimeProgressTracker,
 	log zerolog.Logger,
 ) (*AgentResult, error, bool) {
 	signal := parseCredentialFailureSignal(result, time.Now())
@@ -10097,14 +10139,14 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		retryLogErrCh <- o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, retryLogCh, nil)
+		retryLogErrCh <- o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, retryLogCh, runtimeTracker)
 	}()
 	retryResult, retryErr := adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
 	close(retryLogCh)
 	retryLogWg.Wait()
 	retryErr = errors.Join(retryErr, <-retryLogErrCh)
 
-	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, retryResult, retryErr, log)
+	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, retryResult, retryErr, runtimeTracker, log)
 	if parseCredentialFailureSignal(retryResult, time.Now()).RateLimited {
 		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, retryResult, retryErr, log)
 		refreshedEnv = o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)

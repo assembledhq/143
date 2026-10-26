@@ -260,6 +260,16 @@ func (r *CancelRegistry) StopReason(sessionID uuid.UUID) StopReason {
 	return reason
 }
 
+// StopReasonScoped returns the graceful-stop reason for one running process.
+// A sibling process's policy stop does not affect this scope's reason.
+func (r *CancelRegistry) StopReasonScoped(sessionID, scopeID uuid.UUID) StopReason {
+	entry := r.scopedEntry(sessionID, scopeID)
+	if entry == nil {
+		return StopReasonNone
+	}
+	return entryReason(entry)
+}
+
 // CancelSession sends the agent's configured graceful interrupt and falls
 // back to context cancellation if the agent does not exit within a default
 // 30 second grace window. Returns true when the session was found.
@@ -291,18 +301,46 @@ func (r *CancelRegistry) RequestStop(sessionID uuid.UUID, reason StopReason, gra
 	}
 
 	for _, entry := range entries {
-		entry.mu.Lock()
-		if entry.reason == StopReasonNone || reason == StopReasonUserCancel {
-			entry.reason = reason
-		}
-		entry.mu.Unlock()
-
-		scopeID := entry.scopeID
-		entry.once.Do(func() {
-			go r.doCancel(sessionID, scopeID, entry, graceWindow)
-		})
+		r.requestEntryStop(sessionID, entry, reason, graceWindow)
 	}
 	return true
+}
+
+// RequestStopScoped initiates a graceful stop for one running process. An
+// absent scope returns false so its caller can cancel that process directly
+// without interrupting sibling processes in the session.
+func (r *CancelRegistry) RequestStopScoped(sessionID, scopeID uuid.UUID, reason StopReason, graceWindow time.Duration) bool {
+	entry := r.scopedEntry(sessionID, scopeID)
+	if entry == nil {
+		return false
+	}
+	r.requestEntryStop(sessionID, entry, reason, graceWindow)
+	return true
+}
+
+func (r *CancelRegistry) scopedEntry(sessionID, scopeID uuid.UUID) *cancelEntry {
+	if scopeID == uuid.Nil {
+		scopeID = sessionID
+	}
+	val, ok := r.mu.Load(sessionID)
+	if !ok {
+		return nil
+	}
+	group := val.(*cancelGroup)
+	group.mu.Lock()
+	defer group.mu.Unlock()
+	return group.entries[scopeID]
+}
+
+func (r *CancelRegistry) requestEntryStop(sessionID uuid.UUID, entry *cancelEntry, reason StopReason, graceWindow time.Duration) {
+	entry.mu.Lock()
+	if entry.reason == StopReasonNone || reason == StopReasonUserCancel {
+		entry.reason = reason
+	}
+	entry.mu.Unlock()
+	entry.once.Do(func() {
+		go r.doCancel(sessionID, entry.scopeID, entry, graceWindow)
+	})
 }
 
 // doCancel performs the interrupt + grace + force-stop escalation.
