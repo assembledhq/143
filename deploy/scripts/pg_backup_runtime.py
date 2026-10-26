@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import time
 
@@ -30,6 +31,48 @@ s3 =
     multipart_chunksize = 16MB
 '''
 SAMPLE_LIMIT = 240
+CHECKSUM_READ_BYTES_PER_SECOND = 32 * 1024 ** 2
+DUMP_WRITEBACK_BYTES = 64 * 1024 ** 2
+
+
+class DumpOutput:
+    """Bounded Linux writeback/drop-behind hints for the owned growing dump.
+
+    DONTNEED submits WB_SYNC_NONE writeback on Linux and discards only clean
+    pages. Revisit the preceding range on the next tick, after writes have had
+    time to complete. This is advisory, never a durability or rate guarantee;
+    pg_dump's final sync and the normal archive verification remain required.
+    """
+    def __init__(self):
+        self.offset = 0
+        self.previous = None
+        self.size = 0
+
+    def tick(self, path, expected):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and
+                    info.st_uid == os.geteuid() and not info.st_mode & 0o077 and
+                    (info.st_dev, info.st_ino) == (expected['device'], expected['inode']),
+                    'dump output identity changed')
+            require(info.st_size >= self.size, 'dump output shrank')
+            page = os.sysconf('SC_PAGE_SIZE')
+            end = info.st_size // page * page
+            count = min(DUMP_WRITEBACK_BYTES, end - self.offset)
+            # A zero-length fadvise means "through EOF", so never issue one.
+            if self.previous:
+                os.posix_fadvise(fd, *self.previous, os.POSIX_FADV_DONTNEED)
+            requested = (self.offset, count) if count else None
+            if requested:
+                os.posix_fadvise(fd, *requested, os.POSIX_FADV_DONTNEED)
+            self.previous = requested
+            self.offset += count
+            self.size = info.st_size
+            return dict(observed_bytes=self.size, advised_through_bytes=self.offset,
+                        requested_bytes=count, max_range_bytes=DUMP_WRITEBACK_BYTES)
+        finally:
+            os.close(fd)
 
 
 def proc_identity(pid):
@@ -180,6 +223,8 @@ class Guard:
         self.samples = []
         self.last_dump_sample = None
         self.violating_sample = None
+        self.dump_output = DumpOutput()
+        self.output_observation = None
 
     def inspect(self, target):
         # Absence must be proven by successful inventory, not a failed inspect
@@ -306,8 +351,23 @@ class Guard:
 
     def dump_evidence(self):
         return {key: value for key, value in (
-            ('last_dump_sample', self.last_dump_sample), ('violating_sample', self.violating_sample)
+            ('last_dump_sample', self.last_dump_sample), ('violating_sample', self.violating_sample),
+            ('dump_output', self.output_observation)
         ) if value is not None}
+
+    def maintain_dump_output(self, owned, data):
+        cg = cgroup_path(data['State']['Pid'])
+        require(data['Id'] in cg.name, 'dump client cgroup identity mismatch')
+        stats = dict(line.split() for line in (cg / 'memory.stat').read_text().splitlines())
+        events = dict(line.split() for line in (cg / 'memory.events').read_text().splitlines())
+        vm = dict(line.split() for line in Path('/proc/vmstat').read_text().splitlines())
+        counters = {key: int(stats[key]) for key in ('file_dirty', 'file_writeback')}
+        counters.update({key: int(events[key]) for key in ('high', 'max', 'oom', 'oom_kill')})
+        counters.update({key: int(vm[key]) for key in ('nr_dirty', 'nr_writeback')})
+        require(all(value >= 0 for value in counters.values()), 'invalid dump writeback telemetry')
+        self.output_observation = dict(at=now(), counters=counters,
+                                      client_io_stat=(cg / 'io.stat').read_text(),
+                                      **self.dump_output.tick(self.partial, owned['partial']))
 
     def observe_dump_resources(self, sample, previous, database, *, admission=False):
         observation = dict(at=now(), phase='admission' if admission else 'dump',
@@ -317,6 +377,8 @@ class Guard:
                            db_memory_full_limit_percent=1 if admission else self.db_memory_full_percent,
                            **swap_limits(self.allow_swap_bursts, admission=admission,
                                          swap_out_mib_per_second=self.swap_out_mib_per_second))
+        if self.output_observation is not None:
+            observation['dump_output'] = self.output_observation
         # Keep the triggering sample even if enforcement or a later backend
         # query fails. In-memory evidence also survives a failed history write.
         self.last_dump_sample = observation
@@ -353,6 +415,8 @@ class Guard:
                      owner_pid=self.owner_pid, owner_identity=self.owner_identity,
                      creation_started=False, creation_complete=False)
         atomic_json(self.record, owned)
+        require(hasattr(os, 'posix_fadvise') and hasattr(os, 'POSIX_FADV_DONTNEED'),
+                'Linux dump writeback advice unavailable')
         require(os.environ.get('DOCKER_HOST', '') in ('', 'unix:///var/run/docker.sock') and
                 not os.environ.get('DOCKER_CONTEXT'), 'local default Docker endpoint required')
         endpoint = invoke(['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], timeout=5).strip()
@@ -368,7 +432,8 @@ class Guard:
         sample = resources(self.policy.root, generation['pid'])
         self.observe_dump_resources(sample, None, generation, admission=True)
         owned.update(database=generation, file_limit=sample['free_bytes'] - self.policy.reserve - 4 * GIB,
-                     dump_client_cpus=self.dump_cpus)
+                     dump_client_cpus=self.dump_cpus,
+                     dump_writeback_max_range_bytes=DUMP_WRITEBACK_BYTES)
         limit = str(owned['file_limit'])
         command = ['docker', 'create', '--name', self.app, '--label', LABEL + '=' + self.app,
                    '--pull=never', '--network', 'container:' + generation['id'], '--restart=no',
@@ -446,6 +511,13 @@ class Guard:
                     raise
                 sample = resources(self.policy.root, owned['database']['pid'])
                 self.observe_dump_resources(sample, previous, owned['database'])
+                try:
+                    self.maintain_dump_output(owned, data)
+                except FileNotFoundError:
+                    latest = self.inspect(owned['container_id'])
+                    if latest and latest['State']['Status'] == 'exited':
+                        continue
+                    raise
                 self.backends(owned)
                 previous = sample
                 time.sleep(INTERVAL)
@@ -651,8 +723,10 @@ class TransferGuard(Guard):
     def checksum(self, path):
         self.phase = 'checksum'
         self.phase_deadline = time.monotonic() + self.policy.verify_timeout
+        self.timeline['checksum_read_bytes_per_second'] = CHECKSUM_READ_BYTES_PER_SECOND
         self.checkpoint('checksum_started')
-        checksum = sha256(path, tick=self.tick, drop_cache=True)
+        checksum = sha256(path, tick=self.tick, drop_cache=True,
+                          read_bytes_per_second=CHECKSUM_READ_BYTES_PER_SECOND)
         self.checkpoint('checksum_completed', enforce=False)
         return checksum
 
