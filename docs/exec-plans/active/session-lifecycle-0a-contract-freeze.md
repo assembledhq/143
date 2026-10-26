@@ -24,13 +24,17 @@ A job's version-1 binding is an immutable nonempty exact dispatch set. Only a ne
 ordinary-message job may batch selected unbound inputs. An answer or denial job
 has exactly one request intent and its associated message/inbox, never unrelated
 ordinary input. Dedupe collision, content equality and a nil enqueue ID cannot
-resolve a consumer or expand an existing payload.
+resolve a consumer or expand an existing payload. Persist digests only as
+64-character lowercase hexadecimal SHA-256 text; reject alternate encodings.
 
-Consumer states are `none`, `job` and `runtime`. `none` has neither consumer
-pointer. `job` requires its exact job; `runtime` requires its exact runtime.
-A runtime pointer must have immutable allocation evidence. A job and its runtime
-may both be retained only when that allocation proves they are the same logical
-binding. They are not competing consumers merely because both columns are set.
+Consumer states have one canonical encoding per phase. `none` has neither
+consumer pointer or allocation. `job` has only its exact job, no runtime or
+allocation. `runtime` requires both exact job and runtime plus immutable
+allocation evidence for that same tenant/lane and containing this dispatch ID.
+The two runtime-phase pointers identify one logical consumer, not two. Threadless
+execution needs a separate explicitly defined session-executor variant; it cannot
+masquerade as a lane runtime. The transition from job-only to its allocated runtime
+never changes the input set or makes the prior allocation disposable.
 Replacement is a later explicit reclaim/replay operation, never an input-set
 setter; it preserves every prior allocation and possible-acceptance receipt.
 
@@ -40,6 +44,11 @@ epochs. Admission compensation instead names the exact committed ingress,
 dispatch, epochs, claim token and turn; it cannot fabricate a provider result.
 The only stale-shared-state disposition belongs to successful own-receipt
 settlement. Admission, start, claim and acknowledgement remain strict.
+Turn inputs must fit PostgreSQL's nonnegative 32-bit integer range before any
+narrowing. Already-applied and stale-shared-state results contain no generic
+current-state notifications. A stale own-settlement's allowed attempt-drain
+reconciliation is a durable exact-attempt job in its transaction, not a generic
+notification or new-current-work permission.
 
 ## Shared workspace contracts
 
@@ -105,6 +114,15 @@ deleted, contradictory, malformed or unsupported active provenance returns
 `LIFECYCLE_GUARD_PROVENANCE_REQUIRED`; it never falls back to version 0.
 Mode resolution alone is not admission, readiness or activation authority.
 
+The decision matrix also fixes these error boundaries: missing exact parent is
+not-found, while a soft-deleted parent still retains provenance and is not hidden
+from protocol resolution (admission visibility is a later locked check). A
+version-0 parent with an active cutover, malformed shadow/normalizing metadata,
+or a positive parent with missing/non-active metadata is contradictory and fails
+closed. Active visible lanes must carry the supported stamp and a provider tuple
+covering their actual agent type; a visible version-0 lane under an active parent
+is not a legacy escape. A cutover CAS revision need not equal the protocol stamp.
+
 The shared test-only activated-session fixture uses one atomic configured READ
 COMMITTED transaction, exclusive interlock, parent/lane protocol stamps, exact
 epochs and an active cutover. It uses positive cutoff 1 (consistent with the
@@ -117,8 +135,10 @@ existing schema), writer minimum 1, and these versioned JSON shapes:
   `resume_identity`, `verification_protocol`, `conformance_receipt_id`.
 
 Version 1 is the supported envelope version. Receipt identities are nonzero UUIDs;
-tuple fields are exact nonempty identities, not wildcards. The fixture uses only
-synthetic values. It is not an operational activation procedure or a release
+tuple fields are exact nonempty identities, not wildcards, and provider values
+are valid agent types covering the fixture's actual parent and lane agents. The
+fixture uses cutover CAS revision 3, distinct from protocol stamp 1, with synthetic
+builds and receipts. It is not an operational activation procedure or a release
 receipt. H must eventually prove that its real activation produces the same
 invariants after validating durable release/normalization/provider evidence.
 
@@ -136,3 +156,10 @@ invariants after validating durable release/normalization/provider evidence.
 
 Whole-root conversion, answer admission, provider starts, full status-site joins,
 activation and production acceptance are not established by these component exits.
+
+Before their first consumers, C.1p owns certificate transition policy (fresh
+operation, no-op/idempotent handling and generation-change dispositions), E.1/C.2
+own the bounded short-lived observation policy and explicit disposition handling,
+and B.1 owns its combined current/historical settlement, lost-attempt and job-lease
+proof shapes. A.4 freezes typed ingress namespaces before adding integration
+producers. None of those later behavioral gates is supplied by a shape constructor.

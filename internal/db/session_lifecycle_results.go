@@ -116,6 +116,9 @@ func newSettlementResult[T lifecycleReceipt](receipt T, projection ProjectionDis
 	if err := projection.Validate(); err != nil {
 		return SettlementResult[T]{}, err
 	}
+	if projection != ProjectionApplied && len(effects) != 0 {
+		return SettlementResult[T]{}, errors.New("unchanged or stale projection cannot return current-state notifications")
+	}
 	if err := validateLifecycleResult(receipt, effects); err != nil {
 		return SettlementResult[T]{}, err
 	}
@@ -129,6 +132,9 @@ func (v SettlementResult[T]) Unpack() (T, ProjectionDisposition, []LifecycleEffe
 	}
 	if err := v.projection.Validate(); err != nil {
 		return zero, "", nil, err
+	}
+	if v.projection != ProjectionApplied && len(v.effects) != 0 {
+		return zero, "", nil, errors.New("unchanged or stale projection cannot return current-state notifications")
 	}
 	if err := validateLifecycleResult(v.ownReceipt, v.effects); err != nil {
 		return zero, "", nil, err

@@ -312,6 +312,11 @@ func TestWorkspaceReceiptConstructorsRejectIncompleteInputs(t *testing.T) {
 			o.Target.spec.TargetAvailability.State = WorkspaceUnavailable
 			return NewResumabilityReceipt(o)
 		}, ResumabilityReceipt{}},
+		{"verified live physical workspace unavailable", func(f workspaceContractFixture) (any, error) {
+			o := validResumabilityObservation(f)
+			o.Target.spec.Descriptor.spec.PhysicalAvailability.State = WorkspaceUnavailable
+			return NewResumabilityReceipt(o)
+		}, ResumabilityReceipt{}},
 		{"observation expiry must follow observation", func(f workspaceContractFixture) (any, error) {
 			o := validResumabilityObservation(f)
 			o.ExpiresAt = o.ObservedAt
@@ -768,6 +773,70 @@ func TestWorkspaceRestoreReceiptBindsExactSourceAvailability(t *testing.T) {
 			changedTarget, err := NewResumabilityTarget(targetSpec)
 			require.NoError(t, err, "comparison target must preserve an explicit selected restore source")
 			require.False(t, receipt.MatchesExact(f.identity, changedTarget, f.now), "source key/availability/receipt drift must invalidate an exact-target observation")
+		})
+	}
+}
+
+func TestWorkspaceCapabilityRequestRejectsWorkspaceContinuation(t *testing.T) {
+	t.Parallel()
+	f := newWorkspaceContractFixture(t)
+	spec := f.anchor.Spec()
+	request, err := NewCapabilityRequestIdentity(f.scope.RequestID, models.HumanInputRequestKindToolApproval,
+		"synthetic-capability-item", spec.PhaseID, spec.ProducerRuntimeID)
+	require.NoError(t, err, "capability request must retain its real item/phase/runtime without a provider request ID")
+	identity, err := NewWorkspaceContinuationResumeIdentity(f.scope, "fabricated-provider-request", spec.PhaseID,
+		*f.descriptor.Spec().Publication, "synthetic-answer-v1")
+	require.NoError(t, err, "a continuation variant can have complete shape while being incompatible with capability request identity")
+	spec.Request, spec.Identity = request, identity
+	anchor, err := NewInputWorkspaceAnchor(spec)
+	require.ErrorContains(t, err, "capability request", "capability request cannot borrow a freeform provider request ID for workspace continuation")
+	require.Equal(t, InputWorkspaceAnchor{}, anchor, "incompatible request/resume variants must return no immutable anchor")
+}
+
+func TestWorkspaceContinuationRestoreReceiptRequiresSelectedCheckpoint(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		mutate  func(*ResumabilityObservation)
+		wantErr bool
+	}{
+		{"exact usable source", func(*ResumabilityObservation) {}, false},
+		{"different source publication", func(o *ResumabilityObservation) { o.Target.spec.Source.spec.Publication.ID = uuid.New() }, true},
+		{"different source key", func(o *ResumabilityObservation) {
+			o.Target.spec.Source.spec.Publication.Key = "synthetic-other-checkpoint"
+		}, true},
+		{"different source receipt", func(o *ResumabilityObservation) { o.Target.spec.Source.spec.Publication.ReceiptID = uuid.New() }, true},
+		{"verified source unavailable", func(o *ResumabilityObservation) {
+			o.Target.spec.Source.spec.SnapshotAvailability.State = WorkspaceUnavailable
+		}, true},
+		{"unavailable source observation", func(o *ResumabilityObservation) {
+			o.Target.spec.Source.spec.SnapshotAvailability.State = WorkspaceUnavailable
+			o.Disposition = ResumabilityUnavailable
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newWorkspaceContractFixture(t)
+			identity, err := NewWorkspaceContinuationResumeIdentity(f.scope, "synthetic-native-request", f.anchor.Spec().PhaseID,
+				*f.descriptor.Spec().Publication, "synthetic-answer-v1")
+			require.NoError(t, err, "continuation fixture must bind its exact checkpoint publication")
+			targetSpec := f.target.Spec()
+			source := f.descriptor
+			targetSpec.Kind, targetSpec.Source = ResumabilityRestoreTarget, &source
+			target, err := NewResumabilityTarget(targetSpec)
+			require.NoError(t, err, "restore target fixture must retain an explicit selected checkpoint source")
+			observation := validResumabilityObservation(f)
+			observation.Identity, observation.Target = identity, target
+			tt.mutate(&observation)
+			receipt, err := NewResumabilityReceipt(observation)
+			if tt.wantErr {
+				require.Error(t, err, "continuation receipt must reject contradictory checkpoint identity or verified unavailable source")
+				require.Equal(t, ResumabilityReceipt{}, receipt, "contradictory source evidence must not form a receipt")
+				return
+			}
+			require.NoError(t, err, "receipt shape should retain an exact source with its explicit observation outcome")
+			require.Equal(t, observation, receipt.Observation(), "shape validation must preserve the complete source identity and outcome")
 		})
 	}
 }

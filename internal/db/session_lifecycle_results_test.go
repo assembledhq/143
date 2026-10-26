@@ -80,7 +80,7 @@ func TestLifecycleResultContract(t *testing.T) {
 				receipt.(*lifecycleContractReceipt).fence = AdmissionFence{}
 			}
 			admission, admissionErr := newAdmissionResult(receipt, effects)
-			settlement, settlementErr := newSettlementResult(receipt, ProjectionStaleSharedState, effects)
+			settlement, settlementErr := newSettlementResult(receipt, ProjectionApplied, effects)
 			if tt.defaultResult {
 				admission = AdmissionResult[lifecycleReceipt]{}
 				settlement = SettlementResult[lifecycleReceipt]{}
@@ -112,7 +112,7 @@ func TestLifecycleResultContract(t *testing.T) {
 			require.Equal(t, []LifecycleEffect{effect}, notifications, "caller mutation cannot replace retained effects")
 			require.NoError(t, settleErr, "valid historical own settlement may preserve a successor's shared state")
 			require.Equal(t, receipt, own, "settlement returns exactly its own receipt")
-			require.Equal(t, ProjectionStaleSharedState, disposition, "stale projection is explicit and confined to settlement")
+			require.Equal(t, ProjectionApplied, disposition, "only an applied projection returns current-state notifications")
 			require.Equal(t, []LifecycleEffect{effect}, settledNotifications, "settlement preserves independent immutable effects")
 			notifications[0] = LifecycleEffect{}
 			_, again, err := admission.Unpack()
@@ -172,6 +172,47 @@ func TestLifecycleEffectShape(t *testing.T) {
 			if tt.lane {
 				require.Equal(t, laneID, actualLane, "notification retains its exact lane")
 			}
+		})
+	}
+}
+
+func TestLifecycleSettlementEffectDisposition(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		projection      ProjectionDisposition
+		notify, invalid bool
+	}{
+		{name: "applied projection may notify", projection: ProjectionApplied, notify: true},
+		{name: "applied own receipt without notification", projection: ProjectionApplied},
+		{name: "already applied has no effects", projection: ProjectionAlreadyApplied},
+		{name: "stale shared state preserves own receipt only", projection: ProjectionStaleSharedState},
+		{name: "already applied cannot repeat effects", projection: ProjectionAlreadyApplied, notify: true, invalid: true},
+		{name: "stale shared state cannot wake current work", projection: ProjectionStaleSharedState, notify: true, invalid: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, fence := uuid.New(), newLifecycleContractFence(t)
+			receipt := &lifecycleContractReceipt{id: uuid.New(), orgID: orgID, fence: fence}
+			var effects []LifecycleEffect
+			if tt.notify {
+				effect, err := newLifecycleEffect(LifecycleEffectWakeJobs, orgID, fence.SessionID(), nil)
+				require.NoError(t, err, "create scoped notification data to test projection-specific effect rules")
+				effects = []LifecycleEffect{effect}
+			}
+			result, err := newSettlementResult(receipt, tt.projection, effects)
+			if tt.invalid {
+				require.Error(t, err, "stale or unchanged projection must not notify or schedule new current-state work")
+				require.Equal(t, SettlementResult[*lifecycleContractReceipt]{}, result, "invalid projection/effect combination exposes no own receipt or effects")
+				return
+			}
+			require.NoError(t, err, "valid own settlement can preserve its exact receipt independently of shared projection")
+			own, projection, actualEffects, err := result.Unpack()
+			require.NoError(t, err, "valid settlement receipt and projection remain independently observable")
+			require.Equal(t, receipt, own, "stale shared state cannot lose or fabricate the settled own receipt")
+			require.Equal(t, tt.projection, projection, "projection disposition remains explicit")
+			require.Equal(t, effects, actualEffects, "only an applied projection may return generic notifications")
 		})
 	}
 }
