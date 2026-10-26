@@ -1636,6 +1636,30 @@
       ]
     },
     {
+      "id": "internal/db/session_thread_credential_failure.go:SessionThreadStore.FailCredentialLookupForDeadLetter:sql:1",
+      "source_sha256": "87ef063178f9d530812b997d85364e5f077a88a63fa265abf3178f8b14de5527",
+      "classification": "nonterminal-consumer",
+      "action_0a": "For each session/thread-scoped no-active-work or competing-input clause, use the shared nonterminal-consumer/parked-control test before treating work as absent, drained or failed. Keep exact terminal-job clauses terminal-only and execution-owner clauses running-only. Preserve domain PR/automation locks, job-type filters and identity; close stale parked controls through SupersedeUnlaunchedIntentInTx before releasing their logical lane.",
+      "reason": "Credential lookup exhaustion retains the exact released terminal predecessor job and excludes pending/running replacement work under the same PR/session/thread protocol as workspace preparation. A terminal predecessor alone does not prove absence of a parked successor.",
+      "evidence": [
+        "internal/db/session_thread_credential_failure.go:55",
+        "j . status = 'dead_letter'",
+        "replacement . status in ( 'pending' , 'running' )"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "j . status = 'dead_letter'",
+          "classification": "nonterminal-consumer",
+          "action_0a": "For each session/thread-scoped no-active-work or competing-input clause, use the shared nonterminal-consumer/parked-control test before treating work as absent, drained or failed. Keep exact terminal-job clauses terminal-only and execution-owner clauses running-only. Preserve domain PR/automation locks, job-type filters and identity; close stale parked controls through SupersedeUnlaunchedIntentInTx before releasing their logical lane."
+        },
+        {
+          "fact": "replacement . status in ( 'pending' , 'running' )",
+          "classification": "nonterminal-consumer",
+          "action_0a": "For each session/thread-scoped no-active-work or competing-input clause, use the shared nonterminal-consumer/parked-control test before treating work as absent, drained or failed. Keep exact terminal-job clauses terminal-only and execution-owner clauses running-only. Preserve domain PR/automation locks, job-type filters and identity; close stale parked controls through SupersedeUnlaunchedIntentInTx before releasing their logical lane."
+        }
+      ]
+    },
+    {
       "id": "internal/db/session_thread_workspace_failure.go:SessionThreadStore.FailWorkspaceWaitForDeadLetter:sql:1",
       "source_sha256": "0c4e3387ea76d37a898b21f8783ce2e15519bd33f4221699dea496ad4388afda",
       "classification": "nonterminal-consumer",

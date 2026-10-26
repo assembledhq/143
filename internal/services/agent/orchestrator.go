@@ -3436,7 +3436,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	sandboxCfg.OrgID = run.OrgID.String()
 	sandboxCfg.Purpose = "agent_run"
 	credentialResolution := o.env.ResolveForModelWithCredential(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID, stringPtrValue(run.ModelOverride))
-	if lookupErr := o.executionCredentialLookupError(ctx, run, primaryThreadID, credentialResolution); lookupErr != nil {
+	if lookupErr := o.executionCredentialLookupError(ctx, run, primaryThreadID, turnNumber, credentialResolution); lookupErr != nil {
 		return lookupErr
 	}
 	sandboxCfg.Env = credentialResolution.Env
@@ -4042,11 +4042,6 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 			elapsed := time.Since(runStartedAt).Round(time.Second)
 			o.failTimedOutSession(ctx, run, elapsed, 0, err, log, activityExecution)
 			return fmt.Errorf("%w after %s: %w", ErrSessionTimedOut, elapsed, err)
-		}
-		var lookupErr *executionCredentialLookupFailure
-		if errors.As(err, &lookupErr) {
-			completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
-			return err
 		}
 		failureAlreadyRecorded := isRunFailureRecorded(err)
 		if !failureAlreadyRecorded {
@@ -4810,7 +4805,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "continue_session"
 	credentialResolution := o.env.ResolveForModelWithCredential(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride))
-	if lookupErr := o.executionCredentialLookupError(ctx, session, threadID, credentialResolution); lookupErr != nil {
+	if lookupErr := o.executionCredentialLookupError(ctx, session, threadID, messageTurnNumber, credentialResolution); lookupErr != nil {
 		return lookupErr
 	}
 	sandboxCfg.Env = credentialResolution.Env
@@ -6225,11 +6220,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 			o.failTimedOutSession(ctx, session, elapsed, messageTurnNumber, err, log, activityExecution)
 			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, messageTurnNumber, elapsed, err)
-		}
-		var lookupErr *executionCredentialLookupFailure
-		if errors.As(err, &lookupErr) {
-			completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
-			return err
 		}
 		if isRunFailureRecorded(err) && isCodeReviewThreadTurn(session, threadID) {
 			return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, err)
@@ -8078,7 +8068,7 @@ func (o *Orchestrator) failTimedOutSession(ctx context.Context, run *models.Sess
 // It returns the resolved billing mode so downstream usage normalization can
 // distinguish direct provider-reported USD from derived subscription credits.
 func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
-	if lookupErr := o.executionCredentialLookupError(ctx, run, threadID, sandbox.credentialResolution); lookupErr != nil {
+	if lookupErr := o.executionCredentialLookupError(ctx, run, threadID, run.CurrentTurn+1, sandbox.credentialResolution); lookupErr != nil {
 		return TokenBillingModeUnknown, lookupErr
 	}
 	// For Codex, OPENAI_API_KEY is only populated when AgentEnv resolved an
@@ -8856,7 +8846,7 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 // over the legacy ANTHROPIC_API_KEY fallback. The run only fails when neither
 // path is configured.
 func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
-	if lookupErr := o.executionCredentialLookupError(ctx, run, threadID, sandbox.credentialResolution); lookupErr != nil {
+	if lookupErr := o.executionCredentialLookupError(ctx, run, threadID, run.CurrentTurn+1, sandbox.credentialResolution); lookupErr != nil {
 		return TokenBillingModeUnknown, lookupErr
 	}
 	claudeCodeVersion := o.detectClaudeCodeVersion(ctx, sandbox)
@@ -10200,8 +10190,11 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log, sandbox)
 
 	resolution := o.resolveSessionCredentials(ctx, session, sandboxCfg)
-	if lookupErr := o.executionCredentialLookupError(ctx, session, writeCtx.ThreadID, resolution); lookupErr != nil {
-		return result, lookupErr, false
+	if resolution.credentialLookupErr != nil {
+		// A already executed and its input may be durably acknowledged. Settle
+		// that result normally rather than replaying the turn on a lookup retry.
+		log.Warn().Err(resolution.credentialLookupErr).Msg("fallback credential lookup failed after agent execution; preserving executed result")
+		return result, err, false
 	}
 	refreshedEnv := resolution.Env
 	if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
@@ -10250,8 +10243,11 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 		// Probe availability only. This candidate never executes, so keep the
 		// sandbox bound to the fallback credential whose result is returned.
 		probe := o.resolveSessionCredentials(ctx, session, sandboxCfg)
-		if lookupErr := o.executionCredentialLookupError(ctx, session, writeCtx.ThreadID, probe); lookupErr != nil {
-			return retryResult, lookupErr, true
+		if probe.credentialLookupErr != nil {
+			// This probe cannot change an attempt that already ran. Preserve B's
+			// result and error, and do not publish a misleading auth-block message.
+			log.Warn().Err(probe.credentialLookupErr).Msg("credential availability probe failed after fallback execution; preserving executed result")
+			return retryResult, retryErr, true
 		}
 		refreshedEnv = probe.Env
 		if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
@@ -10294,7 +10290,11 @@ func (e *executionCredentialLookupFailure) Error() string {
 
 func (e *executionCredentialLookupFailure) Unwrap() error { return e.cause }
 
-func (o *Orchestrator) executionCredentialLookupError(ctx context.Context, session *models.Session, threadID *uuid.UUID, resolution *resolvedAgentEnv) error {
+type credentialLookupDeadLetterStore interface {
+	FailCredentialLookupForDeadLetter(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int, string) (bool, error)
+}
+
+func (o *Orchestrator) executionCredentialLookupError(ctx context.Context, session *models.Session, threadID *uuid.UUID, expectedTurn int, resolution *resolvedAgentEnv) error {
 	if resolution == nil || resolution.credentialLookupErr == nil {
 		return nil
 	}
@@ -10306,19 +10306,30 @@ func (o *Orchestrator) executionCredentialLookupError(ctx context.Context, sessi
 		return err
 	}
 	if isCodeReviewThreadTurn(session, threadID) {
-		// Exhaustion should unblock the review controller promptly without
-		// failing its parent or a sibling. Snapshot this exact turn's identity
-		// because job hooks run after the current attempt has unwound.
+		store, supported := o.sessionThreads.(credentialLookupDeadLetterStore)
+		jobID, hasJob := jobctx.JobIDFromContext(ctx)
+		if !supported || !hasJob || jobID == uuid.Nil || expectedTurn < 1 {
+			return err
+		}
+		// Snapshot the exact unstarted job/turn. The store atomically checks
+		// exhaustion, assessment ownership, and absence of a replacement runtime
+		// before marking this thread; a later or unrelated failure cannot do so.
 		sessionCopy, threadCopy := *session, *threadID
-		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
-			result := &models.SessionResult{
-				Error: strPtr(err.Error()), FailureCategory: strPtr(FailureCategoryTooling),
-				FailureExplanation: strPtr(explanation), FailureNextSteps: nextSteps, FailureRetryAdvised: true,
+		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, terminalErr error) {
+			if !errors.Is(terminalErr, err) {
+				return
 			}
-			if _, persistErr := o.failCodeReviewThreadTurn(hookCtx, &sessionCopy, &threadCopy, result, err.Error(), nil, o.logger); persistErr != nil {
+			writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+			defer cancelWrite()
+			failed, persistErr := store.FailCredentialLookupForDeadLetter(writeCtx, sessionCopy.OrgID, sessionCopy.ID, threadCopy, jobID, expectedTurn, explanation)
+			if persistErr != nil {
 				o.logger.Error().Err(persistErr).
 					Str("session_id", sessionCopy.ID.String()).Str("thread_id", threadCopy.String()).
 					Msg("failed to persist exhausted review credential lookup")
+			} else if failed {
+				o.logger.Warn().Err(terminalErr).
+					Str("session_id", sessionCopy.ID.String()).Str("thread_id", threadCopy.String()).
+					Msg("recorded exhausted review credential lookup for controller reconciliation")
 			}
 		})
 		return err

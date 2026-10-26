@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -380,4 +381,84 @@ func TestPreparedAuthModeOverridesCapturedCredentialBilling(t *testing.T) {
 	require.Equal(t, TokenBillingModeAPIKey, mode, "prepared auth should report the actual API-key fallback")
 	hint := o.buildTokenUsageHint(context.Background(), session.AgentType, orgID, nil, sandbox.Env, TokenUsageHint{BillingMode: mode}, sandbox)
 	require.Equal(t, TokenBillingModeAPIKey, hint.BillingMode, "usage must preserve the explicit auth-reported billing mode even when the captured candidate was a subscription")
+}
+
+type postExecutionLookupProvider struct {
+	*executionCredentialProvider
+	lookupError error
+}
+
+func (p *postExecutionLookupProvider) ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	if p.lookupError != nil {
+		return nil, p.lookupError
+	}
+	return p.executionCredentialProvider.ListResolvable(ctx, orgID, userID, provider)
+}
+
+func TestCredentialLookupAfterExecutionPreservesExecutedAttempt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		probe              bool
+		withExecutionError bool
+	}{
+		{name: "fallback lookup preserves A result"},
+		{name: "fallback lookup preserves A error", withExecutionError: true},
+		{name: "availability probe preserves B result", probe: true},
+		{name: "availability probe preserves B error", probe: true, withExecutionError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			orgID := uuid.New()
+			credentials := []models.DecryptedCodingCredential{
+				{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderOpenAI, Status: models.CodingCredentialStatusActive, Config: models.OpenAIConfig{APIKey: "synthetic-api-a"}},
+				{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderOpenAI, Status: models.CodingCredentialStatusActive, Config: models.OpenAIConfig{APIKey: "synthetic-api-b"}},
+			}
+			lookupErr := errors.New("synthetic auxiliary lookup failed")
+			coding := &postExecutionLookupProvider{executionCredentialProvider: &executionCredentialProvider{rows: credentials, picks: append([]models.DecryptedCodingCredential(nil), credentials...)}}
+			provider := &envSandboxProvider{}
+			env := NewAgentEnv(AgentEnvDeps{CodingCredentials: coding, Provider: provider, Logger: zerolog.Nop()})
+			o := &Orchestrator{env: env, provider: provider, logger: zerolog.Nop()}
+			session := &models.Session{ID: uuid.New(), OrgID: orgID, AgentType: models.AgentTypeCodex}
+			resolution := env.ResolveForModelWithCredential(context.Background(), orgID, session.AgentType, nil, "")
+			sandbox := sandboxWithCredentialResolution(&Sandbox{ID: "executed-lookup", HomeDir: "/home/test"}, resolution, resolution.Env)
+			initial := &AgentResult{Error: "429 too many requests", Summary: "executed A", ExitCode: 1}
+			fallback := &AgentResult{Error: "429 too many requests", Summary: "executed B", ExitCode: 1}
+			var executionErr error
+			if tt.withExecutionError {
+				executionErr = errors.New("synthetic executed provider error")
+			}
+			if !tt.probe {
+				coding.lookupError = lookupErr
+			}
+			calls := 0
+			adapter := executionCredentialAdapter{execute: func(*Sandbox, *AgentPrompt, chan<- LogEntry) (*AgentResult, error) {
+				calls++
+				coding.lookupError = lookupErr
+				return fallback, executionErr
+			}}
+			ctx := jobctx.WithDeadLetterHooks(context.Background())
+
+			actual, err, retried := o.retrySessionOnCredentialRateLimit(ctx, session, TranscriptWriteContext{}, SandboxConfig{HomeDir: sandbox.HomeDir, Env: sandbox.Env}, sandbox, adapter, context.Background(), &AgentPrompt{}, initial, executionErr, true, nil, zerolog.Nop())
+			jobctx.RunDeadLetterHooks(ctx, err)
+
+			expectedResult, expectedCalls, expectedCredential := initial, 0, credentials[0].ID
+			if tt.probe {
+				expectedResult, expectedCalls, expectedCredential = fallback, 1, credentials[1].ID
+			}
+			require.Same(t, expectedResult, actual, "auxiliary lookup failure must retain the exact result from the last executed attempt")
+			require.Equal(t, expectedCalls, calls, "lookup failure must not launch an unbound attempt or replay an executed one")
+			require.Equal(t, tt.probe, retried, "retry reporting should describe only whether B actually executed")
+			require.Equal(t, expectedCredential, sandbox.credentialResolution.Credential.Credential.ID, "the retained result must remain bound to the credential that executed it")
+			require.NotErrorIs(t, err, lookupErr, "auxiliary lookup errors must not replace an executed attempt's return error")
+			if executionErr != nil {
+				require.ErrorIs(t, err, executionErr, "the original executed attempt's error chain should be preserved")
+			} else {
+				require.NoError(t, err, "an availability-only lookup cannot manufacture a new execution error")
+			}
+		})
+	}
 }

@@ -44,7 +44,7 @@ func (p *transientExecutionCredentialProvider) ListResolvable(ctx context.Contex
 	return p.mockCodingCredentialProvider.ListResolvable(ctx, orgID, userID, provider)
 }
 
-func TestExecutionCredentialLookupFailureRemainsTransient(t *testing.T) {
+func TestExecutionCredentialLookupFailureRespectsExecutionBoundary(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -107,22 +107,31 @@ func TestExecutionCredentialLookupFailureRemainsTransient(t *testing.T) {
 				err = orchestrator.RunAgent(ctx, session)
 			}
 
-			require.ErrorIs(t, err, lookupErr, "a failed lookup should preserve the transient infrastructure cause")
 			require.Equal(t, tt.successfulPicks, executions, "no CLI may run with a failed or unbound credential lookup")
-			require.Empty(t, d.sessions.getFailureUpdates(), "a transient credential lookup must not write permanent missing-credential failure metadata")
-			require.Empty(t, d.sessions.getResultUpdates(), "lookup retries must not terminalize the session inline")
+			require.Empty(t, d.sessions.getFailureUpdates(), "lookup failure must not write permanent missing-credential failure metadata")
 			for _, message := range d.messages.getMessages() {
-				require.NotEqual(t, models.MessageRoleAssistant, message.Role, "lookup errors must not publish missing-credential or reconnect guidance during retries")
+				require.NotEqual(t, models.MessageRoleAssistant, message.Role, "lookup errors must not publish missing-credential or reconnect guidance")
 			}
-			if tt.successfulPicks > 0 {
+			if tt.successfulPicks == 0 {
+				require.ErrorIs(t, err, lookupErr, "a lookup failure before any CLI starts should retain its transient infrastructure cause")
+				require.Empty(t, d.sessions.getResultUpdates(), "pre-execution lookup retries must not terminalize the session inline")
+				jobctx.RunDeadLetterHooks(ctx, err)
+				failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryTooling)
+				require.Len(t, failures, 1, "exhausted pre-execution lookup retries should publish one infrastructure failure")
+				require.Equal(t, "Coding credentials could not be loaded because of a temporary infrastructure error. Retry the session.", *failures[0].result.FailureExplanation, "exhausted lookup failures should explain the infrastructure failure without blaming credentials")
+				require.Equal(t, []string{"Retry the session when the credential service is available"}, failures[0].result.FailureNextSteps, "credential infrastructure errors should provide retry guidance rather than reconnect guidance")
+			} else {
+				require.ErrorContains(t, err, "429 too many requests", "a lookup failure after execution must preserve the executed attempt's rate-limit outcome")
+				require.NotErrorIs(t, err, lookupErr, "an auxiliary lookup must not turn an already-executed turn into a replayable startup error")
+				updates := d.sessions.getResultUpdates()
+				require.Len(t, updates, 1, "the already-executed turn must settle through its normal terminal result path")
+				require.Equal(t, models.SessionStatusFailed, updates[0].status, "the executed rate-limit failure should be durable before returning to the worker")
+				require.Equal(t, "429 too many requests", *updates[0].result.Error, "settlement must retain the executed provider error")
 				require.Equal(t, tt.successfulPicks, len(coding.rateLimitedIDs), "only credentials whose CLIs ran may receive the preceding rate-limit health signal")
+				jobctx.RunDeadLetterHooks(ctx, err)
+				require.Len(t, d.sessions.getResultUpdates(), 1, "post-execution lookups must not register a competing infrastructure exhaustion hook")
+				require.Empty(t, d.sessions.getResultsWithFailureCategory(agent.FailureCategoryTooling), "a post-execution lookup must not overwrite the settled provider result with a startup failure")
 			}
-
-			jobctx.RunDeadLetterHooks(ctx, err)
-			failures := d.sessions.getResultsWithFailureCategory(agent.FailureCategoryTooling)
-			require.Len(t, failures, 1, "exhausted lookup retries should publish one infrastructure failure")
-			require.Equal(t, "Coding credentials could not be loaded because of a temporary infrastructure error. Retry the session.", *failures[0].result.FailureExplanation, "exhausted lookup failures should explain the infrastructure failure without blaming credentials")
-			require.Equal(t, []string{"Retry the session when the credential service is available"}, failures[0].result.FailureNextSteps, "credential infrastructure errors should provide retry guidance rather than reconnect guidance")
 		})
 	}
 }
@@ -186,11 +195,12 @@ func TestReviewCredentialLookupFailureDoesNotRegisterParentFailureHook(t *testin
 			d.sessionThreads = &mockSessionThreadStore{getByIDResult: &models.SessionThread{ID: threadID, SessionID: session.ID, OrgID: orgID}}
 			messageID := int64(7)
 			d.messages.messages = []models.SessionMessage{{ID: messageID, SessionID: session.ID, OrgID: orgID, ThreadID: &threadID, TurnNumber: 2, Role: models.MessageRoleUser, Content: "Run the synthetic review."}}
-			ctx := jobctx.WithDeadLetterHooks(context.Background())
+			jobID := uuid.New()
+			ctx := jobctx.WithJobID(jobctx.WithDeadLetterHooks(context.Background()), jobID)
 			opts := &agent.ContinueSessionOptions{ThreadID: &threadID, QueuedMessageID: &messageID}
 			orchestrator := buildOrchestrator(d)
 			if tt.recheck {
-				ctx = jobctx.WithJobID(jobctx.WithLockToken(ctx, uuid.New()), uuid.New())
+				ctx = jobctx.WithLockToken(ctx, uuid.New())
 				opts.CodeReviewTurn = &agent.CodeReviewTurnContinueOptions{AssessmentID: uuid.New(), ThreadID: threadID, ExpectedTurn: 2, MessageID: messageID}
 				orchestrator.SetCodeReviewTurnStore(credentialRecheckTurnStore{})
 			}
@@ -204,12 +214,12 @@ func TestReviewCredentialLookupFailureDoesNotRegisterParentFailureHook(t *testin
 			require.Empty(t, d.sessions.getFailureUpdates(), "review credential infrastructure failures must not register permanent auth failures")
 			require.NotContains(t, d.sessionThreads.statusesForThread(primaryThreadID), models.ThreadStatusFailed, "review exhaustion must leave the primary orchestrator thread untouched")
 			require.NotContains(t, d.sessionThreads.statusesForThread(siblingThreadID), models.ThreadStatusFailed, "review exhaustion must leave sibling reviewer threads untouched")
-			if tt.recheck {
-				require.Empty(t, d.sessionThreads.resultsForThread(threadID), "fenced rechecks must leave exhaustion bookkeeping to the receipt worker")
-			} else {
-				require.Equal(t, []models.ThreadStatus{models.ThreadStatusFailed}, d.sessionThreads.statusesForThread(threadID), "exhausted ordinary review lookup should fail only the exact thread so its controller can recover promptly")
-				require.Equal(t, []models.SessionResult{{Error: strPtr(err.Error()), FailureCategory: strPtr(agent.FailureCategoryTooling), FailureExplanation: strPtr("Coding credentials could not be loaded because of a temporary infrastructure error. Retry the session."), FailureNextSteps: []string{"Retry the session when the credential service is available"}, FailureRetryAdvised: true}}, d.sessionThreads.resultsForThread(threadID), "review exhaustion should retain infrastructure classification and retry guidance on the failed thread")
+			expectedCalls := []credentialLookupDeadLetterCall(nil)
+			if !tt.recheck {
+				expectedCalls = []credentialLookupDeadLetterCall{{orgID: orgID, sessionID: session.ID, threadID: threadID, jobID: jobID, expectedTurn: 2, detail: "Coding credentials could not be loaded because of a temporary infrastructure error. Retry the session."}}
 			}
+			require.Equal(t, expectedCalls, d.sessionThreads.credentialLookupDeadLetters, "ordinary review exhaustion must target its exact job/thread/turn through the guarded store; rechecks remain receipt-owned")
+			require.Empty(t, d.sessionThreads.resultsForThread(threadID), "lookup exhaustion must never use an unfenced thread result update")
 		})
 	}
 }

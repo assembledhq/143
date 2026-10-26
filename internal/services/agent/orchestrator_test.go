@@ -1517,12 +1517,22 @@ type testDeps struct {
 // makes during failure-path bookkeeping. Methods are no-ops on the happy
 // path; tests that exercise the worker-ownership / sandbox-failure cleanup
 // blocks use updateStatusCalls to assert thread.status was reset.
+type credentialLookupDeadLetterCall struct {
+	orgID        uuid.UUID
+	sessionID    uuid.UUID
+	threadID     uuid.UUID
+	jobID        uuid.UUID
+	expectedTurn int
+	detail       string
+}
+
 type mockSessionThreadStore struct {
-	mu                sync.Mutex
-	eventHook         func(string)
-	getByIDResult     *models.SessionThread
-	updateResultErr   error
-	updateStatusCalls []struct {
+	mu                          sync.Mutex
+	eventHook                   func(string)
+	getByIDResult               *models.SessionThread
+	updateResultErr             error
+	credentialLookupDeadLetters []credentialLookupDeadLetterCall
+	updateStatusCalls           []struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
 	}
@@ -1587,6 +1597,13 @@ func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uui
 		}{threadID: threadID, status: status, result: *result})
 	}
 	return nil
+}
+
+func (m *mockSessionThreadStore) FailCredentialLookupForDeadLetter(_ context.Context, orgID, sessionID, threadID, jobID uuid.UUID, expectedTurn int, detail string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.credentialLookupDeadLetters = append(m.credentialLookupDeadLetters, credentialLookupDeadLetterCall{orgID: orgID, sessionID: sessionID, threadID: threadID, jobID: jobID, expectedTurn: expectedTurn, detail: detail})
+	return true, nil
 }
 
 func (m *mockSessionThreadStore) ClearPendingMessages(_ context.Context, _, _ uuid.UUID) error {
