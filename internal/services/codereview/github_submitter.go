@@ -133,11 +133,13 @@ type UpsertReviewStatusCommentRequest struct {
 }
 
 type HideReviewSummaryRequest struct {
-	InstallationID int64
-	Repository     string
-	PullNumber     int
-	ReviewID       int64
-	OutputKey      string
+	InstallationID  int64
+	Repository      string
+	PullNumber      int
+	ReviewID        int64
+	OutputKey       string
+	StatusCommentID int64
+	Summary         string
 }
 
 type PullRequestFilesRequest struct {
@@ -226,7 +228,7 @@ func (s *GitHubSubmitter) UpsertReviewStatusComment(ctx context.Context, req Ups
 	return s.createIssueComment(ctx, token, owner, repo, req.PullNumber, markedBody)
 }
 
-// HideReviewSummary removes the visible fallback from a formal review after
+// HideReviewSummary replaces the formal review's fallback with its verdict and a link after
 // the rolling PR comment has durably received the same result.
 func (s *GitHubSubmitter) HideReviewSummary(ctx context.Context, req HideReviewSummaryRequest) error {
 	if s == nil || s.tokens == nil {
@@ -248,6 +250,13 @@ func (s *GitHubSubmitter) HideReviewSummary(ctx context.Context, req HideReviewS
 	if strings.TrimSpace(req.OutputKey) == "" {
 		return fmt.Errorf("output key is required")
 	}
+	if req.StatusCommentID <= 0 {
+		return fmt.Errorf("status comment id is required")
+	}
+	summary := strings.TrimSpace(req.Summary)
+	if summary == "" {
+		return fmt.Errorf("review summary is required")
+	}
 	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
@@ -260,7 +269,8 @@ func (s *GitHubSubmitter) HideReviewSummary(ctx context.Context, req HideReviewS
 		repo,
 		req.PullNumber,
 		req.ReviewID,
-		withCodeReviewOutputMarker("", req.OutputKey),
+		withCodeReviewOutputMarker(summary+fmt.Sprintf("\n\n[View review summary](https://github.com/%s/%s/pull/%d#issuecomment-%d)",
+			url.PathEscape(owner), url.PathEscape(repo), req.PullNumber, req.StatusCommentID), req.OutputKey),
 	)
 	if err != nil {
 		return fmt.Errorf("hide GitHub review summary: %w", err)

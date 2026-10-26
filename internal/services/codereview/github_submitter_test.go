@@ -146,31 +146,87 @@ func TestGitHubSubmitter_UpsertReviewStatusCommentRecoversStaleIDFromAppAuthored
 	require.Equal(t, int64(8001), patchedCommentID, "marker recovery must ignore a marker authored by another GitHub app")
 }
 
-func TestGitHubSubmitter_HideReviewSummaryReplacesFallbackBodyWithMarker(t *testing.T) {
+func TestGitHubSubmitter_HideReviewSummaryLinksToPublishedSummary(t *testing.T) {
 	t.Parallel()
 
-	var gotBody map[string]string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, http.MethodPut, r.Method, "summary hiding should update the existing review")
-		require.Equal(t, "/repos/acme/repo/pulls/42/reviews/143", r.URL.Path, "summary hiding should target the persisted review")
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "summary update body should decode")
-		w.Header().Set("Content-Type", "application/json")
-		_, err := w.Write([]byte(`{"id":143,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-143"}`))
-		require.NoError(t, err, "test response should write the updated review")
-	}))
-	defer server.Close()
+	tests := []struct {
+		name    string
+		summary string
+	}{
+		{name: "approved", summary: "✅ **143 Code Reviewer approved this PR**"},
+		{name: "needs human review", summary: "❌ **143 Code Reviewer needs human review**"},
+		{name: "not approved", summary: "❌ **143 Code Reviewer completed its review without approving this PR**"},
+		{name: "failed", summary: "143 Code Reviewer could not complete this review."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
-	err := submitter.HideReviewSummary(context.Background(), HideReviewSummaryRequest{
-		InstallationID: 99,
-		Repository:     "acme/repo",
-		PullNumber:     42,
-		ReviewID:       143,
-		OutputKey:      "review-output",
-	})
+			var gotBody map[string]string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPut, r.Method, "summary hiding should update the existing review")
+				require.Equal(t, "/repos/acme/repo/pulls/42/reviews/143", r.URL.Path, "summary hiding should target the persisted review")
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "summary update body should decode")
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write([]byte(`{"id":143,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-143"}`))
+				require.NoError(t, err, "test response should write the updated review")
+			}))
+			defer server.Close()
 
-	require.NoError(t, err, "HideReviewSummary should replace the fallback summary")
-	require.Equal(t, codeReviewOutputMarker("review-output"), gotBody["body"], "hidden review body should retain only the idempotency marker")
+			submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+			err := submitter.HideReviewSummary(context.Background(), HideReviewSummaryRequest{
+				InstallationID:  99,
+				Repository:      "acme/repo",
+				PullNumber:      42,
+				ReviewID:        143,
+				OutputKey:       "review-output",
+				StatusCommentID: 7331,
+				Summary:         tt.summary,
+			})
+
+			require.NoError(t, err, "HideReviewSummary should replace the fallback summary")
+			require.Equal(t, tt.summary+"\n\n[View review summary](https://github.com/acme/repo/pull/42#issuecomment-7331)\n\n"+codeReviewOutputMarker("review-output"), gotBody["body"], "formal review should show the verdict, link to its published summary, and retain the idempotency marker")
+		})
+	}
+}
+
+func TestGitHubSubmitter_HideReviewSummaryRequiresPublishedComment(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		commentID     int64
+		summary       string
+		expectedError string
+	}{
+		{name: "missing comment", commentID: 0, summary: "Review completed.", expectedError: "status comment id is required"},
+		{name: "invalid comment", commentID: -1, summary: "Review completed.", expectedError: "status comment id is required"},
+		{name: "missing verdict", commentID: 7331, expectedError: "review summary is required"},
+		{name: "blank verdict", commentID: 7331, summary: " \n\t ", expectedError: "review summary is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("an unpublished summary must not trigger a GitHub request")
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+
+			submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
+			err := submitter.HideReviewSummary(context.Background(), HideReviewSummaryRequest{
+				InstallationID:  99,
+				Repository:      "acme/repo",
+				PullNumber:      42,
+				ReviewID:        143,
+				OutputKey:       "review-output",
+				StatusCommentID: tt.commentID,
+				Summary:         tt.summary,
+			})
+			require.EqualError(t, err, tt.expectedError, "formal review should retain its fallback until a published comment and visible verdict are available")
+		})
+	}
 }
 
 func TestGitHubSubmitter_EmitsInstallationTelemetry(t *testing.T) {

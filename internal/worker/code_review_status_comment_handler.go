@@ -154,12 +154,16 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 				codeReviewMetadataTerminal(lockedLatest.Status) &&
 				lockedLatest.GitHubReviewID != nil {
 				reviewID = *lockedLatest.GitHubReviewID
+				// Retain the verdict from the same body just published to the rolling comment.
+				summary, _, _ := strings.Cut(body, "\n\n")
 				updateErr = updater.HideReviewSummary(lockCtx, codereviewsvc.HideReviewSummaryRequest{
-					InstallationID: repository.InstallationID,
-					Repository:     repositoryName,
-					PullNumber:     pullRequest.GitHubPRNumber,
-					ReviewID:       reviewID,
-					OutputKey:      lockedLatest.ReviewOutputKey,
+					InstallationID:  repository.InstallationID,
+					Repository:      repositoryName,
+					PullNumber:      pullRequest.GitHubPRNumber,
+					ReviewID:        reviewID,
+					OutputKey:       lockedLatest.ReviewOutputKey,
+					StatusCommentID: commentID,
+					Summary:         summary,
 				})
 				if updateErr != nil {
 					return fmt.Errorf("hide code review fallback summary: %w", updateErr)

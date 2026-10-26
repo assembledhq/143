@@ -33,6 +33,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 		storedCommentID           any
 		expectedExistingCommentID *int64
 		expectedBody              string
+		expectedSummary           string
 		expectedAdditionalBody    string
 		expectReassessmentHistory bool
 		expectedCalls             []string
@@ -95,6 +96,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			storedCommentID:           int64(7331),
 			expectedExistingCommentID: statusCommentInt64Ptr(7331),
 			expectedBody:              "143 Code Reviewer approved this PR.",
+			expectedSummary:           "143 Code Reviewer approved this PR.",
 			expectedCalls:             []string{"upsert", "hide"},
 		},
 		{
@@ -106,6 +108,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			storedCommentID:           int64(7331),
 			expectedExistingCommentID: statusCommentInt64Ptr(7331),
 			expectedBody:              "143 Code Reviewer did not approve this PR.",
+			expectedSummary:           "143 Code Reviewer did not approve this PR.",
 			expectedCalls:             []string{"upsert", "hide"},
 			hideErr:                   errors.New("github unavailable"),
 			expectErr:                 true,
@@ -119,6 +122,7 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			storedCommentID:           int64(7331),
 			expectedExistingCommentID: statusCommentInt64Ptr(7331),
 			expectedBody:              "143 Code Reviewer could not complete this review.",
+			expectedSummary:           "143 Code Reviewer could not complete this review.",
 			expectedCalls:             []string{"upsert", "hide"},
 		},
 		{
@@ -259,11 +263,13 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			require.Equal(t, tt.expectedCalls, submitter.calls, "fallback summary should only be hidden after the rolling comment is published")
 			if tt.lockedReviewID != nil {
 				require.Equal(t, codereviewsvc.HideReviewSummaryRequest{
-					InstallationID: 99,
-					Repository:     "acme/repo",
-					PullNumber:     42,
-					ReviewID:       *tt.lockedReviewID,
-					OutputKey:      "output-key",
+					InstallationID:  99,
+					Repository:      "acme/repo",
+					PullNumber:      42,
+					ReviewID:        *tt.lockedReviewID,
+					OutputKey:       "output-key",
+					StatusCommentID: 7331,
+					Summary:         tt.expectedSummary,
 				}, submitter.hideRequest, "completed review should hide the persisted fallback summary")
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "status comment handler should use org-scoped review, repository, and pull request reads")
