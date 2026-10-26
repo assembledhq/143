@@ -355,6 +355,8 @@ func TestLifecycleProtocolRetentionGuardsPostgres(t *testing.T) {
 		{name: "active cutover cannot clear activation", query: `UPDATE session_lifecycle_cutovers SET activated_at=NULL WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot clear cutoff", query: `UPDATE session_lifecycle_cutovers SET legacy_input_cutoff_id=NULL WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot clear normalization", query: `UPDATE session_lifecycle_cutovers SET normalization=NULL WHERE org_id=$1 AND session_id=$2`},
+		{name: "active cutover cannot overwrite normalization", query: `UPDATE session_lifecycle_cutovers SET normalization='{}'::jsonb WHERE org_id=$1 AND session_id=$2`},
+		{name: "active cutover cannot rewrite normalization receipt", query: `UPDATE session_lifecycle_cutovers SET normalization=jsonb_set(normalization,'{receipt_id}',to_jsonb(gen_random_uuid())) WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot clear capability", query: `UPDATE session_lifecycle_cutovers SET resumability_capability=NULL WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot clear minimum", query: `UPDATE session_lifecycle_cutovers SET minimum_writer_version=NULL WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot lower minimum", query: `UPDATE session_lifecycle_cutovers SET minimum_writer_version=0 WHERE org_id=$1 AND session_id=$2`},
@@ -372,6 +374,62 @@ func TestLifecycleProtocolRetentionGuardsPostgres(t *testing.T) {
 			requireSessionLifecycleSQLState(t, err, "55000", "retained active evidence must reject destructive regression before unrelated FKs or checks")
 			require.ErrorContains(t, err, "LIFECYCLE_GUARD_PROVENANCE_REQUIRED", "SQL retention failures must use the stable fail-closed protocol category")
 			require.Equal(t, before, lifecycleProtocolRows(t, context.Background(), pool, fixture.orgID, fixture.sessionID), "a rejected mutation must preserve the complete committed parent and cutover")
+		})
+	}
+}
+
+func TestLifecycleProtocolNormalizationExactNoopPostgres(t *testing.T) {
+	t.Parallel()
+	pool := newLifecycleScopeSnapshotPool(t)
+	fixture := seedActivatedLifecycleFixture(t, context.Background(), pool)
+	before := lifecycleProtocolRows(t, context.Background(), pool, fixture.orgID, fixture.sessionID)
+	_, err := pool.Exec(context.Background(), `UPDATE session_lifecycle_cutovers SET normalization=normalization WHERE org_id=$1 AND session_id=$2`, fixture.orgID, fixture.sessionID)
+	require.NoError(t, err, "an exact no-op must preserve the retained active normalization receipt without requiring replacement")
+	require.Equal(t, before, lifecycleProtocolRows(t, context.Background(), pool, fixture.orgID, fixture.sessionID), "a permitted exact no-op must preserve every retained field")
+}
+
+func TestLifecycleProtocolLegacySnapshotWritesPostgres(t *testing.T) {
+	t.Parallel()
+	pool := newLifecycleScopeSnapshotPool(t)
+	type deletionResult struct {
+		Affected    int64
+		Remaining   int
+		SoftDeleted bool
+	}
+	tests := []struct {
+		name       string
+		isolation  pgx.TxIsoLevel
+		hardDelete bool
+		want       deletionResult
+	}{
+		{name: "read committed soft delete", isolation: pgx.ReadCommitted, want: deletionResult{0, 1, true}},
+		{name: "repeatable read soft delete", isolation: pgx.RepeatableRead, want: deletionResult{0, 1, true}},
+		{name: "serializable soft delete", isolation: pgx.Serializable, want: deletionResult{0, 1, true}},
+		{name: "read committed explicit hard delete", isolation: pgx.ReadCommitted, hardDelete: true, want: deletionResult{1, 0, false}},
+		{name: "repeatable read explicit hard delete", isolation: pgx.RepeatableRead, hardDelete: true, want: deletionResult{1, 0, false}},
+		{name: "serializable explicit hard delete", isolation: pgx.Serializable, hardDelete: true, want: deletionResult{1, 0, false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, sessionID, _ := seedRuntimeSeedThread(t, pool)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: tt.isolation})
+			require.NoError(t, err, "begin the characterized version-zero writer without installing a version-one policy")
+			defer func() { _ = tx.Rollback(context.Background()) }()
+			_, err = tx.Exec(ctx, `UPDATE sessions SET title='Synthetic version-zero update' WHERE org_id=$1 AND id=$2`, orgID, sessionID)
+			require.NoError(t, err, "inactive parent updates must preserve characterized isolation compatibility")
+			if tt.hardDelete {
+				_, err = tx.Exec(ctx, `SET LOCAL app.allow_hard_delete = 'true'`)
+				require.NoError(t, err, "use the existing explicit transaction-local opt-in rather than changing the default soft-delete behavior")
+			}
+			tag, err := tx.Exec(ctx, `DELETE FROM sessions WHERE org_id=$1 AND id=$2`, orgID, sessionID)
+			require.NoError(t, err, "a never-activated session must preserve both ordinary soft deletion and explicitly opted-in hard deletion")
+			require.NoError(t, tx.Commit(ctx), "commit the complete legacy update/delete transaction under its original isolation")
+			actual := deletionResult{Affected: tag.RowsAffected()}
+			require.NoError(t, pool.QueryRow(ctx, `SELECT count(*), COALESCE(bool_and(deleted_at IS NOT NULL AND lifecycle_version=0 AND title='Synthetic version-zero update'), false) FROM sessions WHERE org_id=$1 AND id=$2`, orgID, sessionID).Scan(&actual.Remaining, &actual.SoftDeleted), "read back the exact committed legacy deletion result independently of the writer")
+			require.Equal(t, tt.want, actual, "default legacy deletion must retain its tombstone while explicit hard deletion removes the inactive parent")
 		})
 	}
 }
