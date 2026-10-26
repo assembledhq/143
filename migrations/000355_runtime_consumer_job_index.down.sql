@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_thread_runtimes_consumer_job;

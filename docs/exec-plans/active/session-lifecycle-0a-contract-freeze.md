@@ -31,12 +31,19 @@ Consumer states have one canonical encoding per phase. `none` has neither
 consumer pointer or allocation. `job` has only its exact job, no runtime or
 allocation. `runtime` requires both exact job and runtime plus immutable
 allocation evidence for that same tenant/lane and containing this dispatch ID.
+The runtime stores its own `allocation_expected_turn` alongside the allocation
+digest and input set. Current claim turns and mutable parent turns cannot
+substitute for that immutable recorded attempt turn.
 The two runtime-phase pointers identify one logical consumer, not two. Threadless
 execution needs a separate explicitly defined session-executor variant; it cannot
 masquerade as a lane runtime. The transition from job-only to its allocated runtime
 never changes the input set or makes the prior allocation disposable.
 Replacement is a later explicit reclaim/replay operation, never an input-set
 setter; it preserves every prior allocation and possible-acceptance receipt.
+
+An own-consumer exception verifies the actual request's tenant, session and lane,
+not just its stored request ID. Current job/runtime lease checks use fresh database
+statement time; application clocks cannot establish current lease authority.
 
 Current execution and historical own-result settlement have different sealed
 input types. Historical allocation does not imply a current lease or current
@@ -94,6 +101,56 @@ later explicit retention owner proves all obligations closed, retain references
 and their jobs/runtimes. That owner deletes resolved dependent receipts first,
 then dispatch/control references, then otherwise eligible jobs/runtimes. This
 freeze does not add an unbounded deletion worker or silently relax an FK.
+
+A.2's preparation representation has one current
+`session_runtime_start_preparations` row per `(org_id,job_id)`. It retains the
+fixed input set and recorded epochs, current preparation/claim tokens, exact
+target and resume-identity snapshots, and a separate physical-operation slot.
+Execution state is `preparing`, `authorized` or `closed`. Physical state is
+`none`, `reserved`, `in_progress`, `unknown`, `settled` or `fenced_drained`.
+Closing execution or revoking its token preserves unresolved operation identity
+and its restore-source association, including after the job becomes terminal.
+The scope/due/source indexes include unresolved physical work after closure.
+Whole-session physical scope conflicts with every lane; B/E must validate that a
+`target_only` operation cannot mutate shared workspace resources before using
+that narrower scope. A missing source projection cannot prove an object unused.
+
+The current whole-workspace recovery slot lives on `sessions` as
+`workspace_recovery_id`, `workspace_recovery_token`, `workspace_recovery` and
+`workspace_recovery_next_attempt_at`. Its versioned envelope retains the recorded
+session epoch, complete reservation spec, finite execution/physical disposition
+and physical observation. It cannot carry a lane fence. Any present slot blocks
+workspace execution until its owner releases it; deadlines and revoked execution
+do not release physical exclusion. The passive retention guard has no clear or
+replacement path. F must install the exact immutable accepted/outcome/isolation
+receipt check before adding conditional release. This current slot does not
+replace F's durable recovery history.
+
+These SQL checks establish shape and retention. B/E/F must decode full typed
+targets and observations and verify authoritative settlement at their locked
+writer seams. A parsed JSON object or a stored settled label supplies no host
+proof or provider-start permission.
+
+The retained dispatch control uses an explicit `schema_version=1` snapshot.
+It repeats the scalar receipt, version, state, due time and optional refund
+reference; retains the complete dedicated answer/denial binding and logical
+claim token/turn; and captures the exact resume identity, selected target and
+historical resumability outcome. Its full job-payload digest hashes the actual
+PostgreSQL `payload::text` representation, not a decoded and re-encoded map.
+That digest is distinct from the input dispatch digest. Finite no-launch and
+delivery-uncertain variants retain receipt/revocation/allocation references;
+decoding those references establishes no physical or no-launch proof.
+
+Control validity does not expire with an execution lease, preparation row or
+target observation. Row matching compares the complete actual dispatch/job
+association and requires an `awaiting_control` job to be parked with all lease
+and completion slots clear. The mirrored due time is captured at UTC microsecond
+precision before persisting snapshot and scalar; stored version-1 JSON with
+sub-microsecond due precision is refused. Checkpoint publication times are not
+normalized by this rule. The later E writers still own current actor and
+generation eligibility, revocation, the shared claim-keyed refund CAS and the
+ALL-allocation possible-acceptance check. A matching parked logical consumer
+does not grant execution or remove its competing-control exclusion.
 
 ## Retained activation provenance and the common fixture
 

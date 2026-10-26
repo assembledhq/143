@@ -36,6 +36,9 @@ func actionPostgres(t *testing.T, continuous bool) (*pgxpool.Pool, models.Automa
 	cfg, err := pgxpool.ParseConfig(dsn)
 	require.NoError(t, err, "parse connection")
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
+	// Each Reserve/Claim uses one transaction. Keep the eight concurrent
+	// callers below while bounding each parallel fixture to four connections.
+	cfg.MaxConns = 4
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "create pool")
 	t.Cleanup(pool.Close)
@@ -98,6 +101,33 @@ func reserveAction(t *testing.T, s *AutomationActionStore, a models.AutomationAc
 	require.NoError(t, err, "reserve independent step")
 	return result
 }
+func TestAutomationActionPostgresPoolConnectionBudget(t *testing.T) {
+	t.Parallel()
+	pool, _ := actionPostgres(t, false)
+	require.Equal(t, int32(4), pool.Config().MaxConns, "automation fixtures must bound connections while retaining independent concurrent transactions")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	transactions := make([]pgx.Tx, 0, 4)
+	for range 4 {
+		tx, err := pool.Begin(ctx)
+		require.NoError(t, err, "the fixture budget must support four simultaneously held independent transactions")
+		defer func() { _ = tx.Rollback(ctx) }()
+		transactions = append(transactions, tx)
+	}
+	require.Equal(t, int32(4), pool.Stat().AcquiredConns(), "all four transaction connections must be held concurrently rather than serialized")
+	waitCtx, waitCancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer waitCancel()
+	extra, err := pool.Acquire(waitCtx)
+	if extra != nil {
+		extra.Release()
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a fifth borrower must wait for the bounded pool instead of opening another server connection")
+	require.NoError(t, transactions[0].Rollback(ctx), "release exactly one held transaction without closing the fixture")
+	replacement, err := pool.Acquire(ctx)
+	require.NoError(t, err, "a waiting borrower must make progress after a transaction releases its slot")
+	replacement.Release()
+}
+
 func TestAutomationActionPostgresReservationAndFencing(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
