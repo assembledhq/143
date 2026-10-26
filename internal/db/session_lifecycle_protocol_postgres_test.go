@@ -343,7 +343,7 @@ func TestLifecycleProtocolRetentionGuardsPostgres(t *testing.T) {
 	pool := newLifecycleScopeSnapshotPool(t)
 	tests := []struct{ name, query string }{
 		{name: "positive parent cannot downgrade", query: `UPDATE sessions SET lifecycle_version=0 WHERE org_id=$1 AND id=$2`},
-		{name: "positive parent cannot hard delete", query: `DELETE FROM sessions WHERE org_id=$1 AND id=$2`},
+		{name: "positive parent cannot raw delete", query: `DELETE FROM sessions WHERE org_id=$1 AND id=$2`},
 		{name: "positive parent cannot move identity", query: `UPDATE sessions SET id=$3 WHERE org_id=$1 AND id=$2`},
 		{name: "positive parent cannot move tenant", query: `UPDATE sessions SET org_id=$3 WHERE org_id=$1 AND id=$2`},
 		{name: "active cutover cannot delete", query: `DELETE FROM session_lifecycle_cutovers WHERE org_id=$1 AND session_id=$2`},
@@ -357,6 +357,8 @@ func TestLifecycleProtocolRetentionGuardsPostgres(t *testing.T) {
 		{name: "active cutover cannot clear normalization", query: `UPDATE session_lifecycle_cutovers SET normalization=NULL WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot overwrite normalization", query: `UPDATE session_lifecycle_cutovers SET normalization='{}'::jsonb WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot rewrite normalization receipt", query: `UPDATE session_lifecycle_cutovers SET normalization=jsonb_set(normalization,'{receipt_id}',to_jsonb(gen_random_uuid())) WHERE org_id=$1 AND session_id=$2`},
+		{name: "active cutover cannot change normalization cutoff numeric encoding", query: `UPDATE session_lifecycle_cutovers SET normalization=jsonb_set(normalization,'{cutoff_id}',to_jsonb((normalization->>'cutoff_id')::numeric + 0.0)) WHERE org_id=$1 AND session_id=$2`},
+		{name: "active cutover cannot change normalization schema numeric encoding", query: `UPDATE session_lifecycle_cutovers SET normalization=jsonb_set(normalization,'{schema_version}','1.00'::jsonb) WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot clear capability", query: `UPDATE session_lifecycle_cutovers SET resumability_capability=NULL WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot clear minimum", query: `UPDATE session_lifecycle_cutovers SET minimum_writer_version=NULL WHERE org_id=$1 AND session_id=$2`},
 		{name: "active cutover cannot lower minimum", query: `UPDATE session_lifecycle_cutovers SET minimum_writer_version=0 WHERE org_id=$1 AND session_id=$2`},
@@ -381,11 +383,54 @@ func TestLifecycleProtocolRetentionGuardsPostgres(t *testing.T) {
 func TestLifecycleProtocolNormalizationExactNoopPostgres(t *testing.T) {
 	t.Parallel()
 	pool := newLifecycleScopeSnapshotPool(t)
-	fixture := seedActivatedLifecycleFixture(t, context.Background(), pool)
-	before := lifecycleProtocolRows(t, context.Background(), pool, fixture.orgID, fixture.sessionID)
-	_, err := pool.Exec(context.Background(), `UPDATE session_lifecycle_cutovers SET normalization=normalization WHERE org_id=$1 AND session_id=$2`, fixture.orgID, fixture.sessionID)
-	require.NoError(t, err, "an exact no-op must preserve the retained active normalization receipt without requiring replacement")
-	require.Equal(t, before, lifecycleProtocolRows(t, context.Background(), pool, fixture.orgID, fixture.sessionID), "a permitted exact no-op must preserve every retained field")
+	tests := []struct{ name, expression string }{
+		{name: "self assignment", expression: "normalization"},
+		{name: "key order is not an alternate encoding", expression: `(SELECT jsonb_object_agg(key,value ORDER BY key DESC) FROM jsonb_each(normalization))`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := seedActivatedLifecycleFixture(t, context.Background(), pool)
+			before := lifecycleProtocolRows(t, context.Background(), pool, fixture.orgID, fixture.sessionID)
+			_, err := pool.Exec(context.Background(), `UPDATE session_lifecycle_cutovers SET normalization=`+tt.expression+` WHERE org_id=$1 AND session_id=$2`, fixture.orgID, fixture.sessionID)
+			require.NoError(t, err, "an exact no-op must preserve the retained active normalization receipt without requiring replacement")
+			require.Equal(t, before, lifecycleProtocolRows(t, context.Background(), pool, fixture.orgID, fixture.sessionID), "a permitted exact no-op must preserve every retained field")
+		})
+	}
+}
+
+func TestLifecycleProtocolExplicitHardDeleteRefusedPostgres(t *testing.T) {
+	t.Parallel()
+	pool := newLifecycleScopeSnapshotPool(t)
+	tests := []struct {
+		name    string
+		cutover bool
+	}{
+		{name: "complete active provenance", cutover: true},
+		{name: "missing active cutover"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var orgID, sessionID uuid.UUID
+			if tt.cutover {
+				fixture := seedActivatedLifecycleFixture(t, context.Background(), pool)
+				orgID, sessionID = fixture.orgID, fixture.sessionID
+			} else {
+				orgID, sessionID, _ = seedRuntimeSeedThread(t, pool)
+				_, err := pool.Exec(context.Background(), `UPDATE sessions SET lifecycle_version=1 WHERE org_id=$1 AND id=$2`, orgID, sessionID)
+				require.NoError(t, err, "retain a positive protocol stamp independently of optional cutover evidence")
+			}
+			before := lifecycleProtocolRows(t, context.Background(), pool, orgID, sessionID)
+			tx := beginSessionLifecycleProbe(t, context.Background(), pool)
+			_, err := tx.Exec(context.Background(), `SET LOCAL app.allow_hard_delete = 'true'`)
+			require.NoError(t, err, "exercise the actual existing hard-delete opt-in rather than the default soft-delete redirect")
+			_, err = tx.Exec(context.Background(), `DELETE FROM sessions WHERE org_id=$1 AND id=$2`, orgID, sessionID)
+			requireSessionLifecycleSQLState(t, err, "55000", "the explicit legacy hard-delete option cannot erase retained positive protocol history")
+			require.NoError(t, tx.Rollback(context.Background()), "discard the failed opt-in deletion before independently reading retained evidence")
+			require.Equal(t, before, lifecycleProtocolRows(t, context.Background(), pool, orgID, sessionID), "hard-delete refusal must preserve every parent and cutover field")
+		})
+	}
 }
 
 func TestLifecycleProtocolLegacySnapshotWritesPostgres(t *testing.T) {
@@ -439,7 +484,7 @@ func TestLifecycleProtocolPositiveParentWithoutCutoverRetainedPostgres(t *testin
 	pool := newLifecycleScopeSnapshotPool(t)
 	tests := []struct{ name, query string }{
 		{name: "missing cutover cannot permit stamp downgrade", query: `UPDATE sessions SET lifecycle_version=0 WHERE org_id=$1 AND id=$2`},
-		{name: "missing cutover cannot permit parent hard deletion", query: `DELETE FROM sessions WHERE org_id=$1 AND id=$2`},
+		{name: "missing cutover cannot permit raw parent deletion", query: `DELETE FROM sessions WHERE org_id=$1 AND id=$2`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

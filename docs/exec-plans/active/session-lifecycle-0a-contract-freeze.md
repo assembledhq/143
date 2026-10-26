@@ -137,7 +137,14 @@ version-0 parents compatible. SQL advisory-lock refusal uses the same exact
 tenant/session key as Go; only an actual failed advisory try-lock is reported as
 `LIFECYCLE_CUTOVER_INTERLOCK_BUSY`.
 Once active, normalization is write-once: an exact no-op is allowed, replacement
-is refused. Capability update authority remains a later guard obligation; this
+is refused. Equality uses canonical JSONB text, retaining numeric encoding so an
+integer cannot become a fractional encoding rejected by the strict reader. Key
+order is immaterial. Normalization stays frozen even on an invalid active row
+where it is absent; this component supplies no provenance-repair authority.
+Raw DELETE on a positive parent is refused, including the default soft-delete
+redirect. Ordinary application soft deletion uses UPDATE of `deleted_at`, which
+retains the stamp and remains permitted.
+Capability update authority remains a later guard obligation; this
 core only prevents clearing it. Malformed replacement fails strict resolution,
 and a shape-valid replacement still proves no provider conformance or target authority.
 
