@@ -247,6 +247,7 @@ func TestPrivateScopeLockPrerequisitesRemainInventoried(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ name string }{
 		{name: "lockLifecycleScopeInTx"},
+		{name: "verifyLifecycleLaneClaimInTx"},
 		{name: "requireLifecycleScopeTransactionInTx"},
 		{name: "observeLifecycleCutoverInTx"},
 		{name: "tryLockLifecycleCutoverSharedInTx"},
