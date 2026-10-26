@@ -1937,6 +1937,10 @@ func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.
 // its continue_session job reaches BeginRuntime (see CountExecutingByOrg).
 // Sessions whose sandbox snapshot has been destroyed cannot be claimed.
 func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	return s.claimIdleRow(ctx, s.db, orgID, sessionID)
+}
+
+func (s *SessionStore) claimIdleRow(ctx context.Context, conn DBTX, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
 		UPDATE sessions
 		SET status = 'running', started_at = now(), completed_at = NULL,
@@ -1952,7 +1956,7 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
 		RETURNING ` + sessionSelectColumns
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+	rows, err := conn.Query(ctx, query, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
 	})
@@ -1975,6 +1979,10 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 // single source of truth.
 // Sessions whose sandbox snapshot has been destroyed cannot be resumed.
 func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
+	return s.claimForResumeRow(ctx, s.db, orgID, sessionID)
+}
+
+func (s *SessionStore) claimForResumeRow(ctx context.Context, conn DBTX, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := fmt.Sprintf(`
 		UPDATE sessions
 		SET status = 'running', started_at = now(), completed_at = NULL,
@@ -1984,7 +1992,7 @@ func (s *SessionStore) ClaimForResume(ctx context.Context, orgID, sessionID uuid
 		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
 		RETURNING `+sessionSelectColumns, sessionResumeRuntimeResetAssignments)
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+	rows, err := conn.Query(ctx, query, pgx.NamedArgs{
 		"id":       sessionID,
 		"org_id":   orgID,
 		"statuses": sessionStatusStrings(models.ResumableSessionStatuses),
