@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	testpostgres "github.com/assembledhq/143/internal/testutil/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
@@ -253,7 +254,9 @@ func TestLifecycleProtocolFreshStatementPostgres(t *testing.T) {
 
 func TestLifecycleProtocolInterlockLifetimePostgres(t *testing.T) {
 	t.Parallel()
-	pool := newLifecycleScopeSnapshotPool(t)
+	// Match the smallest default pool even on machines with more CPUs: both
+	// parallel cases must prove lock lifetime without starving their probes.
+	pool := testpostgres.NewPool(t, context.Background(), "../../migrations", 4)
 	tests := []struct {
 		name   string
 		commit bool
@@ -275,9 +278,10 @@ func TestLifecycleProtocolInterlockLifetimePostgres(t *testing.T) {
 			requireLifecycleCutoverPostgresBusy(t, err)
 			require.NotErrorIs(t, err, ErrLifecycleGuardProvenanceRequired, "a physically busy interlock is not malformed or missing provenance")
 			require.Equal(t, byte('T'), contender.Conn().PgConn().TxStatus(), "a false advisory try-lock must leave settlement with the contender owner")
-			foreign := beginSessionLifecycleProbe(t, ctx, pool)
-			require.NoError(t, ConfigureLifecycleTransactionInTx(ctx, foreign), "configure the separate tenant-isolation probe")
-			require.NoError(t, tryLockLifecycleCutoverExclusiveInTx(ctx, foreign, uuid.New(), fixture.sessionID), "a different tenant key must not contend with the exact active scope")
+			// The failed try-lock acquired nothing for the active scope. Reuse
+			// this independent contender for tenant isolation rather than hold
+			// a third connection while both parallel cases own two already.
+			require.NoError(t, tryLockLifecycleCutoverExclusiveInTx(ctx, contender, uuid.New(), fixture.sessionID), "a different tenant key must not contend with the exact active scope")
 			if tt.commit {
 				require.NoError(t, actor.Commit(ctx), "only the outer owner may release the resolver's shared lock by commit")
 			} else {
