@@ -229,7 +229,8 @@ func TestLifecycleConsumerInactiveMigrationRoundTripPostgres(t *testing.T) {
 	err := pool.QueryRow(context.Background(), `SELECT to_jsonb(r) FROM thread_runtimes r WHERE org_id=$1 AND id=$2`, org, runtime.ID).Scan(&before)
 	require.NoError(t, err, "capture every legacy runtime field before dependency-ordered rollback")
 	files := []string{
-		"000379_lifecycle_consumer_index_rollback_floor.down.sql",
+		"000380_lifecycle_consumer_index_rollback_floor.down.sql",
+		"000379_legacy_input_consumer_jobs_index.down.sql",
 		"000378_automation_consumer_job_index.down.sql",
 		"000377_holder_consumer_runtime_index.down.sql",
 		"000376_holder_consumer_session_index.down.sql",
@@ -258,7 +259,8 @@ func TestLifecycleConsumerInactiveMigrationRoundTripPostgres(t *testing.T) {
 		"000376_holder_consumer_session_index.up.sql",
 		"000377_holder_consumer_runtime_index.up.sql",
 		"000378_automation_consumer_job_index.up.sql",
-		"000379_lifecycle_consumer_index_rollback_floor.up.sql",
+		"000379_legacy_input_consumer_jobs_index.up.sql",
+		"000380_lifecycle_consumer_index_rollback_floor.up.sql",
 	}
 	for _, name := range files {
 		migration, err := os.ReadFile("../../migrations/" + name)

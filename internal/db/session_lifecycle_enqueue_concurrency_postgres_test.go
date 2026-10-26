@@ -48,6 +48,11 @@ func TestLifecycleEnqueueConcurrentUniqueConflictPostgres(t *testing.T) {
 			require.NoError(t, err, "the candidate owner must hold its real canonical parent/lane scope")
 			var candidatePID uint32
 			require.NoError(t, tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&candidatePID), "identify the exact candidate rather than relying on a goroutine-start signal")
+			// Acquire the independent observer before starting the INSERT, so
+			// pool/connection setup cannot consume its unchanged lock budget.
+			observer, err := pool.Acquire(ctx)
+			require.NoError(t, err, "reserve one independent observer within the existing candidate unit budget")
+			defer observer.Release()
 			type outcome struct {
 				result lifecycleEnqueueResult
 				err    error
@@ -66,13 +71,26 @@ func TestLifecycleEnqueueConcurrentUniqueConflictPostgres(t *testing.T) {
 				<-finished
 			}()
 
-			var barrierErr error
-			require.Eventually(t, func() bool {
+			// Observe the real unique-key wait until this unit's existing
+			// deadline, not a second arbitrary race-sensitive timeout. Neither
+			// a goroutine signal nor elapsed time is evidence of blocking.
+			observations := time.NewTicker(time.Millisecond)
+			defer observations.Stop()
+			for {
 				var blocked bool
-				barrierErr = pool.QueryRow(ownerCtx, `SELECT $1::integer=ANY(pg_blocking_pids($2::integer))`, competitorPID, candidatePID).Scan(&blocked)
-				return barrierErr == nil && blocked
-			}, 200*time.Millisecond, time.Millisecond, "PostgreSQL must prove the candidate INSERT actually waits on this uncommitted unique-key owner before it settles")
-			require.NoError(t, barrierErr, "the independent observer must remain usable within the bounded four-connection fixture")
+				err := observer.QueryRow(ctx, `SELECT $1::integer=ANY(pg_blocking_pids($2::integer))`, competitorPID, candidatePID).Scan(&blocked)
+				require.NoError(t, err, "the independent observer must remain usable within the unchanged candidate lifecycle deadline")
+				if blocked {
+					break
+				}
+				select {
+				case <-observations.C:
+				case early := <-done:
+					t.Fatalf("candidate completed before PostgreSQL proved the exact unique-key wait: disposition=%s error=%v", early.result.disposition, early.err)
+				case <-ctx.Done():
+					t.Fatal("PostgreSQL must prove the candidate INSERT waits on the exact competitor within the unchanged lifecycle owner budget")
+				}
+			}
 			if tt.commit {
 				require.NoError(t, competitor.Commit(ownerCtx), "commit the actual lock holder only after the candidate reaches its database wait")
 			} else {

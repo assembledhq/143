@@ -240,9 +240,12 @@ exists, these down migrations refuse removal rather than reopening legacy mode.
 H must bound the distinct scope locks held by each bulk statement and measure
 shared lock-table pressure and forward progress. Row-level advisory acquisition
 does not provide an unbounded bulk-operation guarantee. H must also measure the
-rollback availability window: retained-evidence checks can scan sessions, and
-migration 356's resource-job-kind absence check can scan retained jobs, while
-rollback holds exclusive relation locks. Migration 352 restores the legacy
+rollback availability window: the first index-removal preflight (380 down)
+can scan both sessions and retained jobs while holding exclusive locks on six
+evidence tables. Its combined parked/resource-job predicate is not covered by
+the admission lookup's partial index. Later retained-evidence checks can scan
+sessions, and migration 356's resource-job-kind absence check can scan retained
+jobs under exclusive relation locks too. Migration 352 restores the legacy
 status check without validation; 351 down validates it in a separate weaker-lock
 transaction. Neither capacity nor a table-size-independent rollback duration is
 established by this component.
@@ -317,9 +320,33 @@ as ownership proof. At most 32 retained target/generation pairs are probed in
 one operation, within the existing transaction budget. More pairs return
 discovery-incomplete before a partial clear result is possible. This is a
 conservative availability limit, not a complete census above that size. Indexed
-scope probes avoid scanning unrelated tenant history; row limits do not promise
-table-size-independent work within a heavily populated target scope. H must
-measure that cost and the bounded tenant nonterminal-job scan before activation.
+scope probes constrain logical membership. The separate legacy-job
+lookup first selects an ordered, capped set of IDs using a concurrent partial
+index on `(eligible_tenant,id)`. The expression `eligible_tenant` equals `org_id`
+only for `run_agent` and `continue_session` jobs in `pending`, `running` or
+`awaiting_start_control`, and the index excludes its NULL results. Selection
+constrains that expression alone; a dependent same-tenant exact-ID probe then
+reads payloads in the same statement and snapshot. On the tested PostgreSQL 17
+planner, partial-index expression statistics are not used, avoiding skewed
+base-column estimates that favored ordered tenant-history or global-status
+paths. ID-only selection keeps payloads out of ordering work. The resource
+tests exercise the actual statement with both tenant-key orderings, default
+cached mixed bindings and explicit custom/generic plans, terminal rows inserted
+directly in terminal states, foreign-live cohorts, and both unvacuumed and
+all-visible heaps. The unvacuumed phase proves visibility-map absence, not
+eligible-to-terminal or lease-update churn: dead eligible index versions can
+remain until maintenance removes them. PostgreSQL upgrades, optimizer hooks,
+extended statistics and materially different distributions require revalidation.
+
+The reader collects at most 512 raw payload rows within its existing 8 MiB
+aggregate budget, rejecting an overflow row before retaining it, and finishes
+and checks the result stream before decoding routes. SQL, context and drain
+errors take precedence over a semantic incomplete result. Closing unread rows
+drains the statement; the decoder budget is not a global wire-transfer cap.
+The existing row and byte limits do not promise table-size-independent work in
+a heavily populated target scope or tenant nonterminal cohort. H must measure
+vacuum lag, dead-version churn and large-cohort stream/decoder costs before
+activation.
 
 Before their first consumers, C.1p owns certificate transition policy (fresh
 operation, no-op/idempotent handling and generation-change dispositions), E.1/C.2

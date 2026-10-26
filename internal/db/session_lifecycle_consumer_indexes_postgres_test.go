@@ -26,6 +26,7 @@ func TestLifecycleConsumerLookupIndexCatalogPostgres(t *testing.T) {
 		{Name: "idx_executor_consumer_thread", Table: "session_executors", Columns: []string{"org_id", "thread_id", "id"}, Predicate: "", Unique: false, Valid: true, Ready: true},
 		{Name: "idx_holder_consumer_runtime", Table: "session_sandbox_holders", Columns: []string{"org_id", "holder_kind", "holder_id", "id"}, Predicate: "", Unique: false, Valid: true, Ready: true},
 		{Name: "idx_holder_consumer_session", Table: "session_sandbox_holders", Columns: []string{"org_id", "session_id", "id"}, Predicate: "", Unique: false, Valid: true, Ready: true},
+		{Name: "idx_jobs_lifecycle_nonterminal_input_consumers", Table: "jobs", Columns: []string{"( CASE WHEN ((job_type = ANY (ARRAY['run_agent'::text, 'continue_session'::text])) AND (status = ANY (ARRAY['pending'::text, 'running'::text, 'awaiting_start_control'::text]))) THEN org_id ELSE NULL::uuid END)", "id"}, Predicate: "( CASE WHEN ((job_type = ANY (ARRAY['run_agent'::text, 'continue_session'::text])) AND (status = ANY (ARRAY['pending'::text, 'running'::text, 'awaiting_start_control'::text]))) THEN org_id ELSE NULL::uuid END IS NOT NULL)", Unique: false, Valid: true, Ready: true},
 		{Name: "idx_recheck_consumer_session", Table: "code_review_recheck_dispatches", Columns: []string{"org_id", "session_id", "assessment_id"}, Predicate: "", Unique: false, Valid: true, Ready: true},
 		{Name: "idx_runtime_consumer_thread", Table: "thread_runtimes", Columns: []string{"org_id", "thread_id", "id"}, Predicate: "", Unique: false, Valid: true, Ready: true},
 		{Name: "idx_sessions_workspace_recovery_due", Table: "sessions", Columns: []string{"workspace_recovery_next_attempt_at", "id"}, Predicate: "(workspace_recovery_id IS NOT NULL)", Unique: false, Valid: true, Ready: true},
@@ -39,9 +40,8 @@ func TestLifecycleConsumerLookupIndexCatalogPostgres(t *testing.T) {
 		names[n] = item.Name
 	}
 	rows, err := pool.Query(context.Background(), `SELECT ix.relname,tab.relname,
-  ARRAY(SELECT a.attname::text FROM unnest(i.indkey) WITH ORDINALITY k(attnum,n)
-   JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum ORDER BY k.n),
-  COALESCE(pg_get_expr(i.indpred,i.indrelid),''),i.indisunique,i.indisvalid,i.indisready
+  ARRAY(SELECT regexp_replace(pg_get_indexdef(i.indexrelid,k.n::integer,false),'\s+',' ','g') FROM unnest(i.indkey) WITH ORDINALITY k(attnum,n) ORDER BY k.n),
+  COALESCE(regexp_replace(pg_get_expr(i.indpred,i.indrelid),'\s+',' ','g'),''),i.indisunique,i.indisvalid,i.indisready
   FROM unnest($1::text[]) wanted(name)
   JOIN pg_class ix ON ix.oid=to_regclass(wanted.name)
   JOIN pg_index i ON i.indexrelid=ix.oid

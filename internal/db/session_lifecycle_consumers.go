@@ -256,10 +256,21 @@ const lifecycleConsumerGenerationEvidenceQuery = `SELECT 'automation'::text,a.id
  AND (a.status IN ('pending','running') OR a.dispatch_state='executing' OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `)
  ORDER BY a.id LIMIT $3`
 
-const lifecycleConsumerLegacyJobsQuery = `SELECT id,octet_length(payload::text),
- CASE WHEN octet_length(payload::text)<=$3 THEN payload ELSE NULL END
- FROM jobs WHERE org_id=$1 AND job_type IN ('run_agent','continue_session')
- AND status IN ` + jobNonterminalInputConsumerStatusesSQL + ` ORDER BY id LIMIT $2`
+// The key is the row's tenant only for an eligible input job, so equality is
+// exact tenant and status eligibility in one indexed condition. The tested
+// PostgreSQL 17 planner does not use partial-index expression statistics, so
+// the tested plans avoid the skewed base-column estimates that favored ordered
+// history scans. A separate org_id or status condition could instead combine
+// broad history indexes. This is a measured access path, not a guarantee about
+// every future planner or distribution. Keep eligible selection ID-only so
+// payloads are never sorted; the OFFSET 0 probe reads only the selected IDs.
+// One statement preserves the same snapshot, byte semantics and ordered cap.
+const lifecycleConsumerLegacyJobsQuery = `SELECT eligible.id,octet_length(j.payload::text),
+ CASE WHEN octet_length(j.payload::text)<=$3 THEN j.payload ELSE NULL END
+ FROM (SELECT id FROM jobs WHERE (CASE WHEN job_type IN ('run_agent','continue_session')
+ AND status IN ('pending', 'running', 'awaiting_start_control') THEN org_id END)=$1 ORDER BY id LIMIT $2) eligible
+ CROSS JOIN LATERAL (SELECT payload FROM jobs WHERE org_id=$1 AND id=eligible.id OFFSET 0) j
+ ORDER BY eligible.id`
 
 type lifecycleConsumerGenerationKey struct {
 	targetID   uuid.UUID
@@ -736,45 +747,66 @@ type lifecycleLegacyConsumerJob struct {
 	route legacyJobRouteObservation
 }
 
+type lifecycleLegacyConsumerPayload struct {
+	id      uuid.UUID
+	payload []byte
+}
+
 func readLegacyLifecycleConsumersInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, fence AdmissionFence, own lifecycleOwnConsumerProof, scopedJobs map[uuid.UUID]bool, limits lifecycleConsumerLimits) (bool, error) {
 	rows, err := tx.Query(ctx, lifecycleConsumerLegacyJobsQuery, orgID, limits.legacyJobs+1, legacyJobRouteMaxBytes)
 	if err != nil {
 		return false, fmt.Errorf("read bounded legacy lifecycle jobs: %w", err)
 	}
-	var jobs []lifecycleLegacyConsumerJob
-	lanes := make(map[uuid.UUID]bool)
+	// Scan owned raw bytes, not json.RawMessage (which pgx validates through
+	// encoding/json), and finish the statement before parsing route fields.
+	// Client-side decoding must not stall PostgreSQL's bounded result stream.
+	var payloads []lifecycleLegacyConsumerPayload
+	var scanErr error
+	var incomplete *lifecycleConsumerError
 	bytes := 0
 	for rows.Next() {
 		var id uuid.UUID
 		var size int
-		var payload json.RawMessage
+		var payload []byte
 		if err := rows.Scan(&id, &size, &payload); err != nil {
-			rows.Close()
-			return false, fmt.Errorf("decode legacy lifecycle job row: %w", err)
+			scanErr = fmt.Errorf("decode legacy lifecycle job row: %w", err)
+			break
 		}
 		bytes += size
-		if len(jobs) >= limits.legacyJobs || size > legacyJobRouteMaxBytes || bytes > limits.payloadBytes {
-			rows.Close()
-			return false, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: id}
+		if len(payloads) >= limits.legacyJobs || size > legacyJobRouteMaxBytes || bytes > limits.payloadBytes {
+			incomplete = &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: id}
+			break
 		}
-		route := decodeLegacyJobRoute(orgID, payload)
+		payloads = append(payloads, lifecycleLegacyConsumerPayload{id, payload})
+	}
+	streamErr := rows.Err()
+	rows.Close()
+	if err := errors.Join(scanErr, streamErr, rows.Err(), ctx.Err()); err != nil {
+		return false, fmt.Errorf("collect bounded legacy lifecycle jobs: %w", err)
+	}
+	if incomplete != nil {
+		return false, incomplete
+	}
+	var jobs []lifecycleLegacyConsumerJob
+	lanes := make(map[uuid.UUID]bool)
+	for _, raw := range payloads {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		route := decodeLegacyJobRoute(orgID, raw.payload)
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		if route.incomplete() {
-			rows.Close()
-			return false, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: id}
+			return false, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: raw.id}
 		}
 		for _, lane := range route.threadIDs() {
 			lanes[lane] = true
 			if len(lanes) > limits.laneAnchors {
-				rows.Close()
-				return false, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: id}
+				return false, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: raw.id}
 			}
 		}
-		jobs = append(jobs, lifecycleLegacyConsumerJob{id, route})
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return false, fmt.Errorf("collect bounded legacy lifecycle jobs: %w", err)
+		jobs = append(jobs, lifecycleLegacyConsumerJob{raw.id, route})
 	}
 	parents := make(map[uuid.UUID]uuid.UUID, len(lanes))
 	if len(lanes) > 0 {
@@ -786,27 +818,34 @@ func readLegacyLifecycleConsumersInTx(ctx context.Context, tx pgx.Tx, orgID uuid
 		if err != nil {
 			return false, fmt.Errorf("resolve legacy lifecycle lane anchors: %w", err)
 		}
+		var scanErr error
 		for laneRows.Next() {
 			var id, parent uuid.UUID
 			if err := laneRows.Scan(&id, &parent); err != nil {
-				laneRows.Close()
-				return false, fmt.Errorf("decode legacy lifecycle lane membership: %w", err)
+				scanErr = fmt.Errorf("decode legacy lifecycle lane membership: %w", err)
+				break
 			}
 			parents[id] = parent
 		}
-		err = laneRows.Err()
+		streamErr := laneRows.Err()
 		laneRows.Close()
-		if err != nil {
+		if err := errors.Join(scanErr, streamErr, laneRows.Err(), ctx.Err()); err != nil {
 			return false, fmt.Errorf("collect legacy lifecycle lane membership: %w", err)
 		}
 	}
 	blocked := false
 	for _, job := range jobs {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		competes, err := classifyLegacyLifecycleConsumer(job, fence, parents, scopedJobs[job.id], own)
 		if err != nil {
 			return false, err
 		}
 		blocked = blocked || competes
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	return blocked, nil
 }

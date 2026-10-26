@@ -15,8 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The supported sequential down path starts with 379 as one standalone Exec,
-// before any concurrent index removal in 378..367. This tests that first
+// The supported sequential down path starts with 380 as one standalone Exec,
+// before any concurrent index removal in 379..367. This tests that first
 // refusal boundary, not a migration bypass or production activation procedure.
 // The existing inactive round-trip test separately covers successful rollback.
 func TestLifecycleConsumerIndexRollbackFloorPostgres(t *testing.T) {
@@ -89,12 +89,12 @@ func TestLifecycleConsumerIndexRollbackFloorPostgres(t *testing.T) {
 			}
 			require.Equal(t, expectedNames, actualNames, "the test must cover every exact preparation and standalone consumer lookup index without silently skipping a missing index")
 			require.Equal(t, expectedIndexes, beforeIndexes, "the preflight fixture must start with the complete valid and ready index floor and exactly one retained-recovery unique index")
-			migration, err := os.ReadFile("../../migrations/000379_lifecycle_consumer_index_rollback_floor.down.sql")
+			migration, err := os.ReadFile("../../migrations/000380_lifecycle_consumer_index_rollback_floor.down.sql")
 			require.NoError(t, err, "read the actual first shipped rollback preflight rather than duplicate its guard policy")
 			// No explicit transaction wraps this call: concurrent index downs
 			// use the same standalone Exec boundary in the supported sequence.
 			_, err = pool.Exec(ctx, string(migration))
-			requireSessionLifecycleSQLState(t, err, "55000", "supported sequential rollback must stop at 379 before reaching any concurrent index removal")
+			requireSessionLifecycleSQLState(t, err, "55000", "supported sequential rollback must stop at 380 before reaching any concurrent index removal")
 			require.ErrorContains(t, err, tt.errorText, "rollback must refuse because of this exact retained provenance or consumer evidence, not an incidental SQL or isolation failure")
 			require.Equal(t, beforeRows, lifecycleIndexRollbackTenantRows(t, ctx, pool, org), "failed standalone preflight must preserve every raw tenant session, job, dispatch, runtime, preparation and provenance field")
 			require.Equal(t, beforeIndexes, lifecycleIndexRollbackCatalog(t, ctx, pool), "preflight refusal must leave every supporting index definition, uniqueness, validity and readiness byte-for-byte unchanged")
@@ -124,7 +124,7 @@ func lifecycleIndexRollbackNames() []string {
 	return []string{
 		"idx_automation_consumer_job", "idx_automation_consumer_target", "idx_automation_consumer_thread",
 		"idx_dispatch_consumer_thread", "idx_executor_consumer_session", "idx_executor_consumer_thread",
-		"idx_holder_consumer_runtime", "idx_holder_consumer_session", "idx_recheck_consumer_session", "idx_runtime_consumer_thread",
+		"idx_holder_consumer_runtime", "idx_holder_consumer_session", "idx_jobs_lifecycle_nonterminal_input_consumers", "idx_recheck_consumer_session", "idx_runtime_consumer_thread",
 		"idx_sessions_workspace_recovery_due", "idx_sessions_workspace_recovery_id",
 		"idx_start_preparations_request", "idx_start_preparations_scope", "idx_start_preparations_thread",
 	}

@@ -88,11 +88,11 @@
     },
     {
       "id": "internal/db/session_lifecycle_consumers.go:readLegacyLifecycleConsumersInTx:sql:1",
-      "source_sha256": "1b51dc11f5f8c42ab2324fd87493c9b923b1e1a72971fb18ce1a020c1ec38a36",
+      "source_sha256": "4f6e9de9d0781e6c3b849205adf4062555220b5802a0315b2afe112c5f43d85e",
       "classification": "nonterminal-consumer",
-      "action_0a": "Scan bounded tenant input jobs across pending/running/parked without canonical JSON route filtering; retain partial legacy anchors, actual lane membership and typed discovery-incomplete outcomes.",
+      "action_0a": "Select ordered capped IDs by the exact eligible-tenant CASE key for pending/running/parked input jobs, then probe those same-tenant IDs for payloads in one statement. Collect bounded owned raw bytes, close/check the stream before route decoding, and preserve SQL/context/drain failures. Preserve byte budgets, partial legacy anchors, actual lane membership and semantic discovery-incomplete outcomes; vacuum-lag/churn and large eligible cohorts remain H measurement obligations.",
       "reason": "Malformed route fields cannot erase independently scoped logical input ownership.",
-      "evidence": ["status in ( 'pending' , 'running' , 'awaiting_start_control' )", "internal/db/session_lifecycle_legacy_job_route_test.go", "internal/db/session_lifecycle_consumers_postgres_test.go"]
+      "evidence": ["status in ( 'pending' , 'running' , 'awaiting_start_control' )", "internal/db/session_lifecycle_legacy_job_route_test.go", "internal/db/session_lifecycle_consumers_postgres_test.go", "internal/db/session_lifecycle_legacy_job_index_test.go", "internal/db/session_lifecycle_legacy_job_resource_postgres_test.go"]
     },
     {
       "id": "internal/db/session_lifecycle_start_control.go:matchLifecycleStartControlFacts:go:1",
@@ -2301,13 +2301,27 @@
       ]
     },
     {
-      "id": "migrations/000379_lifecycle_consumer_index_rollback_floor.down.sql:SQL",
+      "id": "migrations/000379_legacy_input_consumer_jobs_index.up.sql:SQL",
+      "source_sha256": "9ae25ccca01ef8bee5d640e933e26f88832c58cac7f42f0ed61c21ce020ab21b",
+      "classification": "nonterminal-consumer",
+      "action_0a": "Build one standalone concurrent eligible-tenant/id lookup whose CASE key equals org_id only for run_agent and continue_session in pending, running or awaiting_start_control, excluding NULL keys. Couple that exact key to production selection and the shared consumer policy; preserve the rollback floor before its separate concurrent down.",
+      "reason": "The measured fixture's insert-only terminal rows never entered this index; unvacuumed visibility-map absence does not prove bounded traversal of dead eligible versions after status/lease churn. H must measure vacuum lag, churn and large eligible cohorts. This access path neither makes parked jobs runnable nor supplies admission authority.",
+      "evidence": [
+        "migrations/000379_legacy_input_consumer_jobs_index.up.sql:1",
+        "status in ( 'pending' , 'running' , 'awaiting_start_control' )",
+        "internal/db/session_lifecycle_legacy_job_index_test.go:TestLifecycleLegacyJobIndexMatchesConsumerPolicy",
+        "internal/db/session_lifecycle_legacy_job_resource_postgres_test.go",
+        "internal/db/session_lifecycle_consumer_query_postgres_test.go"
+      ]
+    },
+    {
+      "id": "migrations/000380_lifecycle_consumer_index_rollback_floor.down.sql:SQL",
       "source_sha256": "a5f57f4377287673f026598683d1afa30c41104972f70c339ba68ca919890a11",
       "classification": "lifecycle-cleanup",
       "action_0a": "Before any standalone consumer/recovery index down, take bounded schema/evidence locks and refuse positive protocol stamps or retained recovery, preparation, dispatch/runtime binding, parked or unresolved resource-job evidence. This preflight does not inhibit writers across later concurrent drops.",
       "reason": "A refused rollback must leave the complete supporting index floor, including recovery identity uniqueness, installed rather than weaken it before a later column guard runs.",
       "evidence": [
-        "migrations/000379_lifecycle_consumer_index_rollback_floor.down.sql:1",
+        "migrations/000380_lifecycle_consumer_index_rollback_floor.down.sql:1",
         "status = 'awaiting_start_control'",
         "internal/db/session_lifecycle_index_rollback_postgres_test.go:TestLifecycleConsumerIndexRollbackFloorPostgres",
         "docs/exec-plans/active/session-lifecycle-0a-contract-freeze.md"
