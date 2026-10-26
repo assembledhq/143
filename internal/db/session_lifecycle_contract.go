@@ -1,8 +1,10 @@
 package db
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -30,6 +32,26 @@ func (d LifecycleDigest) Validate() error {
 		return errors.New("lifecycle digest must not be zero")
 	}
 	return nil
+}
+
+// Encode returns the one persisted representation: 64 lowercase hexadecimal
+// characters. Zero is not a valid persisted digest.
+func (d LifecycleDigest) Encode() (string, error) {
+	if err := d.Validate(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(d[:]), nil
+}
+
+func ParseLifecycleDigest(value string) (LifecycleDigest, error) {
+	if len(value) != 64 || strings.ToLower(value) != value {
+		return LifecycleDigest{}, errors.New("lifecycle digest requires 64 lowercase hexadecimal characters")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		return LifecycleDigest{}, errors.New("invalid lifecycle digest hexadecimal encoding")
+	}
+	return NewLifecycleDigest(decoded)
 }
 
 // AdmissionFence carries explicit expected scope, never the scope discovered
@@ -108,6 +130,7 @@ func (v LifecycleIngress) Digest() LifecycleDigest { return v.digest }
 // prove it has no other consumer under the canonical locks. A dedupe collision
 // (including Enqueue's nil-ID result) cannot supply this evidence.
 type LifecycleJobBinding struct {
+	orgID       uuid.UUID
 	fence       AdmissionFence
 	jobID       uuid.UUID
 	dispatchIDs []uuid.UUID
@@ -115,8 +138,8 @@ type LifecycleJobBinding struct {
 	requestID   uuid.UUID
 }
 
-func NewLifecycleJobBinding(fence AdmissionFence, jobID uuid.UUID, dispatchIDs []uuid.UUID, kind models.LifecycleDispatchKind, requestID *uuid.UUID) (LifecycleJobBinding, error) {
-	v := LifecycleJobBinding{fence: fence, jobID: jobID, dispatchIDs: slices.Clone(dispatchIDs), kind: kind}
+func NewLifecycleJobBinding(orgID uuid.UUID, fence AdmissionFence, jobID uuid.UUID, dispatchIDs []uuid.UUID, kind models.LifecycleDispatchKind, requestID *uuid.UUID) (LifecycleJobBinding, error) {
+	v := LifecycleJobBinding{orgID: orgID, fence: fence, jobID: jobID, dispatchIDs: slices.Clone(dispatchIDs), kind: kind}
 	if requestID != nil {
 		if *requestID == uuid.Nil {
 			return LifecycleJobBinding{}, errors.New("lifecycle binding cannot infer a NULL request from a zero ID")
@@ -136,8 +159,8 @@ func (v LifecycleJobBinding) Validate() error {
 	if err := v.kind.Validate(); err != nil {
 		return err
 	}
-	if v.jobID == uuid.Nil || len(v.dispatchIDs) == 0 {
-		return errors.New("lifecycle binding requires an exact job and nonempty input set")
+	if v.orgID == uuid.Nil || v.jobID == uuid.Nil || len(v.dispatchIDs) == 0 {
+		return errors.New("lifecycle binding requires an exact tenant/job and nonempty input set")
 	}
 	seen := make(map[uuid.UUID]struct{}, len(v.dispatchIDs))
 	for _, id := range v.dispatchIDs {
@@ -160,6 +183,7 @@ func (v LifecycleJobBinding) Validate() error {
 }
 
 func (v LifecycleJobBinding) Fence() AdmissionFence              { return v.fence }
+func (v LifecycleJobBinding) OrgID() uuid.UUID                   { return v.orgID }
 func (v LifecycleJobBinding) JobID() uuid.UUID                   { return v.jobID }
 func (v LifecycleJobBinding) DispatchIDs() []uuid.UUID           { return slices.Clone(v.dispatchIDs) }
 func (v LifecycleJobBinding) Kind() models.LifecycleDispatchKind { return v.kind }
@@ -192,8 +216,8 @@ func (v AttemptFence) Validate() error {
 	if err := v.binding.Validate(); err != nil {
 		return err
 	}
-	if v.jobToken == uuid.Nil || v.runtimeID == uuid.Nil || v.runtimeToken == uuid.Nil || v.expectedTurn < 0 {
-		return errors.New("attempt fence requires exact job/runtime allocation tokens and a known nonnegative turn")
+	if v.jobToken == uuid.Nil || v.runtimeID == uuid.Nil || v.runtimeToken == uuid.Nil || v.expectedTurn < 0 || v.expectedTurn > math.MaxInt32 {
+		return errors.New("attempt fence requires exact job/runtime allocation tokens and a PostgreSQL integer turn")
 	}
 	return v.allocationDigest.Validate()
 }
@@ -210,19 +234,20 @@ func (v AttemptFence) AllocationDigest() LifecycleDigest { return v.allocationDi
 func (v AttemptFence) ExpectedTurn() int                 { return v.expectedTurn }
 
 // LifecycleConsumerBinding describes one logical consumer. A runtime may be
-// added to its originating job only with the exact immutable allocation; two
-// populated pointer columns are not by themselves evidence of two consumers.
+// added to its originating job only by changing the canonical encoding from
+// job-only to runtime-with-job-and-allocation. Both pointers name ONE consumer.
 // This contract deliberately has no replace/rebind method. Authorized later
 // reclaim must retain prior allocation and possible-acceptance evidence.
 type LifecycleConsumerBinding struct {
-	kind       models.LifecycleConsumerKind
-	jobID      uuid.UUID
-	runtimeID  uuid.UUID
-	allocation *AttemptFence
+	orgID, dispatchID uuid.UUID
+	kind              models.LifecycleConsumerKind
+	jobID             uuid.UUID
+	runtimeID         uuid.UUID
+	allocation        *AttemptFence
 }
 
-func NewLifecycleConsumerBinding(kind models.LifecycleConsumerKind, jobID, runtimeID *uuid.UUID, allocation *AttemptFence) (LifecycleConsumerBinding, error) {
-	v := LifecycleConsumerBinding{kind: kind}
+func NewLifecycleConsumerBinding(orgID, dispatchID uuid.UUID, kind models.LifecycleConsumerKind, jobID, runtimeID *uuid.UUID, allocation *AttemptFence) (LifecycleConsumerBinding, error) {
+	v := LifecycleConsumerBinding{orgID: orgID, dispatchID: dispatchID, kind: kind}
 	if jobID != nil {
 		if *jobID == uuid.Nil {
 			return LifecycleConsumerBinding{}, errors.New("consumer job ID must be explicit and nonzero")
@@ -236,9 +261,9 @@ func NewLifecycleConsumerBinding(kind models.LifecycleConsumerKind, jobID, runti
 		v.runtimeID = *runtimeID
 	}
 	if allocation != nil {
-		copy := *allocation
-		copy.binding = allocation.Binding()
-		v.allocation = &copy
+		copied := *allocation
+		copied.binding = allocation.Binding()
+		v.allocation = &copied
 	}
 	if err := v.Validate(); err != nil {
 		return LifecycleConsumerBinding{}, err
@@ -247,6 +272,9 @@ func NewLifecycleConsumerBinding(kind models.LifecycleConsumerKind, jobID, runti
 }
 
 func (v LifecycleConsumerBinding) Validate() error {
+	if v.orgID == uuid.Nil || v.dispatchID == uuid.Nil {
+		return errors.New("consumer binding requires an exact tenant and dispatch")
+	}
 	if err := v.kind.Validate(); err != nil {
 		return err
 	}
@@ -256,12 +284,12 @@ func (v LifecycleConsumerBinding) Validate() error {
 			return errors.New("unbound input cannot contain consumer or allocation identities")
 		}
 	case models.LifecycleConsumerJob:
-		if v.jobID == uuid.Nil {
-			return errors.New("job consumer requires its exact job")
+		if v.jobID == uuid.Nil || v.runtimeID != uuid.Nil || v.allocation != nil {
+			return errors.New("job consumer requires only its exact job before allocation")
 		}
 	case models.LifecycleConsumerRuntime:
-		if v.runtimeID == uuid.Nil {
-			return errors.New("runtime consumer requires its exact runtime")
+		if v.runtimeID == uuid.Nil || v.jobID == uuid.Nil || v.allocation == nil {
+			return errors.New("runtime consumer requires its exact job runtime and allocation")
 		}
 	}
 	if v.runtimeID != uuid.Nil && v.allocation == nil {
@@ -271,7 +299,11 @@ func (v LifecycleConsumerBinding) Validate() error {
 		if err := v.allocation.Validate(); err != nil {
 			return err
 		}
-		if v.runtimeID == uuid.Nil || v.runtimeID != v.allocation.runtimeID || (v.jobID != uuid.Nil && v.jobID != v.allocation.binding.jobID) {
+		_, threaded := v.allocation.binding.fence.ThreadID()
+		if !threaded || v.orgID != v.allocation.binding.orgID || !slices.Contains(v.allocation.binding.dispatchIDs, v.dispatchID) {
+			return errors.New("runtime allocation must contain this exact tenant/lane input")
+		}
+		if v.runtimeID != v.allocation.runtimeID || v.jobID != v.allocation.binding.jobID {
 			return errors.New("consumer pointers must name the same immutable job/runtime allocation")
 		}
 	}
@@ -279,6 +311,8 @@ func (v LifecycleConsumerBinding) Validate() error {
 }
 
 func (v LifecycleConsumerBinding) Kind() models.LifecycleConsumerKind { return v.kind }
+func (v LifecycleConsumerBinding) OrgID() uuid.UUID                   { return v.orgID }
+func (v LifecycleConsumerBinding) DispatchID() uuid.UUID              { return v.dispatchID }
 func (v LifecycleConsumerBinding) JobID() (uuid.UUID, bool)           { return v.jobID, v.jobID != uuid.Nil }
 func (v LifecycleConsumerBinding) RuntimeID() (uuid.UUID, bool) {
 	return v.runtimeID, v.runtimeID != uuid.Nil
@@ -323,8 +357,8 @@ func NewHistoricalAttemptAuthority(orgID uuid.UUID, attempt AttemptFence) (Histo
 }
 
 func validateLifecycleAttemptAuthority(orgID uuid.UUID, attempt AttemptFence) error {
-	if orgID == uuid.Nil {
-		return errors.New("attempt authority requires an exact organization")
+	if orgID == uuid.Nil || orgID != attempt.binding.orgID {
+		return errors.New("attempt authority requires its allocation's exact organization")
 	}
 	return attempt.Validate()
 }
@@ -348,8 +382,8 @@ func NewAdmissionAuthority(orgID uuid.UUID, fence AdmissionFence, dispatchID, cl
 }
 
 func (v AdmissionAuthority) Validate() error {
-	if v.orgID == uuid.Nil || v.dispatchID == uuid.Nil || v.claimToken == uuid.Nil || v.turn < 0 {
-		return errors.New("admission authority requires exact tenant dispatch claim token and turn")
+	if v.orgID == uuid.Nil || v.dispatchID == uuid.Nil || v.claimToken == uuid.Nil || v.turn < 0 || v.turn > math.MaxInt32 {
+		return errors.New("admission authority requires exact tenant dispatch claim token and PostgreSQL integer turn")
 	}
 	if err := v.fence.Validate(); err != nil {
 		return err

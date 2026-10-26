@@ -2,6 +2,8 @@ package db
 
 import (
 	"crypto/sha256"
+	"math"
+	"strings"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
@@ -166,7 +168,8 @@ func TestLifecycleJobBindingContract(t *testing.T) {
 				}
 				requestID = &id
 			}
-			value, err := NewLifecycleJobBinding(fence, jobID, ids, tt.kind, requestID)
+			orgID := uuid.New()
+			value, err := NewLifecycleJobBinding(orgID, fence, jobID, ids, tt.kind, requestID)
 			if tt.invalid {
 				require.Error(t, err, "malformed input binding must not manufacture durable consumer evidence")
 				require.Equal(t, LifecycleJobBinding{}, value, "failed binding construction returns no partial consumer")
@@ -181,6 +184,7 @@ func TestLifecycleJobBindingContract(t *testing.T) {
 			require.Equal(t, expected, value.DispatchIDs(), "a returned input slice cannot mutate the binding")
 			require.Equal(t, fence, value.Fence(), "a binding preserves the exact session and lane epochs")
 			require.Equal(t, jobID, value.JobID(), "a dedupe family never replaces the exact job identity")
+			require.Equal(t, orgID, value.OrgID(), "the immutable binding retains its exact tenant")
 			require.Equal(t, tt.kind, value.Kind(), "input kind remains part of the dedicated binding")
 			gotRequest, present := value.RequestID()
 			require.Equal(t, tt.request, present, "request intent is explicit rather than inferred from an inbox")
@@ -209,9 +213,10 @@ func TestLifecycleAttemptAndAdmissionAuthorityContract(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			fence := newLifecycleContractFence(t)
-			binding, err := NewLifecycleJobBinding(fence, uuid.New(), []uuid.UUID{uuid.New()}, models.LifecycleDispatchMessage, nil)
+			orgID := uuid.New()
+			binding, err := NewLifecycleJobBinding(orgID, fence, uuid.New(), []uuid.UUID{uuid.New()}, models.LifecycleDispatchMessage, nil)
 			require.NoError(t, err, "construct an exact ordinary input binding for allocation evidence")
-			orgID, jobToken, runtimeID, runtimeToken := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			jobToken, runtimeID, runtimeToken := uuid.New(), uuid.New(), uuid.New()
 			digest := LifecycleDigest(sha256.Sum256([]byte("synthetic immutable allocation")))
 			turn := 0
 			if tt.zeroOrg {
@@ -275,15 +280,16 @@ func newLifecycleContractFence(t *testing.T) AdmissionFence {
 func TestLifecycleConsumerBindingContract(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                                                      string
-		kind                                                      models.LifecycleConsumerKind
-		job, runtime, allocation, wrongJob, wrongRuntime, invalid bool
+		name                                                        string
+		kind                                                        models.LifecycleConsumerKind
+		job, runtime, allocation, wrongJob, wrongRuntime, invalid   bool
+		wrongOrg, wrongDispatch, sessionWide, zeroOrg, zeroDispatch bool
 	}{
 		{name: "waiting input has no consumer", kind: models.LifecycleConsumerNone},
 		{name: "new exact job", kind: models.LifecycleConsumerJob, job: true},
-		{name: "job and allocated runtime remain one consumer", kind: models.LifecycleConsumerJob, job: true, runtime: true, allocation: true},
+		{name: "job with runtime is not canonical encoding", kind: models.LifecycleConsumerJob, job: true, runtime: true, allocation: true, invalid: true},
 		{name: "runtime retains originating job", kind: models.LifecycleConsumerRuntime, job: true, runtime: true, allocation: true},
-		{name: "runtime allocation proves originating job without second pointer", kind: models.LifecycleConsumerRuntime, runtime: true, allocation: true},
+		{name: "runtime cannot omit originating job pointer", kind: models.LifecycleConsumerRuntime, runtime: true, allocation: true, invalid: true},
 		{name: "none cannot retain job", kind: models.LifecycleConsumerNone, job: true, invalid: true},
 		{name: "job cannot be inferred", kind: models.LifecycleConsumerJob, invalid: true},
 		{name: "runtime cannot be inferred", kind: models.LifecycleConsumerRuntime, job: true, invalid: true},
@@ -291,13 +297,24 @@ func TestLifecycleConsumerBindingContract(t *testing.T) {
 		{name: "job cannot borrow unrelated runtime", kind: models.LifecycleConsumerJob, job: true, runtime: true, allocation: true, wrongRuntime: true, invalid: true},
 		{name: "runtime cannot borrow unrelated job", kind: models.LifecycleConsumerRuntime, job: true, runtime: true, allocation: true, wrongJob: true, invalid: true},
 		{name: "unknown kind rejected", kind: "future", invalid: true},
+		{name: "runtime cannot borrow foreign tenant allocation", kind: models.LifecycleConsumerRuntime, job: true, runtime: true, allocation: true, wrongOrg: true, invalid: true},
+		{name: "runtime allocation must contain dispatch", kind: models.LifecycleConsumerRuntime, job: true, runtime: true, allocation: true, wrongDispatch: true, invalid: true},
+		{name: "runtime allocation requires lane", kind: models.LifecycleConsumerRuntime, job: true, runtime: true, allocation: true, sessionWide: true, invalid: true},
+		{name: "consumer requires tenant", kind: models.LifecycleConsumerNone, zeroOrg: true, invalid: true},
+		{name: "consumer requires dispatch", kind: models.LifecycleConsumerNone, zeroDispatch: true, invalid: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			fence := newLifecycleContractFence(t)
 			jobID, runtimeID := uuid.New(), uuid.New()
-			binding, err := NewLifecycleJobBinding(fence, jobID, []uuid.UUID{uuid.New()}, models.LifecycleDispatchMessage, nil)
+			orgID, dispatchID := uuid.New(), uuid.New()
+			if tt.sessionWide {
+				var err error
+				fence, err = NewAdmissionFence(fence.SessionID(), nil, fence.SessionEpoch(), nil)
+				require.NoError(t, err, "session-wide scope remains representable but is not a lane runtime")
+			}
+			binding, err := NewLifecycleJobBinding(orgID, fence, jobID, []uuid.UUID{dispatchID}, models.LifecycleDispatchMessage, nil)
 			require.NoError(t, err, "create a synthetic immutable job binding for logical consumer comparison")
 			attempt, err := NewAttemptFence(binding, uuid.New(), runtimeID, uuid.New(), LifecycleDigest(sha256.Sum256([]byte("synthetic allocation"))), 1)
 			require.NoError(t, err, "create an exact runtime allocation rather than equating two pointer columns")
@@ -320,7 +337,19 @@ func TestLifecycleConsumerBindingContract(t *testing.T) {
 				id := uuid.New()
 				runtime = &id
 			}
-			value, err := NewLifecycleConsumerBinding(tt.kind, job, runtime, allocation)
+			if tt.wrongOrg {
+				orgID = uuid.New()
+			}
+			if tt.wrongDispatch {
+				dispatchID = uuid.New()
+			}
+			if tt.zeroOrg {
+				orgID = uuid.Nil
+			}
+			if tt.zeroDispatch {
+				dispatchID = uuid.Nil
+			}
+			value, err := NewLifecycleConsumerBinding(orgID, dispatchID, tt.kind, job, runtime, allocation)
 			if tt.invalid {
 				require.Error(t, err, "an inconsistent consumer cannot become binding evidence")
 				require.Equal(t, LifecycleConsumerBinding{}, value, "invalid consumer shape returns no partial identity")
@@ -328,6 +357,8 @@ func TestLifecycleConsumerBindingContract(t *testing.T) {
 			}
 			require.NoError(t, err, "an exact single logical consumer shape is valid before durable arbitration")
 			require.Equal(t, tt.kind, value.Kind(), "consumer kind is retained without runtime/job double-counting")
+			require.Equal(t, orgID, value.OrgID(), "consumer retains its exact tenant")
+			require.Equal(t, dispatchID, value.DispatchID(), "consumer retains the exact input proven by allocation membership")
 			actualJob, hasJob := value.JobID()
 			actualRuntime, hasRuntime := value.RuntimeID()
 			require.Equal(t, tt.job, hasJob, "originating job pointer remains explicitly optional for runtime evidence")
@@ -420,4 +451,86 @@ func TestProjectionDispositionContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLifecycleTurnAndTenantBounds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                string
+		turn                int
+		foreignOrg, invalid bool
+	}{
+		{name: "maximum PostgreSQL integer", turn: math.MaxInt32},
+		{name: "maximum plus one cannot truncate", turn: math.MaxInt32 + 1, invalid: true},
+		{name: "wrapped positive integer cannot match old receipt", turn: 1<<32 + 5, invalid: true},
+		{name: "foreign tenant cannot adopt allocation", turn: 1, foreignOrg: true, invalid: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, dispatchID := uuid.New(), uuid.New()
+			fence := newLifecycleContractFence(t)
+			binding, err := NewLifecycleJobBinding(orgID, fence, uuid.New(), []uuid.UUID{dispatchID}, models.LifecycleDispatchMessage, nil)
+			require.NoError(t, err, "create a scoped immutable binding before testing representable turns")
+			attempt, attemptErr := NewAttemptFence(binding, uuid.New(), uuid.New(), uuid.New(), LifecycleDigest(sha256.Sum256([]byte("synthetic allocation bounds"))), tt.turn)
+			ingress, err := NewLifecycleIngress("client_message", "synthetic-command", LifecycleDigest(sha256.Sum256([]byte("synthetic ingress bounds"))))
+			require.NoError(t, err, "create exact ingress identity for admission claim turn bounds")
+			admission, admissionErr := NewAdmissionAuthority(orgID, fence, dispatchID, uuid.New(), tt.turn, ingress)
+			if tt.invalid && !tt.foreignOrg {
+				require.Error(t, attemptErr, "unrepresentable runtime turn cannot wrap into a different integer receipt")
+				require.Equal(t, AttemptFence{}, attempt, "invalid attempt turn returns no allocation fence")
+				require.Error(t, admissionErr, "unrepresentable claim turn cannot wrap into a successor's turn")
+				require.Equal(t, AdmissionAuthority{}, admission, "invalid claim turn returns no compensation identity")
+				return
+			}
+			require.NoError(t, attemptErr, "the exact PostgreSQL integer maximum remains representable")
+			require.NoError(t, admissionErr, "the exact claim turn is retained without narrowing")
+			if tt.foreignOrg {
+				orgID = uuid.New()
+			}
+			current, currentErr := NewRuntimeAuthority(orgID, attempt)
+			historical, historicalErr := NewHistoricalAttemptAuthority(orgID, attempt)
+			if tt.foreignOrg {
+				require.Error(t, currentErr, "a different tenant cannot construct current allocation input")
+				require.Nil(t, current, "foreign current authority returns no value")
+				require.Error(t, historicalErr, "historical settlement cannot borrow a foreign tenant's allocation")
+				require.Nil(t, historical, "foreign historical authority returns no value")
+			} else {
+				require.NoError(t, currentErr, "exact maximum integer allocation may form current-authority shape")
+				require.NoError(t, historicalErr, "exact maximum integer allocation may form historical-authority shape")
+			}
+		})
+	}
+}
+
+func TestLifecycleDigestCanonicalText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, value string
+		invalid     bool
+	}{
+		{name: "canonical lowercase", value: strings.Repeat("ab", 32)},
+		{name: "uppercase rejected", value: strings.Repeat("AB", 32), invalid: true},
+		{name: "short rejected", value: strings.Repeat("ab", 31), invalid: true},
+		{name: "nonhex rejected", value: strings.Repeat("zz", 32), invalid: true},
+		{name: "zero rejected", value: strings.Repeat("00", 32), invalid: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			digest, err := ParseLifecycleDigest(tt.value)
+			if tt.invalid {
+				require.Error(t, err, "only the frozen nonzero lowercase hexadecimal representation may be stored")
+				require.Equal(t, LifecycleDigest{}, digest, "noncanonical encoding returns no partial digest")
+				return
+			}
+			require.NoError(t, err, "canonical persisted digest should decode without normalization")
+			encoded, err := digest.Encode()
+			require.NoError(t, err, "valid digest should have one text encoding")
+			require.Equal(t, tt.value, encoded, "digest text roundtrip must preserve exact canonical bytes")
+		})
+	}
+	encoded, err := (LifecycleDigest{}).Encode()
+	require.Error(t, err, "zero digest cannot be encoded as usable stored evidence")
+	require.Empty(t, encoded, "failed digest encoding exposes no placeholder identity")
 }

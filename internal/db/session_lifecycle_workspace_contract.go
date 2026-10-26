@@ -118,12 +118,12 @@ func cloneWorkspacePublication(p *WorkspacePublication) *WorkspacePublication {
 	if p == nil {
 		return nil
 	}
-	copy := *p
+	publication := *p
 	if p.Checkpoint != nil {
 		checkpoint := *p.Checkpoint
-		copy.Checkpoint = &checkpoint
+		publication.Checkpoint = &checkpoint
 	}
-	return &copy
+	return &publication
 }
 
 type WorkspaceDescriptorSpec struct {
@@ -517,6 +517,9 @@ func (a InputWorkspaceAnchor) Validate() error {
 		return errors.New("request identity differs from its immutable resume/producer anchor")
 	}
 	resume := s.Identity.Details()
+	if request.kind == RequestIdentityCapability && s.Identity.Kind() == ResumeWorkspaceContinuation {
+		return errors.New("capability request cannot use a workspace continuation requiring a provider request ID")
+	}
 	if s.Identity.Kind() == ResumeWorkspaceContinuation && (resume.ProducerPhaseID != s.PhaseID ||
 		(request.kind == RequestIdentityProvider && resume.ProviderRequestID != request.details.ProviderRequestID)) {
 		return errors.New("workspace continuation differs from the exact request or producing phase")
@@ -919,7 +922,12 @@ func (r ResumabilityReceipt) Validate() error {
 		o.ObservedAt.IsZero() || !o.ExpiresAt.After(o.ObservedAt) {
 		return errors.New("resumability observation requires exact receipt, protocol and bounded observation interval")
 	}
+	if o.Identity.Kind() == ResumeWorkspaceContinuation && o.Target.spec.Kind == ResumabilityRestoreTarget &&
+		!equalWorkspacePublication(o.Identity.Details().Checkpoint, o.Target.spec.Source.spec.Publication) {
+		return errors.New("workspace continuation differs from the exact selected restore checkpoint publication")
+	}
 	if o.Disposition == ResumabilityVerified && (o.Target.spec.TargetAvailability.State != WorkspaceAvailable ||
+		(o.Target.spec.Kind == ResumabilityLiveTarget && d.PhysicalAvailability.State != WorkspaceAvailable) ||
 		(o.Target.spec.Source != nil && o.Target.spec.Source.spec.SnapshotAvailability.State != WorkspaceAvailable)) {
 		return errors.New("verified observation requires explicit usable target and selected restore source")
 	}
