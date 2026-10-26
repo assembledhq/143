@@ -30,11 +30,21 @@ cleanup() {
 trap cleanup EXIT
 
 started="$SECONDS"
-probe_status=0
-# Group redirection also captures Bash's own signal-termination diagnostics.
-{
-  timeout --kill-after=2s 5s "$1" --version || probe_status="$?"
-} 2>/dev/null >"$probe_dir/stdout" 2>"$probe_dir/stderr" || probe_status="$?"
+for attempt in 1 2; do
+  probe_status=0
+  # Group redirection also captures Bash's own signal-termination diagnostics.
+  # Truncate both captures so a retry validates only its own output.
+  {
+    timeout --kill-after=2s 5s "$1" --version || probe_status="$?"
+  } 2>/dev/null >"$probe_dir/stdout" 2>"$probe_dir/stderr" || probe_status="$?"
+  # Allow one more bounded attempt only when startup timed out without output.
+  # Other failures, including forced termination, retain their original status.
+  if [[ "$attempt" -eq 1 && "$probe_status" -eq 124 && ! -s "$probe_dir/stdout" && ! -s "$probe_dir/stderr" ]]; then
+    printf 'Preview Chrome probe retrying: reason=empty_timeout exit_status=124 attempt=1 max_attempts=2\n' >&2 || :
+    continue
+  fi
+  break
+done
 elapsed="$((SECONDS - started))"
 
 byte_count() {

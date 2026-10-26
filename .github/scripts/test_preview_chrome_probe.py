@@ -38,9 +38,15 @@ if name == "timeout":
         os.kill(os.getpid(), 9)
     sys.exit(result.returncode)
 if name in ("google-chrome", "chrome with spaces"):
-    sys.stdout.write(os.environ["CHROME_STDOUT"])
-    sys.stderr.write(os.environ["CHROME_STDERR"])
-    sys.exit(int(os.environ["CHROME_STATUS"]))
+    responses = json.loads(os.environ.get("CHROME_RESPONSES", "[]"))
+    if responses:
+        attempt = sum(json.loads(line)[0] == name for line in (root / "calls.jsonl").read_text().splitlines())
+        response = responses[min(attempt - 1, len(responses) - 1)]
+    else:
+        response = {"status": int(os.environ["CHROME_STATUS"]), "stdout": os.environ["CHROME_STDOUT"], "stderr": os.environ["CHROME_STDERR"]}
+    sys.stdout.write(response["stdout"])
+    sys.stderr.write(response["stderr"])
+    sys.exit(response["status"])
 if name == "wc":
     sys.stderr.write(os.environ["PRIVATE_OUTPUT"])
     sys.exit(19)
@@ -142,6 +148,39 @@ class PreviewChromeProbeTests(unittest.TestCase):
                 self.check_redacted(result)
                 self.assertEqual(self.calls(root), [], "invalid input must never invoke Chrome")
 
+    def test_only_empty_timeout_retries_once(self):
+        success = {"status": 0, "stdout": VERSION + "\n", "stderr": ""}
+        timeout = {"status": 124, "stdout": "", "stderr": ""}
+        cases = [
+            ("recovered", [timeout, success], 0, 2),
+            ("exhausted", [timeout, timeout, success], 124, 2),
+            ("second_failure", [timeout, {"status": 23, "stdout": PRIVATE_OUTPUT, "stderr": PRIVATE_OUTPUT}], 23, 2),
+            ("second_invalid_identity", [timeout, {"status": 0, "stdout": VERSION + PRIVATE_OUTPUT, "stderr": PRIVATE_OUTPUT}], 1, 2),
+            ("empty_non_timeout", [{"status": 23, "stdout": "", "stderr": ""}, success], 23, 1),
+            ("empty_killed", [{"status": 137, "stdout": "", "stderr": ""}, success], 137, 1),
+            ("timeout_with_stdout", [{"status": 124, "stdout": PRIVATE_OUTPUT, "stderr": ""}, success], 124, 1),
+            ("timeout_with_stderr", [{"status": 124, "stdout": "", "stderr": PRIVATE_OUTPUT}, success], 124, 1),
+            ("timeout_with_whitespace", [{"status": 124, "stdout": "\n", "stderr": ""}, success], 124, 1),
+        ]
+        for name, responses, expected, attempts in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                env = self.environment(root, spaces=True, CHROME_RESPONSES=json.dumps(responses))
+                binary = root / "bin" / "chrome with spaces"
+                result = subprocess.run(["bash", str(HELPER), str(binary)], env=env, capture_output=True, text=True, timeout=10, check=False)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(result.stdout, VERSION + "\n" if expected == 0 else "", "only a validated recovered version can reach stdout")
+                self.check_redacted(result)
+                self.assertNotIn(str(root), result.stderr, "retry diagnostics must not expose executable paths")
+                calls = self.calls(root)
+                self.assertEqual([call for call in calls if call[0] == "timeout"], [["timeout", "--kill-after=2s", "5s", str(binary), "--version"]] * attempts, "each permitted attempt must retain its exact timeout and executable")
+                self.assertEqual([call for call in calls if call[0] == "chrome with spaces"], [["chrome with spaces", "--version"]] * attempts, "the second attempt must be the last")
+                retry_messages = result.stderr.count("Preview Chrome probe retrying:")
+                self.assertEqual(retry_messages, attempts - 1, "only an eligible first timeout should emit one retry diagnostic")
+                if expected:
+                    self.assertRegex(result.stderr, rf"exit_status={expected} elapsed_seconds=[0-9]+ stdout_bytes=[0-9]+ stderr_bytes=[0-9]+\n$")
+                self.assertEqual(list((root / "runner").iterdir()), [], "retry captures must be removed after success or failure")
+
     def test_diagnostic_failure_preserves_probe_status(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -190,19 +229,30 @@ class PreviewChromeProbeTests(unittest.TestCase):
             (root / "chrome.pid").write_text(str(os.getpid()))
             with (root / "calls.jsonl").open("a") as calls:
                 calls.write(json.dumps(["google-chrome", *sys.argv[1:]]) + "\\n")
+            attempts = len((root / "calls.jsonl").read_text().splitlines())
+            if os.environ["RECOVER"] == "1" and attempts == 2:
+                print(os.environ["CHROME_VERSION"])
+                sys.exit(0)
             if os.environ["IGNORE_TERM"] == "1":
                 signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            sys.stdout.write(os.environ["PRIVATE_OUTPUT"])
-            sys.stdout.flush()
-            sys.stderr.write(os.environ["PRIVATE_OUTPUT"])
-            sys.stderr.flush()
+            if os.environ["SILENT"] != "1":
+                sys.stdout.write(os.environ["PRIVATE_OUTPUT"])
+                sys.stdout.flush()
+                sys.stderr.write(os.environ["PRIVATE_OUTPUT"])
+                sys.stderr.flush()
             while True:
                 time.sleep(60)
             ''')
-        for ignore_term, expected, minimum_seconds in ((False, 124, 4), (True, 137, 6)):
-            with self.subTest(ignore_term=ignore_term), tempfile.TemporaryDirectory() as directory:
+        cases = [
+            ("cooperative_with_output", False, False, False, 124, 1, 4),
+            ("forced_with_output", True, False, False, 137, 1, 6),
+            ("empty_timeout_recovers", False, True, True, 0, 2, 4),
+            ("empty_timeout_exhausted", False, True, False, 124, 2, 9),
+        ]
+        for name, ignore_term, silent, recover, expected, attempts, minimum_seconds in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                env = self.environment(root, IGNORE_TERM="1" if ignore_term else "0")
+                env = self.environment(root, IGNORE_TERM="1" if ignore_term else "0", SILENT="1" if silent else "0", RECOVER="1" if recover else "0", CHROME_VERSION=VERSION)
                 timeout = root / "bin" / "timeout"
                 timeout.unlink()
                 timeout.symlink_to(gnu_timeout)
@@ -211,7 +261,7 @@ class PreviewChromeProbeTests(unittest.TestCase):
                 started = time.monotonic()
                 process = subprocess.Popen(["bash", str(HELPER), str(binary)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
                 try:
-                    stdout, stderr = process.communicate(timeout=12)
+                    stdout, stderr = process.communicate(timeout=20)
                 except subprocess.TimeoutExpired:
                     # Kill only this test's session/process groups on regression.
                     # The fixture itself sleeps in-process, so it has no children.
@@ -233,26 +283,40 @@ class PreviewChromeProbeTests(unittest.TestCase):
                 result = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
                 self.assertEqual(result.returncode, expected, "real GNU timeout must retain cooperative/forced termination status")
                 self.assertGreaterEqual(elapsed, minimum_seconds, "the real configured timeout and kill grace must be exercised")
-                self.assertLess(elapsed, 12, "the probe must not hang beyond timeout plus bounded kill grace")
-                self.assertEqual(result.stdout, "")
+                self.assertLess(elapsed, 20, "at most two probes must remain bounded by their timeout and kill grace")
+                self.assertEqual(result.stdout, VERSION + "\n" if expected == 0 else "")
                 self.check_redacted(result)
                 self.assertNotIn(str(root), result.stderr, "real signal diagnostics must not publish private executable paths")
-                self.assertRegex(result.stderr, rf"^Preview Chrome probe failed: reason=probe_exit exit_status={expected} elapsed_seconds=[0-9]+ stdout_bytes=[0-9]+ stderr_bytes=[0-9]+\n$")
-                self.assertEqual(self.calls(root), [["google-chrome", "--version"]], "real timeouts must never retry the probe")
+                if expected:
+                    self.assertRegex(result.stderr, rf"Preview Chrome probe failed: reason=probe_exit exit_status={expected} elapsed_seconds=[0-9]+ stdout_bytes=[0-9]+ stderr_bytes=[0-9]+\n$")
+                self.assertEqual(result.stderr.count("Preview Chrome probe retrying:"), attempts - 1, "real empty timeouts can retry only once")
+                self.assertEqual(self.calls(root), [["google-chrome", "--version"]] * attempts, "real timeout recovery must honor the maximum attempt count")
                 self.assertEqual(list((root / "runner").iterdir()), [], "real signal termination must remove private probe captures")
 
     def test_actual_workflow_blocks_tests_after_probe_failure(self):
-        cases = [("pull_request", 0, 0), ("push", 0, 0), ("pull_request", 124, 124), ("push", 23, 23)]
-        for event, status, expected in cases:
-            with self.subTest(event=event, status=status), tempfile.TemporaryDirectory() as directory:
+        success = {"status": 0, "stdout": VERSION + "\n", "stderr": ""}
+        timeout = {"status": 124, "stdout": "", "stderr": ""}
+        cases = [
+            ("pr_success", "pull_request", [success], 0, 1),
+            ("push_success", "push", [success], 0, 1),
+            ("pr_recovers", "pull_request", [timeout, success], 0, 2),
+            ("push_recovers", "push", [timeout, success], 0, 2),
+            ("pr_exhausted", "pull_request", [timeout, timeout, success], 124, 2),
+            ("push_exhausted", "push", [timeout, timeout, success], 124, 2),
+            ("pr_timeout_with_output", "pull_request", [{"status": 124, "stdout": "", "stderr": PRIVATE_OUTPUT}], 124, 1),
+            ("push_other_failure", "push", [{"status": 23, "stdout": "", "stderr": PRIVATE_OUTPUT}], 23, 1),
+        ]
+        for name, event, responses, expected, attempts in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
-                env = self.environment(root, GITHUB_EVENT_NAME=event, CHROME_STATUS=str(status), CHROME_STDERR=PRIVATE_OUTPUT)
+                env = self.environment(root, GITHUB_EVENT_NAME=event, CHROME_RESPONSES=json.dumps(responses))
                 scripts = root / ".github" / "scripts"
                 scripts.mkdir(parents=True)
                 shutil.copyfile(HELPER, scripts / HELPER.name)
                 result = subprocess.run(["bash", "-eo", "pipefail", "-c", browser_script()], cwd=root, env=env, capture_output=True, text=True, timeout=10, check=False)
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.check_redacted(result)
+                self.assertEqual([call for call in self.calls(root) if call[0] == "google-chrome"], [["google-chrome", "--version"]] * attempts, "the workflow must honor probe retry bounds")
                 go = [call for call in self.calls(root) if call[0] == "go"]
                 if expected:
                     self.assertEqual(go, [], "a failed browser identity probe must prevent every browser test")
