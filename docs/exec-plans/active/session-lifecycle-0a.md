@@ -138,6 +138,11 @@ after separate publication authority and per-increment proof. A local stack is a
 implementation convenience for a bounded integration join, never a requirement to
 hold the entire program unpublished. No producer-only binding cutover.
 
+The [A.0/C.0 freeze appendix](session-lifecycle-0a-contract-freeze.md) records the
+shared representation, schema/retention installation ownership and retained
+activation-provenance contract used by the first implementation sequence. It does
+not replace any package's behavioral, review or release gate below.
+
 C.0 owns the shared descriptor, pending-upload receipt, certificate-transition,
 recovery-reservation/reference shapes, RetentionAuthority and exact-target
 observation/ResumabilityReceipt interfaces.
