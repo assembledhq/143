@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -41,7 +42,7 @@ func TestLifecycleEnqueueOwnerBoundary(t *testing.T) {
 			case "different tenant":
 				orgID = uuid.New()
 			}
-			actual, err := enqueueLifecycleJobInTx(ctx, tx, orgID, binding, EnqueueOpts{Queue: "agent", JobType: "continue_session", Payload: json.RawMessage(`{}`)}, nil)
+			actual, err := enqueueLifecycleJobInTx(ctx, tx, orgID, binding, lifecycleEnqueueTestOptions(), nil)
 			require.Error(t, err, "missing ownership, scope or budget must fail before database access")
 			require.Equal(t, lifecycleEnqueueResult{}, actual, "boundary failure must return no candidate or enqueue disposition")
 			require.NoError(t, mock.ExpectationsWereMet(), "enqueue cannot invent an owner transaction or query after cancellation")
@@ -52,8 +53,8 @@ func TestLifecycleEnqueueOwnerBoundary(t *testing.T) {
 func TestLifecycleEnqueueRejectsInvalidInputs(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		change func(*LifecycleJobBinding, *EnqueueOpts)
+		name, wantText string
+		change         func(*LifecycleJobBinding, *EnqueueOpts)
 	}{
 		{name: "zero job", change: func(b *LifecycleJobBinding, _ *EnqueueOpts) { b.jobID = uuid.Nil }},
 		{name: "duplicate input", change: func(b *LifecycleJobBinding, _ *EnqueueOpts) { b.dispatchIDs[1] = b.dispatchIDs[0] }},
@@ -65,6 +66,10 @@ func TestLifecycleEnqueueRejectsInvalidInputs(t *testing.T) {
 		}},
 		{name: "controller is not input job", change: func(_ *LifecycleJobBinding, opts *EnqueueOpts) { opts.JobType = "synthetic_controller" }},
 		{name: "wrong queue", change: func(_ *LifecycleJobBinding, opts *EnqueueOpts) { opts.Queue = "default" }},
+		{name: "default run time cannot be a replay wildcard", wantText: "explicit run time and positive integer max attempts", change: func(_ *LifecycleJobBinding, opts *EnqueueOpts) { opts.RunAt = nil }},
+		{name: "default attempts cannot be a replay wildcard", wantText: "explicit run time and positive integer max attempts", change: func(_ *LifecycleJobBinding, opts *EnqueueOpts) { opts.MaxAttempts = 0 }},
+		{name: "negative attempts", wantText: "explicit run time and positive integer max attempts", change: func(_ *LifecycleJobBinding, opts *EnqueueOpts) { opts.MaxAttempts = -1 }},
+		{name: "attempts outside PostgreSQL integer", wantText: "explicit run time and positive integer max attempts", change: func(_ *LifecycleJobBinding, opts *EnqueueOpts) { opts.MaxAttempts = 1 << 32 }},
 		{name: "unencodable domain payload", change: func(_ *LifecycleJobBinding, opts *EnqueueOpts) { opts.Payload = make(chan bool) }},
 		{name: "null domain envelope", change: func(_ *LifecycleJobBinding, opts *EnqueueOpts) { opts.Payload = json.RawMessage(`null`) }},
 		{name: "ambiguous routing", change: func(_ *LifecycleJobBinding, opts *EnqueueOpts) {
@@ -81,12 +86,15 @@ func TestLifecycleEnqueueRejectsInvalidInputs(t *testing.T) {
 			require.NoError(t, err, "create isolated transaction expectations without a database or settlement owner")
 			defer mock.Close()
 			binding := lifecycleJobPayloadTestBinding(t, models.LifecycleDispatchMessage, true)
-			opts := EnqueueOpts{Queue: "agent", JobType: "continue_session", Payload: json.RawMessage(`{}`)}
+			opts := lifecycleEnqueueTestOptions()
 			tt.change(&binding, &opts)
 			ctx, cancel := context.WithTimeout(context.Background(), LifecycleTransactionTimeout)
 			defer cancel()
 			actual, err := enqueueLifecycleJobInTx(ctx, mock, binding.orgID, binding, opts, nil)
 			require.Error(t, err, "invalid immutable input cannot reach transaction policy or insert SQL")
+			if tt.wantText != "" {
+				require.ErrorContains(t, err, tt.wantText, "invalid concrete options must fail validation, not merely receive an unexpected-query mock error")
+			}
 			require.Equal(t, lifecycleEnqueueResult{}, actual, "every invalid envelope must return zero rather than a partially usable disposition")
 			require.NoError(t, mock.ExpectationsWereMet(), "validation must not begin, configure, query, insert, notify, retry or settle")
 		})
@@ -111,13 +119,13 @@ func TestLifecycleEnqueuePreservesTransactionErrors(t *testing.T) {
 			require.NoError(t, err, "create a supplied transaction that records every permitted query")
 			defer mock.Close()
 			binding := lifecycleJobPayloadTestBinding(t, models.LifecycleDispatchMessage, true)
-			opts := EnqueueOpts{Queue: "agent", JobType: "continue_session", Payload: json.RawMessage(`{}`)}
+			opts := lifecycleEnqueueTestOptions()
 			ctx, cancel := context.WithTimeout(context.Background(), LifecycleTransactionTimeout)
 			defer cancel()
 			mock.ExpectQuery(regexp.QuoteMeta(lifecycleTransactionPolicyQuery)).WillReturnRows(pgxmock.NewRows([]string{"isolation", "marker", "lock", "statement"}).AddRow(tt.isolation, "1", "250ms", "1500ms"))
 			if tt.insertError != nil {
 				mock.ExpectQuery(regexp.QuoteMeta(`SELECT octet_length(($1::jsonb)::text)`)).WithArgs(pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"size"}).AddRow(500))
-				mock.ExpectQuery("INSERT INTO jobs").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).WillReturnError(tt.insertError)
+				mock.ExpectQuery("INSERT INTO jobs").WithArgs(anyArgs(9)...).WillReturnError(tt.insertError)
 			}
 			actual, err := enqueueLifecycleJobInTx(ctx, mock, binding.orgID, binding, opts, nil)
 			if tt.insertError != nil {
@@ -129,6 +137,11 @@ func TestLifecycleEnqueuePreservesTransactionErrors(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "the enqueue helper must never begin, commit, roll back, retry or install settings")
 		})
 	}
+}
+
+func lifecycleEnqueueTestOptions() EnqueueOpts {
+	runAt := time.Date(2030, 1, 2, 3, 4, 5, 123456000, time.UTC)
+	return EnqueueOpts{Queue: "agent", JobType: "continue_session", Payload: json.RawMessage(`{}`), RunAt: &runAt, MaxAttempts: 3}
 }
 
 func TestLifecycleJobCanonicalExpansionBound(t *testing.T) {

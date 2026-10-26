@@ -337,6 +337,9 @@ func lifecycleWorkspaceRecoverySnapshot(t *testing.T, pool *pgxpool.Pool, org, s
 
 func TestLifecycleReservationLegacyCascadeResetPostgres(t *testing.T) {
 	t.Parallel()
+	// Only this inactive fixture's preparation/recovery retention is proved here.
+	// G's later complete child-table TRUNCATE guards must protect bound controls,
+	// parked jobs and allocations before activation; this reset is not that gate.
 	tests := []struct {
 		name                  string
 		preparation, recovery bool
@@ -361,7 +364,7 @@ func TestLifecycleReservationLegacyCascadeResetPostgres(t *testing.T) {
 			if tt.preparation || tt.recovery {
 				requireSessionLifecycleSQLState(t, err, "55000", "cascade reset must retain unresolved preparation and recovery evidence")
 			} else {
-				require.NoError(t, err, "ordinary legacy integration reset must remain available when no new reservation exists")
+				require.NoError(t, err, "this inactive legacy fixture without reservations may reset; active child-evidence safety remains G's later guard exit")
 			}
 			var count int
 			require.NoError(t, pool.QueryRow(context.Background(), `SELECT count(*) FROM sessions WHERE org_id=$1 AND id=$2`, org, session).Scan(&count), "read exact session existence after the atomic cascade attempt")

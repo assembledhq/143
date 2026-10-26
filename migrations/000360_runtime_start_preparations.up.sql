@@ -84,8 +84,11 @@ CREATE TABLE session_runtime_start_preparations (
     )
 );
 
-CREATE INDEX idx_start_preparations_scope ON session_runtime_start_preparations(org_id,session_id,thread_id)
-    WHERE state IN ('preparing','authorized') OR physical_operation_state IN ('reserved','in_progress','unknown');
+-- Complete child-side indexes retain efficient FK checks and reverse discovery
+-- after logical closure, not only while the preparation is active.
+CREATE INDEX idx_start_preparations_scope ON session_runtime_start_preparations(org_id,session_id,thread_id);
+CREATE INDEX idx_start_preparations_thread ON session_runtime_start_preparations(org_id,thread_id);
+CREATE INDEX idx_start_preparations_request ON session_runtime_start_preparations(org_id,session_id,request_id);
 CREATE INDEX idx_start_preparations_due ON session_runtime_start_preparations(next_attempt_at,id)
     WHERE state='preparing' OR physical_operation_state IN ('reserved','in_progress','unknown');
 CREATE INDEX idx_start_preparations_source ON session_runtime_start_preparations(physical_source_key,org_id,session_id)

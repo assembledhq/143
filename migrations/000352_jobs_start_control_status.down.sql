@@ -10,4 +10,5 @@ END $$;
 ALTER TABLE jobs ADD CONSTRAINT chk_jobs_status_legacy CHECK (status IN (
     'pending', 'running', 'succeeded', 'failed', 'cancelled', 'dead_letter'
 )) NOT VALID;
-ALTER TABLE jobs VALIDATE CONSTRAINT chk_jobs_status_legacy;
+-- Leave validation to 351 down, in a separate weaker-lock transaction. The
+-- exclusive rollback unit above already proved that no parked row remains.

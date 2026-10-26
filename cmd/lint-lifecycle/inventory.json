@@ -85,11 +85,11 @@
     },
     {
       "id": "internal/db/session_lifecycle_consumers.go:hasCompetingInputConsumerInTx",
-      "source_sha256": "9a6cc225fb560ee59d87cbbb96857fac3bcd76e42dd8d4a05d04ff8612674aff",
+      "source_sha256": "c12e3f5c16c8ef66867b33a696df3e1956c161542b0998f59d40fb98601d053a",
       "operation": "bounded scope-first logical and physical consumer discovery",
       "owner": "Existing canonical transaction and its ordered parent/lane locks",
-      "predicate": "Observe direct dispatch/runtime/executor/inbox/preparation/recheck/automation/holder evidence and whole-workspace recovery independently of payload decoding. Scan tenant nonterminal input jobs without a JSON-route prefilter; preserve partial legacy anchors and actual lane membership. Require actual immutable binding and allocation for own exceptions.",
-      "lock": "Observe existing lifecycle policy only; no Begin, settings, discovered job lock, settlement, retry or external effect. Fixed row/byte/anchor caps fail closed.",
+      "predicate": "Observe bounded actual lanes including archived/hidden scope, all-status runtime IDs and exact retained generation pairs before disjoint indexed stored-session/reverse-evidence arms. Retained automation links remain independent local anchors; contradictory routes or absent same-tenant runs reconcile without reading foreign rows. Use concrete custom-planned parameters and at most 32 exact generation probes; no cross-product inference or partial negative on overflow. Retain unapplied delivered timestamps in every inbox state. Bound tenant nonterminal input jobs without a JSON-route prefilter and require actual immutable binding/allocation for own exceptions.",
+      "lock": "Observe existing lifecycle policy only; no Begin, settings, discovered job lock, settlement, retry or external effect. Fixed row/byte/anchor and generation-probe caps fail closed within the unchanged caller budget.",
       "stale_result": "Unknown physical settlement, contradictory ownership, missing route and exhausted budgets return typed error, not negative permission. Expiry, terminal status and JSON receipt objects cannot establish drain.",
       "classification": "unfenced-needs-conversion",
       "migration": "A.2 consumes the single shared passive representation. No B/E physical authority validator or G/H mixed-writer exclusion is installed here.",
@@ -97,7 +97,7 @@
       "authority": "Transaction-local observations only; no admission, provider, release or no-launch permission.",
       "fence_outcome": "Only fully observed compatible siblings can be excluded; parked controls, uncertain delivery and whole-workspace recovery remain independently blocking.",
       "prerequisite_0a": "Participating writers must serialize through the same parent; legacy starter/claimer tenant rejection and physical normalization remain later floor obligations.",
-      "evidence": ["internal/db/session_lifecycle_consumers_test.go", "internal/db/session_lifecycle_consumers_postgres_test.go", "internal/db/session_lifecycle_legacy_job_route_test.go"]
+      "evidence": ["internal/db/session_lifecycle_consumers_test.go", "internal/db/session_lifecycle_consumers_postgres_test.go", "internal/db/session_lifecycle_consumer_query_postgres_test.go", "internal/db/session_lifecycle_legacy_job_route_test.go"]
     },
     {
       "id": "internal/db/session_lifecycle_enqueue.go:enqueueLifecycleJobInTx",

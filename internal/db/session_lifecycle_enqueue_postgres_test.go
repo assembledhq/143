@@ -35,8 +35,8 @@ func TestLifecycleEnqueueParkedControlPostgres(t *testing.T) {
 			binding := fixture.expected.Binding
 			var payload json.RawMessage
 			opts := EnqueueOpts{}
-			err := pool.QueryRow(context.Background(), "SELECT payload::text,queue,job_type,priority,dedupe_key,target_node_id FROM jobs WHERE org_id=$1 AND id=$2", binding.orgID, binding.jobID).
-				Scan(&payload, &opts.Queue, &opts.JobType, &opts.Priority, &opts.DedupeKey, &opts.TargetNodeID)
+			err := pool.QueryRow(context.Background(), "SELECT payload::text,queue,job_type,priority,dedupe_key,target_node_id,run_at,max_attempts FROM jobs WHERE org_id=$1 AND id=$2", binding.orgID, binding.jobID).
+				Scan(&payload, &opts.Queue, &opts.JobType, &opts.Priority, &opts.DedupeKey, &opts.TargetNodeID, &opts.RunAt, &opts.MaxAttempts)
 			require.NoError(t, err, "retain the exact real job options and opaque domain payload without numeric conversion")
 			fields, err := lifecycleJobPayloadObject(payload)
 			require.NoError(t, err, "separate the original domain envelope from its immutable binding for exact retry")
@@ -135,6 +135,8 @@ func TestLifecycleEnqueueCollisionPostgres(t *testing.T) {
 		{name: "different recorded epoch", collision: "epoch", want: lifecycleEnqueuePendingReconciliation},
 		{name: "different opaque domain input", collision: "payload", want: lifecycleEnqueuePendingReconciliation},
 		{name: "different selected target", collision: "target", want: lifecycleEnqueuePendingReconciliation},
+		{name: "different concrete run time", collision: "run_at", want: lifecycleEnqueuePendingReconciliation},
+		{name: "different concrete retry budget", collision: "max_attempts", want: lifecycleEnqueuePendingReconciliation},
 		{name: "different input job kind", collision: "job_type", want: lifecycleEnqueuePendingReconciliation},
 		{name: "terminal job is not current consumer", collision: "terminal", want: lifecycleEnqueuePendingReconciliation},
 		{name: "PK collision does not change dedupe key", collision: "key", want: lifecycleEnqueuePendingReconciliation},
@@ -175,6 +177,10 @@ func TestLifecycleEnqueueCollisionPostgres(t *testing.T) {
 					_, err = pool.Exec(context.Background(), `UPDATE jobs SET payload=payload || '{"domain_id":2}'::jsonb WHERE org_id=$1 AND id=$2`, binding.orgID, binding.jobID)
 				case "target":
 					_, err = pool.Exec(context.Background(), `UPDATE jobs SET target_node_id='synthetic_other_target' WHERE org_id=$1 AND id=$2`, binding.orgID, binding.jobID)
+				case "run_at":
+					_, err = pool.Exec(context.Background(), `UPDATE jobs SET run_at=run_at+interval '1 second' WHERE org_id=$1 AND id=$2`, binding.orgID, binding.jobID)
+				case "max_attempts":
+					_, err = pool.Exec(context.Background(), `UPDATE jobs SET max_attempts=max_attempts+1 WHERE org_id=$1 AND id=$2`, binding.orgID, binding.jobID)
 				case "job_type":
 					_, err = pool.Exec(context.Background(), `UPDATE jobs SET job_type='run_agent' WHERE org_id=$1 AND id=$2`, binding.orgID, binding.jobID)
 				case "terminal":

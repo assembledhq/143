@@ -37,10 +37,9 @@ ALTER TABLE sessions
                   AND workspace_recovery->'physical_settlement_receipt' IS NOT NULL
                   AND jsonb_typeof(workspace_recovery->'physical_settlement_receipt')='object')))
     ) NOT VALID;
-CREATE UNIQUE INDEX idx_sessions_workspace_recovery_id ON sessions(org_id,workspace_recovery_id)
-    WHERE workspace_recovery_id IS NOT NULL;
-CREATE INDEX idx_sessions_workspace_recovery_due ON sessions(workspace_recovery_next_attempt_at,id)
-    WHERE workspace_recovery_id IS NOT NULL;
+-- The recovery-ID and due indexes are built concurrently in standalone
+-- migrations, outside this ALTER TABLE transaction. No recovery writer is
+-- installed here; its eventual owner must require both valid indexes.
 
 -- Evidence retention only, not an authority check. The future F owner must
 -- install the exact immutable accepted/outcome/isolation receipt check before
