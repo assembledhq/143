@@ -30,6 +30,7 @@ s3 =
     multipart_chunksize = 16MB
 '''
 SAMPLE_LIMIT = 240
+CHECKSUM_READ_BYTES_PER_SECOND = 32 * 1024 ** 2
 
 
 def proc_identity(pid):
@@ -651,8 +652,10 @@ class TransferGuard(Guard):
     def checksum(self, path):
         self.phase = 'checksum'
         self.phase_deadline = time.monotonic() + self.policy.verify_timeout
+        self.timeline['checksum_read_bytes_per_second'] = CHECKSUM_READ_BYTES_PER_SECOND
         self.checkpoint('checksum_started')
-        checksum = sha256(path, tick=self.tick, drop_cache=True)
+        checksum = sha256(path, tick=self.tick, drop_cache=True,
+                          read_bytes_per_second=CHECKSUM_READ_BYTES_PER_SECOND)
         self.checkpoint('checksum_completed', enforce=False)
         return checksum
 

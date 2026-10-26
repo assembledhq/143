@@ -7,6 +7,7 @@ from pathlib import Path
 import stat
 import subprocess
 import tempfile
+import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 class Refused(RuntimeError):
@@ -132,7 +133,10 @@ def atomic_json(path, data):
             os.unlink(temporary)
 
 
-def sha256(path, *, tick=None, drop_cache=False):
+def sha256(path, *, tick=None, drop_cache=False, read_bytes_per_second=None):
+    require(read_bytes_per_second is None or
+            (type(read_bytes_per_second) is int and read_bytes_per_second > 0),
+            'invalid checksum read rate')
     before = identity(path)
     h = hashlib.sha256()
     with path.open('rb') as f:
@@ -145,6 +149,7 @@ def sha256(path, *, tick=None, drop_cache=False):
         while True:
             if tick:
                 tick()
+            started = time.monotonic() if read_bytes_per_second is not None else None
             block = f.read(8 * 1024 * 1024)
             if not block:
                 break
@@ -152,6 +157,21 @@ def sha256(path, *, tick=None, drop_cache=False):
             if drop_cache:
                 os.posix_fadvise(f.fileno(), offset, len(block), os.POSIX_FADV_DONTNEED)
             offset += len(block)
+            if read_bytes_per_second is not None:
+                # Charge each chunk separately: a slow read or guard check must
+                # never accumulate credit for a later burst. Work time counts
+                # toward the budget; short sleeps keep cancellation, deadlines
+                # and resource monitoring active throughout the wait.
+                deadline = started + len(block) / read_bytes_per_second
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    if tick:
+                        tick()
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(.25, remaining))
     require(identity(path) == before, 'archive changed while hashing')
     return h.hexdigest()
 
