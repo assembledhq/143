@@ -3682,6 +3682,27 @@
       ]
     },
     {
+      "id": "internal/db/session_lifecycle_protocol.go:resolveLifecycleModeInTx",
+      "source_sha256": "f6336e0efce86e7c9396be797bb731a0a487c96e1ea153e13796746f06ee74f1",
+      "operation": "private fail-closed retained protocol mode observation",
+      "owner": "Supplied bounded READ COMMITTED transaction; mode evidence only, no admission or activation owner",
+      "predicate": "Exact nonzero tenant/session after shared interlock. Fresh parent and optional cutover read with visible lane protocol/provider observations. Distinct protocol stamp and CAS revision; strict supported normalization/capability envelopes. Missing parent is not-found; contradictory, missing or unsupported retained provenance never routes to legacy.",
+      "lock": "Existing lifecycle policy and nonwaiting shared transaction advisory key before a separate scoped READ COMMITTED statement. No parent/lane authority locks, settings write, transaction settlement, retry or external effect.",
+      "stale_result": "Every policy, lock, SQL, scan, provenance or context error returns zero mode and its original cause. The outer owner must roll back the complete unit; mode observations cannot outlive that transaction.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "G.1 protocol core only. Migrations 346-348 retain positive parent/active cutover evidence and protect bulk removal; no session activation, complete minimum-writer guard set, child-table coverage or production router is installed.",
+      "canonical_target": "Shared private protocol prerequisite for A.1 and later canonical locked routers, never a reusable permission check",
+      "authority": "None. Mode resolution supplies no actor, domain, epoch, claim, consumer, provider-target or fleet-floor authority. Canonical commands must revalidate exact current mutation policy under ordered row locks.",
+      "fence_outcome": "Never-active/valid shadow is legacy, valid incomplete normalization is pending, supported complete retained provenance is active. Errors expose no partial observation and cannot be treated as version zero.",
+      "prerequisite_0a": "A.1 composes complete compatible legacy and canonical active branches through this resolver; later G guards and H activation/schema-floor, release and mixed-writer proofs remain required before activation.",
+      "evidence": [
+        "internal/db/session_lifecycle_protocol.go:resolveLifecycleModeInTx",
+        "internal/db/session_lifecycle_protocol_test.go",
+        "internal/db/session_lifecycle_protocol_postgres_test.go",
+        "Discovered: boundary-caller and indirect-caller; syntax coverage and raw mode do not establish mutation authority"
+      ]
+    },
+    {
       "id": "internal/db/session_lifecycle_transaction.go:requireLifecycleScopeTransactionInTx",
       "source_sha256": "c73cd4ae5e2a8dfc6b1e67ef561ee900dc8735837dd6d597816a15231024395f",
       "operation": "private read-only lifecycle policy prerequisite",
