@@ -6145,10 +6145,10 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.ContinueSession",
-      "source_sha256": "cad073bbc9c5ad58f058a0298c771290f47e689cb011c8b5ed67d69fe62a02a3",
+      "source_sha256": "06899d60993d050c16d6a204c0c89de425d4854a6882b34e6eac9f18a169fbf5",
       "operation": "ordinary/specialist continuation runtime projections and retry fallbacks",
       "owner": "Orchestrator in internal/services/agent",
-      "predicate": "Selected continuation/input has several preflight checks; network/auth/wrong-node/reuse/start failures write generic idle/pending/fallbackStatus; fallback depends captured session state, not durable epoch. Direct UpdateSandboxState calls use only org/session: startup advertises running, and failure paths may restore a captured sandbox state without current key/container/epoch CAS.",
+      "predicate": "Selected continuation/input has several preflight checks; network/auth/wrong-node/reuse/start failures write generic idle/pending/fallbackStatus; fallback depends captured session state, not durable epoch. Direct UpdateSandboxState calls use only org/session: startup advertises running, and failure paths may restore a captured sandbox state without current key/container/epoch CAS. Transient credential lookup failures delegate to executionCredentialLookupError before missing-credential handling; this preserves retry/error scope without adding mutation authority.",
       "lock": "Job/holder/runtime controls are separate from each generic cleanup; automation-specific portions have their domain attempt fence.",
       "stale_result": "Late fallback can change successor/end; valid old lease cannot consume later input or restart stale job. Availability is a separate current shared mutation: an old startup/fallback cannot mark successor or expired pinned context running/snapshotted.",
       "classification": "unfenced-needs-conversion",
@@ -6158,7 +6158,7 @@
       "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority. Availability/start/recovery mutation is strict and independently fenced. Preallocation projection has strict admission authority; F2 is only exact allocated own terminal receipt and skips stale availability.",
       "prerequisite_0a": "0a: exact dispatch/request/input and epoch validation before effects, seed/start/handoff checks, and canonical stale-aware fallback for every branch; preserve typed domain authority, no current-generation adoption. Explicitly fence each UpdateSandboxState under current availability/reference/workspace epochs; preserve original A unavailable descriptor instead of borrowing B, and skip stale startup/failure availability compensation.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:4367",
+        "internal/services/agent/orchestrator.go:4374",
         "Discovered: boundary-caller, boundary-definition, dispatch-reference, indirect-caller",
         "Boundary/call candidate: job type continue_session",
         "Boundary/call candidate: keepSessionRunningIfSiblingRuntimesActive -> internal/services/agent/thread_runtime_delivery.go:keepSessionRunningIfSiblingRuntimesActive",
@@ -6219,7 +6219,8 @@
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete",
         "Boundary/call candidate: threadRuntimeCtl.Close -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.Close",
-        "Boundary/call candidate: threadRuntimeCtl.admitSeedWithoutPhase -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.admitSeedWithoutPhase"
+        "Boundary/call candidate: threadRuntimeCtl.admitSeedWithoutPhase -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.admitSeedWithoutPhase",
+        "Credential lookup error routing reviewed with startup, fallback/probe, ordinary review-thread exhaustion and fenced recheck regressions."
       ]
     },
     {
@@ -6297,10 +6298,10 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.RunAgent",
-      "source_sha256": "acbdc0790cf24f4a6282a3a66e6626a87ca45c519b7f929e8d4de259e7f2afc2",
+      "source_sha256": "e3b178ab903c8680b98d39727154763dfcde9d7e2eaf01d3b1c42ae8c291777b",
       "operation": "initial runtime running/success/failure projections",
       "owner": "Orchestrator in internal/services/agent",
-      "predicate": "beginRuntimeControl writes running; primary thread generic running; sandbox-hold loser diagnoses preview/stale container then generic pending. Completion may generic thread result. Direct UpdateSandboxState calls use only org/session: startup advertises running, and failure paths may restore a captured sandbox state without current key/container/epoch CAS.",
+      "predicate": "beginRuntimeControl writes running; primary thread generic running; sandbox-hold loser diagnoses preview/stale container then generic pending. Completion may generic thread result. Direct UpdateSandboxState calls use only org/session: startup advertises running, and failure paths may restore a captured sandbox state without current key/container/epoch CAS. Transient credential lookup failures delegate to executionCredentialLookupError before missing-credential handling; this preserves retry/error scope without adding mutation authority.",
       "lock": "Executor/job/hold protocols exist, but generic parent/thread projections are not under shared admission/end fence.",
       "stale_result": "A stale accepted initial job can reopen ended work or project pending after holder successor; uniqueness/hold race is not authorization. Availability is a separate current shared mutation: an old startup/fallback cannot mark successor or expired pinned context running/snapshotted.",
       "classification": "unfenced-needs-conversion",
@@ -6367,7 +6368,8 @@
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/db/session_thread_store.go:SessionThreadStore.UpdateTurnComplete",
         "Boundary/call candidate: sessions.UpdateTurnComplete -> internal/services/automations/turn_attempt_persistence.go:turnAttemptSessions.UpdateTurnComplete",
         "Boundary/call candidate: threadRuntimeCtl.Close -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.Close",
-        "Boundary/call candidate: threadRuntimeCtl.admitSeedWithoutPhase -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.admitSeedWithoutPhase"
+        "Boundary/call candidate: threadRuntimeCtl.admitSeedWithoutPhase -> internal/services/agent/thread_runtime_delivery.go:threadRuntimeControl.admitSeedWithoutPhase",
+        "Credential lookup error routing reviewed with startup, fallback/probe, ordinary review-thread exhaustion and fenced recheck regressions."
       ]
     },
     {
@@ -6534,35 +6536,55 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.ensureClaudeCodeAuth",
-      "source_sha256": "49ecdafc09b5889ad23bcc04905ce40b98dacb406272ce143fdb8bcc64b8c256",
+      "source_sha256": "6792935c36fd543fe9239b4156120a010c08e016338a43eb2c4ad55ebd776cf9",
       "operation": "Orchestrator.ensureClaudeCodeAuth: indirect lifecycle caller",
       "owner": "Orchestrator in internal/services/agent",
-      "predicate": "Syntactic boundary/callee candidates: o.failRunWithCategoryForThread -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, \"claude subscription is marked invalid; reconnect required\", FailureCategoryClaudeCodeAuth, \"Your Claude subscription is no longer valid (its token was rejected or revoked), so it was removed from rotation. Reconnect it from Account settings to continue.\", []string{\"Reconnect your Claude subscription from Account settings\", \"Or add an Anthropic API key in Account settings\"}) -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, \"no credentials c [excerpt; see symbol source]; no independent authorization proof inferred.",
+      "predicate": "Syntactic boundary/callee candidates: o.failRunWithCategoryForThread -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, \"claude subscription is marked invalid; reconnect required\", FailureCategoryClaudeCodeAuth, \"Your Claude subscription is no longer valid (its token was rejected or revoked), so it was removed from rotation. Reconnect it from Account settings to continue.\", []string{\"Reconnect your Claude subscription from Account settings\", \"Or add an Anthropic API key in Account settings\"}) -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, \"no credentials c [excerpt; see symbol source]; no independent authorization proof inferred. Transient credential lookup failures delegate to executionCredentialLookupError before missing-credential handling; this preserves retry/error scope without adding mutation authority.",
       "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: o.failRunWithCategoryForThread -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, \"claude subscription is marked invalid; reconnect required\", FailureCategoryClaudeCodeAuth, \"Your Claude subscription is no longer valid (its token was rejected or revoked), so it was removed from rotation. Reconnect it from Account settings to continue.\", []string{\"Reconnect your Claude subscription from Account settings\", \"Or add an Anthropic API key in Account settings\"}) -> internal/services/agent/orchestrator.go:Orchestrato [excerpt; see symbol source]",
       "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:8671",
+        "internal/services/agent/orchestrator.go:8858",
         "Discovered: indirect-caller",
-        "Boundary/call candidate: o.failRunWithCategoryForThread -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread"
+        "Boundary/call candidate: o.failRunWithCategoryForThread -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread",
+        "Credential lookup error routing reviewed with startup, fallback/probe, ordinary review-thread exhaustion and fenced recheck regressions."
       ]
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.ensureCodexAuth",
-      "source_sha256": "9d5631bc56a6c9b637f14588e0ea86f6f8b1ccc67471155fb545dc16c671425e",
+      "source_sha256": "8a2bba134a6499db24f3cd0ca86c62f0be6d9102ab5f7e318d4e86f0fb57cf0d",
       "operation": "Orchestrator.ensureCodexAuth: indirect lifecycle caller",
       "owner": "Orchestrator in internal/services/agent",
-      "predicate": "Syntactic boundary/callee candidates: o.failRunWithCategoryForThread -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, \"no credentials configured for codex: connect ChatGPT from the Overview page\", FailureCategoryCodexAuth, \"No ChatGPT credentials are configured. Please connect your ChatGPT account to use Codex.\", []string{\"Re-authenticate with ChatGPT from the session page to sign in\"}) -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, fmt.Sprintf(\"codex auth injection failed: %s\", err), FailureCategoryCodexAuth, \"Your ChatGPT authentication has expired or  [excerpt; see symbol source]; no independent authorization proof inferred.",
+      "predicate": "Syntactic boundary/callee candidates: o.failRunWithCategoryForThread -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, \"no credentials configured for codex: connect ChatGPT from the Overview page\", FailureCategoryCodexAuth, \"No ChatGPT credentials are configured. Please connect your ChatGPT account to use Codex.\", []string{\"Re-authenticate with ChatGPT from the session page to sign in\"}) -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, fmt.Sprintf(\"codex auth injection failed: %s\", err), FailureCategoryCodexAuth, \"Your ChatGPT authentication has expired or  [excerpt; see symbol source]; no independent authorization proof inferred. Transient credential lookup failures delegate to executionCredentialLookupError before missing-credential handling; this preserves retry/error scope without adding mutation authority.",
       "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: o.failRunWithCategoryForThread -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, \"no credentials configured for codex: connect ChatGPT from the Overview page\", FailureCategoryCodexAuth, \"No ChatGPT credentials are configured. Please connect your ChatGPT account to use Codex.\", []string{\"Re-authenticate with ChatGPT from the session page to sign in\"}) -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread; o.failRunWithCategoryForThread(ctx, run, threadID, fmt.Sprintf(\"codex auth [excerpt; see symbol source]",
       "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:7951",
+        "internal/services/agent/orchestrator.go:8080",
         "Discovered: indirect-caller",
         "Boundary/call candidate: o.failRunWithCategoryForThread -> internal/services/agent/orchestrator.go:Orchestrator.failRunWithCategoryForThread",
-        "Boundary/call candidate: o.registerSandboxInfraFailure -> internal/services/agent/orchestrator.go:Orchestrator.registerSandboxInfraFailure"
+        "Boundary/call candidate: o.registerSandboxInfraFailure -> internal/services/agent/orchestrator.go:Orchestrator.registerSandboxInfraFailure",
+        "Credential lookup error routing reviewed with startup, fallback/probe, ordinary review-thread exhaustion and fenced recheck regressions."
+      ]
+    },
+    {
+      "id": "internal/services/agent/orchestrator.go:Orchestrator.executionCredentialLookupError",
+      "source_sha256": "c256f4e1a909405b69286690f5e0e85a2b2583357f9d18cce617a952d7edd1e9",
+      "operation": "Orchestrator.executionCredentialLookupError: deferred credential infrastructure failure routing",
+      "owner": "Orchestrator in internal/services/agent",
+      "predicate": "A captured credential lookup error returns a typed retryable cause without repicking or treating the stack as empty. Fenced rechecks register no hook. Ordinary code-review turns capture exact session/thread identity and register a thread-only dead-letter hook through failCodeReviewThreadTurn; ordinary sessions use the existing registerSandboxInfraFailure hook. Review origin with no valid thread registers no parent hook.",
+      "lock": "No local transaction or shared lifecycle epoch. Job dead-letter hooks defer terminal bookkeeping until retry exhaustion; existing exact-thread helper uses a detached bounded context. Registration is not proof of shared lifecycle authority.",
+      "stale_result": "Exact org/session/thread identity narrows failure projection and leaves parent/siblings untouched, but does not establish a generation, admission or end fence. Stale hook execution still requires the enclosing worker/domain ownership protocol.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "M0 syntax-observation row, not reviewed mutation authority. Preserve deferred retry semantics, exact-thread review scope and fenced recheck receipt ownership while tracing worker ownership and adding operation-specific epoch/lease checks; do not treat thread identity as a shared lifecycle fence.",
+      "evidence": [
+        "internal/services/agent/orchestrator.go:10297",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: o.failCodeReviewThreadTurn -> internal/services/agent/orchestrator.go:Orchestrator.failCodeReviewThreadTurn",
+        "Boundary/call candidate: o.registerSandboxInfraFailure -> internal/services/agent/orchestrator.go:Orchestrator.registerSandboxInfraFailure",
+        "TestReviewCredentialLookupFailureDoesNotRegisterParentFailureHook verifies exhausted ordinary review settlement is thread-only and rechecks register no terminal hook."
       ]
     },
     {
@@ -7027,18 +7049,19 @@
     },
     {
       "id": "internal/services/agent/orchestrator.go:Orchestrator.retrySessionOnCredentialRateLimit",
-      "source_sha256": "5cc31929ba5e87304d237e4b5bcf8a4297ca1e370fce3a5a9ce31fdd8cd15cb6",
+      "source_sha256": "143a44e49c386262dffb562ebb66e27dfebba9911329ffc4a4ee3adb6692f40a",
       "operation": "Orchestrator.retrySessionOnCredentialRateLimit: indirect lifecycle caller",
       "owner": "Orchestrator in internal/services/agent",
-      "predicate": "Syntactic boundary/callee candidates: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry; o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, retrySandbox, refreshedEnv) -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry. Auth preparation uses a candidate credential-bound sandbox; only successful preparation publishes it to the execution handle. No independent authorization proof inferred.",
+      "predicate": "Syntactic boundary/callee candidates: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry; o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, retrySandbox, refreshedEnv) -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry. Auth preparation uses a candidate credential-bound sandbox; only successful preparation publishes it to the execution handle. No independent authorization proof inferred. Transient credential lookup failures delegate to executionCredentialLookupError before missing-credential handling; this preserves retry/error scope without adding mutation authority.",
       "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry; o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, retrySandbox, refreshedEnv) -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry",
       "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/agent/orchestrator.go:10158",
+        "internal/services/agent/orchestrator.go:10180",
         "Discovered: indirect-caller",
-        "Boundary/call candidate: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry"
+        "Boundary/call candidate: o.prepareAgentAuthForRetry -> internal/services/agent/orchestrator.go:Orchestrator.prepareAgentAuthForRetry",
+        "Credential lookup error routing reviewed with startup, fallback/probe, ordinary review-thread exhaustion and fenced recheck regressions."
       ]
     },
     {

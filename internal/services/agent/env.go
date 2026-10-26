@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -780,11 +781,15 @@ func (e *AgentEnv) ResolveForModel(ctx context.Context, orgID uuid.UUID, agentTy
 func (e *AgentEnv) ResolveForModelWithCredential(ctx context.Context, orgID uuid.UUID, agentType models.AgentType, userID *uuid.UUID, modelOverride string) *resolvedAgentEnv {
 	merged := make(map[string]string)
 	var picked *models.DecryptedCodingCredential
+	var credentialAuthoritative bool
+	var credentialLookupErr error
 
 	switch agentType {
 	case models.AgentTypeClaudeCode:
-		cfg, credential := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderAnthropic)
+		cfg, credential, authoritative, lookupErr := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderAnthropic)
 		picked = credential
+		credentialAuthoritative = authoritative
+		credentialLookupErr = lookupErr
 		if ac, ok := cfg.(models.AnthropicConfig); ok {
 			if ac.APIKey != "" {
 				merged["ANTHROPIC_API_KEY"] = ac.APIKey
@@ -807,8 +812,10 @@ func (e *AgentEnv) ResolveForModelWithCredential(ctx context.Context, orgID uuid
 		//
 		// Inject the general OpenAI API key as OPENAI_API_KEY for other
 		// tools in the sandbox (not used by Codex CLI itself).
-		cfg, credential := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderOpenAI)
+		cfg, credential, authoritative, lookupErr := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderOpenAI)
 		picked = credential
+		credentialAuthoritative = authoritative
+		credentialLookupErr = lookupErr
 		if oc, ok := cfg.(models.OpenAIConfig); ok {
 			if oc.APIKey != "" {
 				merged["OPENAI_API_KEY"] = oc.APIKey
@@ -826,24 +833,30 @@ func (e *AgentEnv) ResolveForModelWithCredential(ctx context.Context, orgID uuid
 		// unprivileged user namespaces that bwrap requires.
 		merged["CODEX_UNSAFE_ALLOW_NO_SANDBOX"] = "1"
 	case models.AgentTypeAmp:
-		cfg, credential := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderAmp)
+		cfg, credential, authoritative, lookupErr := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderAmp)
 		picked = credential
+		credentialAuthoritative = authoritative
+		credentialLookupErr = lookupErr
 		if amp, ok := cfg.(models.AmpConfig); ok && amp.APIKey != "" {
 			merged["AMP_API_KEY"] = amp.APIKey
 		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderAmp); ok {
 			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypePi:
-		cfg, credential := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderPi)
+		cfg, credential, authoritative, lookupErr := e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderPi)
 		picked = credential
+		credentialAuthoritative = authoritative
+		credentialLookupErr = lookupErr
 		if pi, ok := cfg.(models.PiConfig); ok && pi.APIKey != "" {
 			merged["PI_API_KEY"] = pi.APIKey
 		} else if block, ok := e.lookupCredentialBlock(orgID, userID, models.ProviderPi); ok {
 			setAuthBlockedEnv(merged, block)
 		}
 	case models.AgentTypeOpenCode:
-		cfg, credential := e.resolveOpenCodeProviderConfigWithCredential(ctx, orgID, userID, modelOverride)
+		cfg, credential, authoritative, lookupErr := e.resolveOpenCodeProviderConfigWithCredential(ctx, orgID, userID, modelOverride)
 		picked = credential
+		credentialAuthoritative = authoritative
+		credentialLookupErr = lookupErr
 		if oc, ok := cfg.(models.OpenCodeConfig); ok && oc.APIKey != "" {
 			// The resolver pins oc.Model to the chosen route's physical model
 			// id. Only the generic-fallback path (no curated route matched)
@@ -954,7 +967,7 @@ func (e *AgentEnv) ResolveForModelWithCredential(ctx context.Context, orgID uuid
 	if len(merged) == 0 {
 		merged = nil
 	}
-	resolved := &resolvedAgentEnv{Env: merged}
+	resolved := &resolvedAgentEnv{Env: merged, credentialAuthoritative: credentialAuthoritative, credentialLookupErr: credentialLookupErr}
 	if picked != nil {
 		resolved.Credential = captureRuntimeCredential(*picked, agentType, merged)
 	}
@@ -1180,11 +1193,11 @@ func (e *AgentEnv) effectiveOpenCodeModel(ctx context.Context, orgID uuid.UUID, 
 // Returns nil and records a structured credential block when no route is
 // runnable.
 func (e *AgentEnv) resolveOpenCodeProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) models.ProviderConfig {
-	cfg, _ := e.resolveOpenCodeProviderConfigWithCredential(ctx, orgID, userID, modelOverride)
+	cfg, _, _, _ := e.resolveOpenCodeProviderConfigWithCredential(ctx, orgID, userID, modelOverride)
 	return cfg
 }
 
-func (e *AgentEnv) resolveOpenCodeProviderConfigWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) (models.ProviderConfig, *models.DecryptedCodingCredential) {
+func (e *AgentEnv) resolveOpenCodeProviderConfigWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) (models.ProviderConfig, *models.DecryptedCodingCredential, bool, error) {
 	selection, routes, modelAware := e.openCodeRuntimeRoutes(ctx, orgID, modelOverride)
 	if !modelAware {
 		// With no model preference (or an unknown bare slug), pick any runnable
@@ -1281,15 +1294,21 @@ func (e *AgentEnv) openCodeAllowNativeFallback(ctx context.Context, orgID uuid.U
 // the config's Model to that route's physical id. Records a rate-limit or
 // no-runnable-route block when nothing matches.
 func (e *AgentEnv) resolveAcrossOpenCodeRoutes(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, selection string, routes []models.OpenCodeRoute) models.ProviderConfig {
-	cfg, _ := e.resolveAcrossOpenCodeRoutesWithCredential(ctx, orgID, userID, selection, routes)
+	cfg, _, _, _ := e.resolveAcrossOpenCodeRoutesWithCredential(ctx, orgID, userID, selection, routes)
 	return cfg
 }
 
-func (e *AgentEnv) resolveAcrossOpenCodeRoutesWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, selection string, routes []models.OpenCodeRoute) (models.ProviderConfig, *models.DecryptedCodingCredential) {
+func (e *AgentEnv) resolveAcrossOpenCodeRoutesWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, selection string, routes []models.OpenCodeRoute) (models.ProviderConfig, *models.DecryptedCodingCredential, bool, error) {
+	if e.codingCredentials == nil {
+		return nil, nil, false, nil
+	}
 	providers := []models.ProviderName{models.ProviderOpenCode}
-	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
-	if !ok || !sawRows {
-		return e.resolveProviderConfigWithCredential(ctx, orgID, userID, models.ProviderOpenCode)
+	rowsByProvider, sawRows, lookupErr := e.listCodingProviderRowsWithError(ctx, orgID, userID, providers)
+	if lookupErr != nil {
+		return nil, nil, false, lookupErr
+	}
+	if !sawRows {
+		return nil, nil, true, nil
 	}
 
 	rows := append([]models.DecryptedCodingCredential(nil), rowsByProvider[models.ProviderOpenCode]...)
@@ -1326,7 +1345,7 @@ func (e *AgentEnv) resolveAcrossOpenCodeRoutesWithCredential(ctx context.Context
 			cfg.BackingProvider = route.Backing
 			cfg.Model = openCodeCLIModelID(route.PhysicalModelID, route.Backing)
 			e.recordCredentialPick(orgID, userID, models.ProviderOpenCode, cred)
-			return cfg, &cred
+			return cfg, &cred, true, nil
 		}
 	}
 
@@ -1335,7 +1354,7 @@ func (e *AgentEnv) resolveAcrossOpenCodeRoutesWithCredential(ctx context.Context
 	} else {
 		e.recordCredentialBlock(orgID, userID, noRunnableOpenCodeRouteBlock(selection, routes))
 	}
-	return nil, nil
+	return nil, nil, true, nil
 }
 
 func (e *AgentEnv) openCodeModelFromAgentConfig(ctx context.Context, orgID uuid.UUID) string {
@@ -1697,23 +1716,23 @@ func (e *AgentEnv) loadAgentSettingsSnapshot(ctx context.Context, orgID uuid.UUI
 // subscription rows, and the first runnable row wins. With no unified store
 // wired (older test rigs) or no runnable rows, the resolver returns nil.
 func (e *AgentEnv) resolveProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) models.ProviderConfig {
-	cfg, _ := e.resolveProviderConfigWithCredential(ctx, orgID, userID, provider)
+	cfg, _, _, _ := e.resolveProviderConfigWithCredential(ctx, orgID, userID, provider)
 	return cfg
 }
 
-func (e *AgentEnv) resolveProviderConfigWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.ProviderConfig, *models.DecryptedCodingCredential) {
+func (e *AgentEnv) resolveProviderConfigWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) (models.ProviderConfig, *models.DecryptedCodingCredential, bool, error) {
 	if e.codingCredentials == nil {
-		return nil, nil
+		return nil, nil, false, nil
 	}
 	providers := []models.ProviderName{provider}
 	if twin := unifiedSubscriptionTwin(provider); twin != "" {
 		providers = append(providers, twin)
 	}
-	cfg, picked, _ := e.pickFromCodingProviderSet(ctx, orgID, userID, provider, providers)
+	cfg, picked, handled, lookupErr := e.pickFromCodingProviderSetWithError(ctx, orgID, userID, provider, providers)
 	if cfg == nil {
-		return nil, nil
+		picked = nil
 	}
-	return cfg, picked
+	return cfg, picked, handled && lookupErr == nil, lookupErr
 }
 
 // resolveFromCodingCredentials walks the unified resolver result, plus its
@@ -1738,15 +1757,23 @@ func (e *AgentEnv) resolveFromCodingCredentials(ctx context.Context, orgID uuid.
 }
 
 func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, requestedProvider models.ProviderName, providers []models.ProviderName) (models.ProviderConfig, *models.DecryptedCodingCredential, bool) {
-	rowsByProvider, sawRows, ok := e.listCodingProviderRows(ctx, orgID, userID, providers)
-	if !ok {
+	cfg, picked, handled, _ := e.pickFromCodingProviderSetWithError(ctx, orgID, userID, requestedProvider, providers)
+	return cfg, picked, handled
+}
+
+// The handled flag retains the legacy distinction between a failed initial
+// list lookup and a completed list followed by selection. New callers must
+// also check lookupErr before treating the result as authoritative.
+func (e *AgentEnv) pickFromCodingProviderSetWithError(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, requestedProvider models.ProviderName, providers []models.ProviderName) (models.ProviderConfig, *models.DecryptedCodingCredential, bool, error) {
+	rowsByProvider, sawRows, lookupErr := e.listCodingProviderRowsWithError(ctx, orgID, userID, providers)
+	if lookupErr != nil {
 		// Lookup errored. Report "not handled" rather than "unified
 		// authoritative with zero rows" so callers can distinguish a
 		// transient pgx error from a genuinely empty credential stack.
-		return nil, nil, false
+		return nil, nil, false, lookupErr
 	}
 	if !sawRows {
-		return nil, nil, true
+		return nil, nil, true, nil
 	}
 
 	if picker, ok := e.codingCredentials.(CodingCredentialMultiPicker); ok {
@@ -1759,22 +1786,25 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 			// so CheckAuth can produce a clear user-facing continue-session
 			// failure instead of a generic missing-key error.
 			e.logger.Warn().Err(pickErr).Str("provider", string(requestedProvider)).Msg("coding credential picker found no eligible credential")
+			if !errors.Is(pickErr, db.ErrCodingCredentialNotFound) && !isAllCredentialsShedError(pickErr) {
+				return nil, nil, true, fmt.Errorf("pick coding credentials for %s: %w", requestedProvider, pickErr)
+			}
 			if isAllCredentialsShedError(pickErr) {
 				e.recordCredentialBlock(orgID, userID, rateLimitBlockForProvider(requestedProvider, rowsByProvider, providers))
 			}
-			return nil, nil, true
+			return nil, nil, true, nil
 		}
 		if picked == nil {
-			return nil, nil, true
+			return nil, nil, true, nil
 		}
 		if cfg, ok := compatibleCodingProviderConfig(picked.Provider, picked.Config); ok {
 			e.recordCredentialPick(orgID, userID, picked.Provider, *picked)
 			if picked.Provider != requestedProvider {
 				e.recordCredentialPick(orgID, userID, requestedProvider, *picked)
 			}
-			return cfg, picked, true
+			return cfg, picked, true, nil
 		}
-		return nil, picked, true
+		return nil, picked, true, nil
 	}
 
 	creds := make([]models.DecryptedCodingCredential, 0)
@@ -1792,10 +1822,10 @@ func (e *AgentEnv) pickFromCodingProviderSet(ctx context.Context, orgID uuid.UUI
 				e.recordCredentialPick(orgID, userID, requestedProvider, cred)
 			}
 			picked := cred
-			return cfg, &picked, true
+			return cfg, &picked, true, nil
 		}
 	}
-	return nil, nil, true
+	return nil, nil, true, nil
 }
 
 func (e *AgentEnv) recordCredentialBlock(orgID uuid.UUID, userID *uuid.UUID, block credentialBlock) {
@@ -1887,20 +1917,25 @@ func agentLabelForProvider(provider models.ProviderName) string {
 }
 
 func (e *AgentEnv) listCodingProviderRows(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, bool, bool) {
+	rows, sawRows, err := e.listCodingProviderRowsWithError(ctx, orgID, userID, providers)
+	return rows, sawRows, err == nil
+}
+
+func (e *AgentEnv) listCodingProviderRowsWithError(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, bool, error) {
 	rowsByProvider := make(map[models.ProviderName][]models.DecryptedCodingCredential, len(providers))
 	sawRows := false
 	for _, provider := range providers {
 		creds, err := e.codingCredentials.ListResolvable(ctx, orgID, userID, provider)
 		if err != nil {
 			e.logger.Warn().Err(err).Str("provider", string(provider)).Msg("coding credential resolver lookup failed")
-			return nil, false, false
+			return nil, false, fmt.Errorf("resolve coding credentials for %s: %w", provider, err)
 		}
 		if len(creds) > 0 {
 			sawRows = true
 		}
 		rowsByProvider[provider] = creds
 	}
-	return rowsByProvider, sawRows, true
+	return rowsByProvider, sawRows, nil
 }
 
 func sortCodingCredentialResolutionRows(creds []models.DecryptedCodingCredential) {

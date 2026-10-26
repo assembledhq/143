@@ -14,6 +14,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -177,7 +178,7 @@ func (m *envCodingCredentialProvider) PickRunnableMulti(_ context.Context, _ mod
 	return nil, errEnvCodingCredentialNotFound
 }
 
-var errEnvCodingCredentialNotFound = errors.New("coding credential not found")
+var errEnvCodingCredentialNotFound = db.ErrCodingCredentialNotFound
 
 func containsUUID(ids []uuid.UUID, id uuid.UUID) bool {
 	for _, existing := range ids {

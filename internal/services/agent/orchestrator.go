@@ -3436,6 +3436,9 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	sandboxCfg.OrgID = run.OrgID.String()
 	sandboxCfg.Purpose = "agent_run"
 	credentialResolution := o.env.ResolveForModelWithCredential(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID, stringPtrValue(run.ModelOverride))
+	if lookupErr := o.executionCredentialLookupError(ctx, run, primaryThreadID, credentialResolution); lookupErr != nil {
+		return lookupErr
+	}
 	sandboxCfg.Env = credentialResolution.Env
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
@@ -4039,6 +4042,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 			elapsed := time.Since(runStartedAt).Round(time.Second)
 			o.failTimedOutSession(ctx, run, elapsed, 0, err, log, activityExecution)
 			return fmt.Errorf("%w after %s: %w", ErrSessionTimedOut, elapsed, err)
+		}
+		var lookupErr *executionCredentialLookupFailure
+		if errors.As(err, &lookupErr) {
+			completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
+			return err
 		}
 		failureAlreadyRecorded := isRunFailureRecorded(err)
 		if !failureAlreadyRecorded {
@@ -4802,6 +4810,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "continue_session"
 	credentialResolution := o.env.ResolveForModelWithCredential(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride))
+	if lookupErr := o.executionCredentialLookupError(ctx, session, threadID, credentialResolution); lookupErr != nil {
+		return lookupErr
+	}
 	sandboxCfg.Env = credentialResolution.Env
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
@@ -6214,6 +6225,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			}
 			o.failTimedOutSession(ctx, session, elapsed, messageTurnNumber, err, log, activityExecution)
 			return fmt.Errorf("%w on turn %d after %s: %w", ErrSessionTimedOut, messageTurnNumber, elapsed, err)
+		}
+		var lookupErr *executionCredentialLookupFailure
+		if errors.As(err, &lookupErr) {
+			completeActivityPhaseDetached(activityExecution, models.ActivityPhaseStatusFailed, models.ActivityPhaseBoundaryError, log)
+			return err
 		}
 		if isRunFailureRecorded(err) && isCodeReviewThreadTurn(session, threadID) {
 			return fmt.Errorf("%w: %w", ErrCodeReviewThreadFailed, err)
@@ -8062,6 +8078,9 @@ func (o *Orchestrator) failTimedOutSession(ctx context.Context, run *models.Sess
 // It returns the resolved billing mode so downstream usage normalization can
 // distinguish direct provider-reported USD from derived subscription credits.
 func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
+	if lookupErr := o.executionCredentialLookupError(ctx, run, threadID, sandbox.credentialResolution); lookupErr != nil {
+		return TokenBillingModeUnknown, lookupErr
+	}
 	// For Codex, OPENAI_API_KEY is only populated when AgentEnv resolved an
 	// OpenAI API-key credential. Subscription-backed Codex auth uses auth.json
 	// instead and does not inject OPENAI_API_KEY. That makes the env var itself
@@ -8173,6 +8192,9 @@ func (o *Orchestrator) billingModeForAgent(
 	fallback TokenBillingMode,
 	sandboxes ...*Sandbox,
 ) TokenBillingMode {
+	if fallback != "" && fallback != TokenBillingModeUnknown {
+		return fallback
+	}
 	if len(sandboxes) > 0 && sandboxes[0] != nil && sandboxes[0].credentialResolution != nil {
 		selection := sandboxes[0].credentialResolution.Credential
 		if selection != nil {
@@ -8185,9 +8207,6 @@ func (o *Orchestrator) billingModeForAgent(
 				return TokenBillingModeSubscription
 			}
 		}
-	}
-	if fallback != "" && fallback != TokenBillingModeUnknown {
-		return fallback
 	}
 	switch agentType {
 	case models.AgentTypeCodex:
@@ -8837,6 +8856,9 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 // over the legacy ANTHROPIC_API_KEY fallback. The run only fails when neither
 // path is configured.
 func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
+	if lookupErr := o.executionCredentialLookupError(ctx, run, threadID, sandbox.credentialResolution); lookupErr != nil {
+		return TokenBillingModeUnknown, lookupErr
+	}
 	claudeCodeVersion := o.detectClaudeCodeVersion(ctx, sandbox)
 	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
 	if env["ANTHROPIC_API_KEY"] != "" && o.unifiedCodingCredentialIsAPIKeyForSandbox(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic, sandbox) {
@@ -10178,6 +10200,9 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log, sandbox)
 
 	resolution := o.resolveSessionCredentials(ctx, session, sandboxCfg)
+	if lookupErr := o.executionCredentialLookupError(ctx, session, writeCtx.ThreadID, resolution); lookupErr != nil {
+		return result, lookupErr, false
+	}
 	refreshedEnv := resolution.Env
 	if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
 		logCredentialRateLimitBlocked(log, session, authErr)
@@ -10196,6 +10221,7 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 		return result, authErr, false
 	}
 	*sandbox = *retrySandbox
+	prompt.UsageHint.BillingMode = authBillingMode
 	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, refreshedEnv, prompt.UsageHint, sandbox)
 
 	log.Info().
@@ -10223,7 +10249,11 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, retryResult, retryErr, log, sandbox)
 		// Probe availability only. This candidate never executes, so keep the
 		// sandbox bound to the fallback credential whose result is returned.
-		refreshedEnv = o.resolveSessionCredentials(ctx, session, sandboxCfg).Env
+		probe := o.resolveSessionCredentials(ctx, session, sandboxCfg)
+		if lookupErr := o.executionCredentialLookupError(ctx, session, writeCtx.ThreadID, probe); lookupErr != nil {
+			return retryResult, lookupErr, true
+		}
+		refreshedEnv = probe.Env
 		if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
 			logCredentialRateLimitBlocked(log, session, authErr)
 			if createBlockedMessage {
@@ -10250,6 +10280,53 @@ func (o *Orchestrator) resolveSessionCredentials(ctx context.Context, session *m
 	}
 	resolution.Env = refreshedEnv
 	return resolution
+}
+
+// executionCredentialLookupFailure keeps a transient lookup failure separate
+// from a definitive absent credential and from the agent's execution result.
+type executionCredentialLookupFailure struct {
+	cause error
+}
+
+func (e *executionCredentialLookupFailure) Error() string {
+	return fmt.Sprintf("resolve execution credential: %s", e.cause)
+}
+
+func (e *executionCredentialLookupFailure) Unwrap() error { return e.cause }
+
+func (o *Orchestrator) executionCredentialLookupError(ctx context.Context, session *models.Session, threadID *uuid.UUID, resolution *resolvedAgentEnv) error {
+	if resolution == nil || resolution.credentialLookupErr == nil {
+		return nil
+	}
+	err := &executionCredentialLookupFailure{cause: resolution.credentialLookupErr}
+	explanation := "Coding credentials could not be loaded because of a temporary infrastructure error. Retry the session."
+	nextSteps := []string{"Retry the session when the credential service is available"}
+	if isCodeReviewTurnContext(ctx) {
+		// Recheck failure receipts remain owned by their lease-fenced worker.
+		return err
+	}
+	if isCodeReviewThreadTurn(session, threadID) {
+		// Exhaustion should unblock the review controller promptly without
+		// failing its parent or a sibling. Snapshot this exact turn's identity
+		// because job hooks run after the current attempt has unwound.
+		sessionCopy, threadCopy := *session, *threadID
+		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, _ error) {
+			result := &models.SessionResult{
+				Error: strPtr(err.Error()), FailureCategory: strPtr(FailureCategoryTooling),
+				FailureExplanation: strPtr(explanation), FailureNextSteps: nextSteps, FailureRetryAdvised: true,
+			}
+			if _, persistErr := o.failCodeReviewThreadTurn(hookCtx, &sessionCopy, &threadCopy, result, err.Error(), nil, o.logger); persistErr != nil {
+				o.logger.Error().Err(persistErr).
+					Str("session_id", sessionCopy.ID.String()).Str("thread_id", threadCopy.String()).
+					Msg("failed to persist exhausted review credential lookup")
+			}
+		})
+		return err
+	}
+	if session.Origin != models.SessionOriginCodeReview {
+		o.registerSandboxInfraFailure(ctx, session, err.Error(), FailureCategoryTooling, explanation, nextSteps, "coding credential resolution")
+	}
+	return err
 }
 
 // sandboxWithCredentialResolution keeps execution-only credentials off the

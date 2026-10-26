@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 )
 
@@ -229,7 +231,7 @@ func TestAgentEnvCapturedOpenCodeRoute(t *testing.T) {
 func TestCapturedCredentialSecretsAreNotSerialized(t *testing.T) {
 	t.Parallel()
 	credential := models.DecryptedCodingCredential{ID: uuid.New(), OrgID: uuid.New(), Provider: models.ProviderOpenAISubscription, Config: models.OpenAISubscriptionConfig{AccessToken: "private-access", RefreshToken: "private-refresh", IDToken: "private-id"}}
-	resolved := &resolvedAgentEnv{Env: map[string]string{"SYNTHETIC_SECRET": "private-env"}, Credential: captureRuntimeCredential(credential, models.AgentTypeCodex, nil)}
+	resolved := &resolvedAgentEnv{Env: map[string]string{"SYNTHETIC_SECRET": "private-env"}, Credential: captureRuntimeCredential(credential, models.AgentTypeCodex, nil), credentialLookupErr: errors.New("private-resolution-error")}
 	tests := []struct {
 		name  string
 		value any
@@ -243,7 +245,7 @@ func TestCapturedCredentialSecretsAreNotSerialized(t *testing.T) {
 			t.Parallel()
 			encoded, err := json.Marshal(tt.value)
 			require.NoError(t, err, "captured state should remain safe to marshal")
-			for _, secret := range []string{"private-access", "private-refresh", "private-id", "private-env"} {
+			for _, secret := range []string{"private-access", "private-refresh", "private-id", "private-env", "private-resolution-error"} {
 				require.NotContains(t, string(encoded), secret, "JSON output must exclude all secret-bearing captured state")
 			}
 		})
@@ -334,4 +336,114 @@ func TestAgentEnvConcurrentResolutionCapturesItsOwnCredential(t *testing.T) {
 			require.Equal(t, []capturedCredentialFailure{{Scope: first.Scope(), ID: first.ID}}, store.rateFailures, "a failed first execution must not shed the second execution's account")
 		})
 	}
+}
+
+type resolutionFailureProvider struct {
+	*envCodingCredentialProvider
+	listErr         error
+	listErrProvider models.ProviderName
+	pickErr         error
+	listCalls       []models.ProviderName
+	pickCalls       int
+}
+
+func (p *resolutionFailureProvider) ListResolvable(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName) ([]models.DecryptedCodingCredential, error) {
+	p.listCalls = append(p.listCalls, provider)
+	if provider == p.listErrProvider {
+		return nil, p.listErr
+	}
+	return p.envCodingCredentialProvider.ListResolvable(ctx, orgID, userID, provider)
+}
+
+func (p *resolutionFailureProvider) PickRunnableMulti(ctx context.Context, scope models.Scope, providers []models.ProviderName) (*models.DecryptedCodingCredential, error) {
+	p.pickCalls++
+	if p.pickErr != nil {
+		return nil, p.pickErr
+	}
+	return p.envCodingCredentialProvider.PickRunnableMulti(ctx, scope, providers)
+}
+
+func TestAgentEnvCredentialLookupErrorIsDistinctFromResolvedNone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                  string
+		agent                 models.AgentType
+		model                 string
+		provider              models.ProviderName
+		failedProvider        models.ProviderName
+		failList              bool
+		failPick              bool
+		pickerUnavailable     bool
+		pickerAllShed         bool
+		rows                  bool
+		expectedAuthoritative bool
+		expectedListCalls     []models.ProviderName
+		expectedPickCalls     int
+	}{
+		{name: "Codex provider list failure", agent: models.AgentTypeCodex, provider: models.ProviderOpenAI, failedProvider: models.ProviderOpenAI, failList: true, expectedListCalls: []models.ProviderName{models.ProviderOpenAI}},
+		{name: "Codex subscription list failure", agent: models.AgentTypeCodex, provider: models.ProviderOpenAI, failedProvider: models.ProviderOpenAISubscription, failList: true, rows: true, expectedListCalls: []models.ProviderName{models.ProviderOpenAI, models.ProviderOpenAISubscription}},
+		{name: "Claude provider list failure", agent: models.AgentTypeClaudeCode, provider: models.ProviderAnthropic, failedProvider: models.ProviderAnthropic, failList: true, expectedListCalls: []models.ProviderName{models.ProviderAnthropic}},
+		{name: "Claude subscription list failure", agent: models.AgentTypeClaudeCode, provider: models.ProviderAnthropic, failedProvider: models.ProviderAnthropicSubscription, failList: true, rows: true, expectedListCalls: []models.ProviderName{models.ProviderAnthropic, models.ProviderAnthropicSubscription}},
+		{name: "OpenCode model-aware list failure", agent: models.AgentTypeOpenCode, model: models.OpenCodeModelGPT54Mini, provider: models.ProviderOpenCode, failedProvider: models.ProviderOpenCode, failList: true, expectedListCalls: []models.ProviderName{models.ProviderOpenCode}},
+		{name: "OpenCode generic list failure", agent: models.AgentTypeOpenCode, provider: models.ProviderOpenCode, failedProvider: models.ProviderOpenCode, failList: true, expectedListCalls: []models.ProviderName{models.ProviderOpenCode}},
+		{name: "Codex picker lookup failure", agent: models.AgentTypeCodex, provider: models.ProviderOpenAI, failPick: true, rows: true, expectedListCalls: []models.ProviderName{models.ProviderOpenAI, models.ProviderOpenAISubscription}, expectedPickCalls: 1},
+		{name: "Claude picker context cancellation", agent: models.AgentTypeClaudeCode, provider: models.ProviderAnthropic, failPick: true, rows: true, expectedListCalls: []models.ProviderName{models.ProviderAnthropic, models.ProviderAnthropicSubscription}, expectedPickCalls: 1},
+		{name: "Codex genuinely empty", agent: models.AgentTypeCodex, provider: models.ProviderOpenAI, expectedAuthoritative: true, expectedListCalls: []models.ProviderName{models.ProviderOpenAI, models.ProviderOpenAISubscription}},
+		{name: "Claude genuinely empty", agent: models.AgentTypeClaudeCode, provider: models.ProviderAnthropic, expectedAuthoritative: true, expectedListCalls: []models.ProviderName{models.ProviderAnthropic, models.ProviderAnthropicSubscription}},
+		{name: "OpenCode genuinely empty route", agent: models.AgentTypeOpenCode, model: models.OpenCodeModelGPT54Mini, provider: models.ProviderOpenCode, expectedAuthoritative: true, expectedListCalls: []models.ProviderName{models.ProviderOpenCode}},
+		{name: "picker not-found stays authoritative", agent: models.AgentTypeCodex, provider: models.ProviderOpenAI, pickerUnavailable: true, rows: true, expectedAuthoritative: true, expectedListCalls: []models.ProviderName{models.ProviderOpenAI, models.ProviderOpenAISubscription}, expectedPickCalls: 1},
+		{name: "picker all-shed stays authoritative", agent: models.AgentTypeCodex, provider: models.ProviderOpenAI, pickerAllShed: true, rows: true, expectedAuthoritative: true, expectedListCalls: []models.ProviderName{models.ProviderOpenAI, models.ProviderOpenAISubscription}, expectedPickCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			orgID, userID := uuid.New(), uuid.New()
+			lookupErr := errors.New("synthetic credential database unavailable")
+			if tt.agent == models.AgentTypeClaudeCode && tt.failPick {
+				lookupErr = context.Canceled
+			}
+			store := &resolutionFailureProvider{envCodingCredentialProvider: &envCodingCredentialProvider{resolvable: make(map[models.ProviderName][]models.DecryptedCodingCredential)}}
+			if tt.failList {
+				store.listErr, store.listErrProvider = lookupErr, tt.failedProvider
+			}
+			if tt.failPick {
+				store.pickErr = lookupErr
+			}
+			if tt.pickerUnavailable {
+				store.pickErr = db.ErrCodingCredentialNotFound
+			}
+			if tt.pickerAllShed {
+				store.pickErr = db.ErrAllCredentialsShed
+			}
+			var cfg models.ProviderConfig = models.OpenAIConfig{APIKey: "synthetic-key"}
+			if tt.agent == models.AgentTypeClaudeCode {
+				cfg = models.AnthropicConfig{APIKey: "synthetic-key"}
+			}
+			if tt.rows {
+				store.resolvable[tt.provider] = []models.DecryptedCodingCredential{{ID: uuid.New(), OrgID: orgID, Provider: tt.provider, Status: models.CodingCredentialStatusActive, Config: cfg}}
+			}
+			env := NewAgentEnv(AgentEnvDeps{CodingCredentials: store, Logger: zerolog.Nop()})
+			env.recordCredentialPick(orgID, &userID, tt.provider, models.DecryptedCodingCredential{ID: uuid.New(), OrgID: orgID, Provider: tt.provider, Config: cfg})
+			resolved := env.ResolveForModelWithCredential(ctx, orgID, tt.agent, &userID, tt.model)
+			require.Nil(t, resolved.Credential, "failed or empty resolution must not copy another execution's shared credential")
+			require.Equal(t, tt.expectedAuthoritative, resolved.credentialAuthoritative, "only successful credential lookups can establish an authoritative empty stack")
+			if tt.failList || tt.failPick {
+				require.ErrorIs(t, resolved.credentialLookupErr, lookupErr, "resolution should retain the actual transient lookup failure for retry handling")
+			} else {
+				require.NoError(t, resolved.credentialLookupErr, "genuine empty or unavailable credentials should remain distinct from a lookup failure")
+			}
+			require.Equal(t, tt.expectedListCalls, store.listCalls, "resolution should propagate lookup status directly without retrying the lookup or consulting another pick")
+			require.Equal(t, tt.expectedPickCalls, store.pickCalls, "lookup failures must not trigger another credential selection")
+		})
+	}
+}
+
+func TestAgentEnvCredentialResolutionWithoutUnifiedStoreIsNotAuthoritative(t *testing.T) {
+	t.Parallel()
+	env := NewAgentEnv(AgentEnvDeps{Logger: zerolog.Nop()})
+	resolved := env.ResolveForModelWithCredential(context.Background(), uuid.New(), models.AgentTypeCodex, nil, "")
+	require.False(t, resolved.credentialAuthoritative, "legacy callers without a unified store should retain their auth path")
+	require.NoError(t, resolved.credentialLookupErr, "an absent unified store is not a failed lookup")
+	require.Nil(t, resolved.Credential, "an absent unified store should not fabricate a selected row")
 }

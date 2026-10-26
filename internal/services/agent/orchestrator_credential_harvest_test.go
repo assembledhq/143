@@ -43,10 +43,12 @@ func TestRunAgent_CredentialFallbackHarvestFollowsExecutedAuth(t *testing.T) {
 	tests := []struct {
 		name            string
 		initialAPIKey   bool
+		fallbackAPIKey  bool
 		fallbackRefresh bool
 	}{
 		{name: "failed fallback auth never harvests the original subscription file", fallbackRefresh: true},
 		{name: "API key to subscription harvests the executed fallback credential", initialAPIKey: true},
+		{name: "subscription to API key uses the fallback auth mode", fallbackAPIKey: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -77,6 +79,10 @@ func TestRunAgent_CredentialFallbackHarvestFollowsExecutedAuth(t *testing.T) {
 				Status: models.CodingCredentialStatusActive, Priority: 2,
 				Config: models.AnthropicSubscriptionConfig{AccessToken: "synthetic-access-b", RefreshToken: "synthetic-refresh-b", ExpiresAt: fallbackExpiry},
 			}
+			if tt.fallbackAPIKey {
+				fallback.Provider = models.ProviderAnthropic
+				fallback.Config = models.AnthropicConfig{APIKey: "synthetic-api-key-b"}
+			}
 			coding := &mockCodingCredentialProvider{resolvable: map[models.ProviderName][]models.DecryptedCodingCredential{}}
 			for _, credential := range []models.DecryptedCodingCredential{first, fallback} {
 				coding.resolvable[credential.Provider] = append(coding.resolvable[credential.Provider], credential)
@@ -88,13 +94,18 @@ func TestRunAgent_CredentialFallbackHarvestFollowsExecutedAuth(t *testing.T) {
 			refreshedJSON, err := json.Marshal(map[string]any{"claudeAiOauth": map[string]any{"accessToken": refreshed.AccessToken, "refreshToken": refreshed.RefreshToken, "expiresAt": refreshed.ExpiresAt.UnixMilli()}})
 			require.NoError(t, err, "synthetic CLI-refreshed tokens should marshal")
 			executions := 0
-			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, _ *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
+			d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
 				executions++
 				if executions == 1 {
 					return &agent.AgentResult{ExitCode: 1, Error: "429 too many requests"}, nil
 				}
 				require.False(t, tt.fallbackRefresh, "a fallback whose auth preparation failed must never execute")
-				require.NoError(t, d.provider.WriteFile(ctx, sandbox, "/home/sandbox/.claude/.credentials.json", refreshedJSON), "the executed fallback CLI should be able to rotate its synthetic token file")
+				if tt.fallbackAPIKey {
+					require.Equal(t, agent.TokenBillingModeAPIKey, prompt.UsageHint.BillingMode, "a subscription-to-API fallback must replace the prior attempt's billing mode")
+				} else {
+					require.Equal(t, agent.TokenBillingModeSubscription, prompt.UsageHint.BillingMode, "an API-to-subscription fallback must replace the prior attempt's billing mode")
+					require.NoError(t, d.provider.WriteFile(ctx, sandbox, "/home/sandbox/.claude/.credentials.json", refreshedJSON), "the executed fallback CLI should be able to rotate its synthetic token file")
+				}
 				return &agent.AgentResult{Summary: "completed with fallback credential"}, nil
 			}
 
@@ -110,7 +121,11 @@ func TestRunAgent_CredentialFallbackHarvestFollowsExecutedAuth(t *testing.T) {
 			} else {
 				require.NoError(t, err, "an API-key run should complete through a subscription fallback")
 				require.Equal(t, 2, executions, "the subscription fallback should execute exactly once")
-				require.Equal(t, []fallbackHarvestWrite{{Scope: models.Scope{OrgID: orgID, UserID: &userID}, CredentialID: fallbackID, Subscription: refreshed}}, auth.writes, "fallback harvesting should use B's actual subscription auth kind, exact row, and personal scope")
+				expectedWrites := []fallbackHarvestWrite(nil)
+				if !tt.fallbackAPIKey {
+					expectedWrites = []fallbackHarvestWrite{{Scope: models.Scope{OrgID: orgID, UserID: &userID}, CredentialID: fallbackID, Subscription: refreshed}}
+				}
+				require.Equal(t, expectedWrites, auth.writes, "fallback harvesting should use B's actual auth kind, exact row, and personal scope")
 			}
 		})
 	}

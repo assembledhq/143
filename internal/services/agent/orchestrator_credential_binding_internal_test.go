@@ -361,3 +361,23 @@ func TestExecutionCredentialLogContainsOnlySafeAttribution(t *testing.T) {
 	}
 	require.Equal(t, expected, actual, "credential attribution should retain existing execution context and only safe credential identity fields")
 }
+
+func TestPreparedAuthModeOverridesCapturedCredentialBilling(t *testing.T) {
+	t.Parallel()
+
+	orgID := uuid.New()
+	credential := models.DecryptedCodingCredential{ID: uuid.New(), OrgID: orgID, Provider: models.ProviderAnthropicSubscription, Status: models.CodingCredentialStatusActive, Config: models.AnthropicSubscriptionConfig{AccessToken: "synthetic-expired-access", RefreshToken: "synthetic-refresh", ExpiresAt: time.Now().Add(-time.Hour)}}
+	provider := &envSandboxProvider{}
+	env := NewAgentEnv(AgentEnvDeps{CodingCredentials: &executionCredentialProvider{}, Provider: provider, Logger: zerolog.Nop()})
+	o := &Orchestrator{env: env, provider: provider, logger: zerolog.Nop()}
+	resolution := &resolvedAgentEnv{Credential: captureRuntimeCredential(credential, models.AgentTypeClaudeCode, nil), Env: map[string]string{"ANTHROPIC_API_KEY": "synthetic-api-fallback"}}
+	sandbox := sandboxWithCredentialResolution(&Sandbox{ID: "prepared-auth-billing", HomeDir: "/home/test"}, resolution, resolution.Env)
+	session := &models.Session{OrgID: orgID, AgentType: models.AgentTypeClaudeCode}
+
+	mode, err := o.ensureClaudeCodeAuth(context.Background(), session, nil, sandbox, sandbox.Env)
+
+	require.NoError(t, err, "an unusable captured subscription should allow its already-configured API-key auth fallback")
+	require.Equal(t, TokenBillingModeAPIKey, mode, "prepared auth should report the actual API-key fallback")
+	hint := o.buildTokenUsageHint(context.Background(), session.AgentType, orgID, nil, sandbox.Env, TokenUsageHint{BillingMode: mode}, sandbox)
+	require.Equal(t, TokenBillingModeAPIKey, hint.BillingMode, "usage must preserve the explicit auth-reported billing mode even when the captured candidate was a subscription")
+}

@@ -164,8 +164,10 @@ func (m *mockCodingCredentialProvider) PickRunnableMulti(ctx context.Context, or
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var candidates []models.DecryptedCodingCredential
+	sawRows := false
 	for _, provider := range providers {
 		for _, cred := range m.resolvable[provider] {
+			sawRows = true
 			if cred.Status != models.CodingCredentialStatusActive {
 				continue
 			}
@@ -196,7 +198,10 @@ func (m *mockCodingCredentialProvider) PickRunnableMulti(ctx context.Context, or
 		picked := candidates[0]
 		return &picked, nil
 	}
-	return nil, errors.New("all eligible coding credentials are currently shed")
+	if sawRows {
+		return nil, db.ErrAllCredentialsShed
+	}
+	return nil, db.ErrCodingCredentialNotFound
 }
 
 func (m *mockCodingCredentialProvider) MarkRateLimitedForScope(_ context.Context, _ models.Scope, id uuid.UUID, limit models.CodingCredentialRateLimit) error {

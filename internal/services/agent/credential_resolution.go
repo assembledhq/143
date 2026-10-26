@@ -15,6 +15,11 @@ import (
 type resolvedAgentEnv struct {
 	Env        map[string]string           `json:"-"`
 	Credential *runtimeCredentialSelection `json:"-"`
+
+	// An unsuccessful lookup is transient and must not be mistaken for an
+	// authoritative empty credential stack or trigger a shared-cache repick.
+	credentialAuthoritative bool  `json:"-"`
+	credentialLookupErr     error `json:"-"`
 }
 
 type runtimeCredentialSelection struct {
