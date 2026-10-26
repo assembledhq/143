@@ -31,6 +31,7 @@ s3 =
 '''
 SAMPLE_LIMIT = 240
 CHECKSUM_READ_BYTES_PER_SECOND = 32 * 1024 ** 2
+DUMP_EFFECTIVE_IO_CONCURRENCY = 4
 
 
 def proc_identity(pid):
@@ -369,7 +370,8 @@ class Guard:
         sample = resources(self.policy.root, generation['pid'])
         self.observe_dump_resources(sample, None, generation, admission=True)
         owned.update(database=generation, file_limit=sample['free_bytes'] - self.policy.reserve - 4 * GIB,
-                     dump_client_cpus=self.dump_cpus)
+                     dump_client_cpus=self.dump_cpus,
+                     dump_effective_io_concurrency=DUMP_EFFECTIVE_IO_CONCURRENCY)
         limit = str(owned['file_limit'])
         command = ['docker', 'create', '--name', self.app, '--label', LABEL + '=' + self.app,
                    '--pull=never', '--network', 'container:' + generation['id'], '--restart=no',
@@ -386,8 +388,12 @@ class Guard:
             command += ['--tmpfs', volume + ':rw,noexec,nosuid,size=1m']
         command += [db['Image'], '-h', address, '-U', self.policy.user,
                     '--no-password', '-Fc', '-f', '/backup.dump', self.policy.database]
+        # PostgreSQL 18 also uses this setting for asynchronous sequential reads.
+        # Bound the dump session's prefetch instead of inheriting concurrency
+        # tuned for interactive workloads. Server settings and guards stay intact.
         env = dict(self.policy.db_env(), PGAPPNAME=self.app, PGCONNECT_TIMEOUT='3',
-                   PGOPTIONS='-c statement_timeout=2700000 -c lock_timeout=60000')
+                   PGOPTIONS='-c statement_timeout=2700000 -c lock_timeout=60000 '
+                             '-c effective_io_concurrency=' + str(DUMP_EFFECTIVE_IO_CONCURRENCY))
         owned['creation_started'] = True
         atomic_json(self.record, owned)  # Durable intent before Docker create.
         cid = invoke(command, env=env, timeout=15).strip()

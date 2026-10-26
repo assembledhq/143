@@ -767,6 +767,48 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn('127.0.0.1', command)
         self.assertTrue(result['creation_complete'])
 
+    def test_dump_session_bounds_read_prefetch_without_changing_guards(self):
+        self.p.dump_cpus = 0.75
+        self.p.db_env = lambda: dict(PGPASSWORD='not-in-command',
+                                    PGOPTIONS='-c effective_io_concurrency=999')
+        self.guard = runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)
+        db = dict(Image='sha256:immutable', Config={'Volumes': {}},
+                  NetworkSettings={'Networks': {'db': {'IPAddress': '172.18.0.2'}}})
+        with mock.patch.object(self.guard, 'database', return_value=(db, self.db)), \
+                mock.patch.object(runtime, 'resources', return_value=safe_resources()), \
+                mock.patch.dict(os.environ, {'DOCKER_HOST': '', 'DOCKER_CONTEXT': ''}), \
+                mock.patch.object(runtime, 'invoke', side_effect=['unix:///var/run/docker.sock', 'c' * 64]) as run:
+            result = self.guard.prepare()
+        command = run.call_args.args[0]
+        env = run.call_args.kwargs['env']
+        self.assertEqual(env['PGOPTIONS'],
+                         '-c statement_timeout=2700000 -c lock_timeout=60000 -c effective_io_concurrency=4',
+                         'only the dump connection must receive bounded prefetch and the existing timeouts')
+        self.assertNotIn('999', env['PGOPTIONS'], 'ambient connection options must not override the fixed backup cap')
+        self.assertEqual(result['dump_effective_io_concurrency'], 4,
+                         'durable ownership must identify the requested connection setting even on failure')
+        self.assertIn('-e', command)
+        self.assertIn('PGOPTIONS', command, 'the option must reach the pg_dump libpq connection')
+        self.assertEqual(command[-10:],
+                         ['sha256:immutable', '-h', '172.18.0.2', '-U', 'example', '--no-password', '-Fc', '-f', '/backup.dump', 'example'],
+                         'dump format and output must stay unchanged')
+        self.assertEqual((runtime.INTERVAL, runtime.MAX_DUMP_SECONDS, runtime.WATCHDOG_TIMEOUT,
+                          runtime.CLEANUP_TIMEOUT), (5, 2700, 45, 120))
+
+    def test_dump_prefetch_intent_survives_ambiguous_container_creation(self):
+        db = dict(Image='sha256:immutable', Config={'Volumes': {}},
+                  NetworkSettings={'Networks': {'db': {'IPAddress': '172.18.0.2'}}})
+        with mock.patch.object(self.guard, 'database', return_value=(db, self.db)), \
+                mock.patch.object(runtime, 'resources', return_value=safe_resources()), \
+                mock.patch.dict(os.environ, {'DOCKER_HOST': '', 'DOCKER_CONTEXT': ''}), \
+                mock.patch.object(runtime, 'invoke', side_effect=['unix:///var/run/docker.sock', Refused('create timeout')]):
+            with self.assertRaisesRegex(Refused, 'create timeout'):
+                self.guard.prepare()
+        owned = read_json(self.guard.record)
+        self.assertEqual(owned['dump_effective_io_concurrency'], 4)
+        self.assertTrue(owned['creation_started'])
+        self.assertFalse(owned['creation_complete'])
+
     def test_lower_cpu_changes_only_dump_quota(self):
         self.p.dump_cpus = 0.75
         guard = runtime.Guard(self.p, self.partial, self.app, 18 * runtime.GIB)
