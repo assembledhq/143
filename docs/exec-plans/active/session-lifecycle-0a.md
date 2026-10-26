@@ -245,6 +245,16 @@ Reviewable increments:
    and requires no availability certificate at admission. B.2/E.1 must check the
    current descriptor and fresh exact-target evidence before every launch; missing
    availability can defer the bound job. A.3/C.2 retains exact answer readiness.
+   Until A.5 installs durable repair scope and exact job/runtime ownership proof,
+   affected ordinary input with unresolved repair evidence is accepted waiting
+   for repair reconciliation, without a new job or claim. A comment-resolution
+   command still rolls back when immediate new-job admission is unavailable.
+   Released history alone is not a reservation; stale live work remains a blocker
+   independently of reservation activity or current head. A.1 neither releases
+   repair ownership nor infers lane-local scope from a thread association.
+   Install the ordinary repair/question lookup indexes before their readers,
+   with the first-down retention floor and inactive maintenance obligations in
+   the freeze appendix. They are access paths, not another ownership schema.
    Prove three independently bound sibling jobs, fourth-lane waiting, and no veto
    from a sibling's pending job or pending/unprovable request certificate.
 2. A.2 has two review exits, not a second admission engine:

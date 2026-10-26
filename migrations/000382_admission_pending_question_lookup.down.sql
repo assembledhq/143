@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_admission_pending_question_lookup;

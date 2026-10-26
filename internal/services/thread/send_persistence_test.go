@@ -54,6 +54,7 @@ func TestNewSendDependencies(t *testing.T) {
 			require.IsType(t, &db.ThreadSendTransactions{}, actual.Transactions, "production must use the sealed pool-backed runner")
 			require.Equal(t, &sqlLegacySendPersistence{sessions: sessions, threads: threads, jobs: jobs}, actual.Legacy, "persistence must retain the exact configured stores")
 			require.Equal(t, &sqlSendEffects{sessions: sessions, threads: threads, jobs: jobs}, actual.Effects, "effects must retain publishers on usable store handles")
+			require.Equal(t, db.NewSessionChangesetStore(pool), actual.Changesets, "production target compatibility reads must use the configured pool without constructor queries")
 		})
 	}
 }
@@ -63,12 +64,15 @@ func TestSendDependenciesValidate(t *testing.T) {
 	var nilTransactions *db.ThreadSendTransactions
 	var nilPersistence *sqlLegacySendPersistence
 	var nilEffects *sqlSendEffects
+	var nilChangesets *db.SessionChangesetStore
 	tests := []struct {
 		name   string
 		change func(*SendDependencies)
 		want   string
 	}{
 		{"valid", func(*SendDependencies) {}, ""},
+		{"nil optional changeset reader", func(d *SendDependencies) { d.Changesets = nil }, ""},
+		{"typed nil optional changeset reader", func(d *SendDependencies) { d.Changesets = nilChangesets }, ""},
 		{"nil transactions", func(d *SendDependencies) { d.Transactions = nil }, "transactions"},
 		{"typed nil transactions", func(d *SendDependencies) { d.Transactions = nilTransactions }, "transactions"},
 		{"nil persistence", func(d *SendDependencies) { d.Legacy = nil }, "legacy persistence"},

@@ -542,68 +542,73 @@ func main() {
 		workerCodeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 		workerCodeReviewDisputeStore.SetJobStore(jobStore)
 		workerCodeReviewInsightStore := db.NewCodeReviewInsightStore(pool)
+		threadSendDependencies, err := threadservice.NewSendDependencies(pool, sessionStore, sessionThreadStore, jobStore)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("failed to construct worker thread send dependencies")
+		}
 		stores := &worker.Stores{
-			Issues:                issueStore,
-			Users:                 db.NewUserStore(pool),
-			Sessions:              sessionStore,
-			SessionChangesets:     db.NewSessionChangesetStore(pool),
-			SessionPublications:   db.NewSessionPublicationStore(pool),
-			SessionPRIntents:      db.NewSessionPRIntentStore(pool),
-			TeamReviewRequests:    db.NewTeamReviewRequestStore(pool),
-			Jobs:                  jobStore,
-			Integrations:          integrationStore,
-			Memberships:           db.NewOrganizationMembershipStore(pool),
-			Webhooks:              db.NewWebhookDeliveryStore(pool),
-			PriorityScores:        priorityScoreStore,
-			ComplexityEstimates:   complexityEstimateStore,
-			Projects:              projectStore,
-			ProjectTasks:          projectTaskStore,
-			Credentials:           credentialStore,
-			AuditLogs:             auditLogStore,
-			Organizations:         orgStore,
-			SessionLogs:           sessionLogStore,
-			LifecycleWriters:      db.NewLifecycleWriterInstanceStore(pool),
-			EvalTasks:             db.NewEvalTaskStore(pool),
-			EvalRuns:              db.NewEvalRunStore(pool),
-			EvalBatches:           db.NewEvalBatchStore(pool),
-			EvalBootstraps:        evalBootstrapStore,
-			EvalReleaseGates:      db.NewEvalReleaseGateStore(pool),
-			Repositories:          repoStore,
-			GitHubInstallations:   db.NewGitHubInstallationStore(pool),
-			SessionMessages:       sessionMessageStore,
-			IssueSnapshots:        db.NewSessionTurnIssueSnapshotStore(pool),
-			SessionThreads:        sessionThreadStore,
-			ThreadInbox:           db.NewThreadInboxStore(pool),
-			ThreadSendTx:          pool,
-			HumanInputRequests:    sessionHumanInputStore,
-			ThreadFileEvents:      db.NewSessionThreadFileEventStore(pool),
-			SandboxHolders:        db.NewSessionSandboxHolderStore(pool),
-			Automations:           automationStore,
-			AutomationRuns:        automationRunStore,
-			AutomationTargets:     db.NewAutomationTargetStore(pool),
-			ReviewLoops:           db.NewSessionReviewLoopStore(pool),
-			CodeReviews:           codeReviewStore,
-			CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool),
-			CodeReviewRechecks:    codeReviewRecheckStore,
-			CodeReviewDisputes:    workerCodeReviewDisputeStore,
-			CodeReviewInsights:    workerCodeReviewInsightStore,
-			SessionIssueLinks:     db.NewSessionIssueLinkStore(pool),
-			Previews:              previewStore,
-			PullRequests:          pullRequestStore,
-			PullRequestFeedback:   workerPullRequestFeedbackStore,
-			SlackInstallations:    db.NewSlackInstallationStore(pool),
-			SlackOrgSelections:    db.NewSlackOrgSelectionStore(pool),
-			SlackBotSettings:      db.NewSlackBotSettingsStore(pool),
-			SlackUserLinks:        db.NewSlackUserLinkStore(pool),
-			LinearUserLinks:       db.NewLinearUserLinkStore(pool),
-			ExternalUserLinks:     db.NewExternalUserLinkStore(pool),
-			ExternalSuggestions:   db.NewExternalUserLinkSuggestionStore(pool),
-			SlackChannels:         db.NewSlackChannelSettingsStore(pool),
-			SlackSessionLinks:     db.NewSlackSessionLinkStore(pool),
-			SlackInboundEvents:    db.NewSlackInboundEventStore(pool),
-			SlackOutbound:         db.NewSlackOutboundMessageStore(pool),
-			SessionAttributions:   db.NewSessionAttributionStore(pool),
-			CodeReviewWorkspaces:  db.NewCodeReviewWorkspaceStore(pool),
+			Issues:                 issueStore,
+			Users:                  db.NewUserStore(pool),
+			Sessions:               sessionStore,
+			SessionChangesets:      db.NewSessionChangesetStore(pool),
+			SessionPublications:    db.NewSessionPublicationStore(pool),
+			SessionPRIntents:       db.NewSessionPRIntentStore(pool),
+			TeamReviewRequests:     db.NewTeamReviewRequestStore(pool),
+			Jobs:                   jobStore,
+			Integrations:           integrationStore,
+			Memberships:            db.NewOrganizationMembershipStore(pool),
+			Webhooks:               db.NewWebhookDeliveryStore(pool),
+			PriorityScores:         priorityScoreStore,
+			ComplexityEstimates:    complexityEstimateStore,
+			Projects:               projectStore,
+			ProjectTasks:           projectTaskStore,
+			Credentials:            credentialStore,
+			AuditLogs:              auditLogStore,
+			Organizations:          orgStore,
+			SessionLogs:            sessionLogStore,
+			LifecycleWriters:       db.NewLifecycleWriterInstanceStore(pool),
+			EvalTasks:              db.NewEvalTaskStore(pool),
+			EvalRuns:               db.NewEvalRunStore(pool),
+			EvalBatches:            db.NewEvalBatchStore(pool),
+			EvalBootstraps:         evalBootstrapStore,
+			EvalReleaseGates:       db.NewEvalReleaseGateStore(pool),
+			Repositories:           repoStore,
+			GitHubInstallations:    db.NewGitHubInstallationStore(pool),
+			SessionMessages:        sessionMessageStore,
+			IssueSnapshots:         db.NewSessionTurnIssueSnapshotStore(pool),
+			SessionThreads:         sessionThreadStore,
+			ThreadInbox:            db.NewThreadInboxStore(pool),
+			ThreadSendTx:           pool,
+			ThreadSendDependencies: threadSendDependencies,
+			HumanInputRequests:     sessionHumanInputStore,
+			ThreadFileEvents:       db.NewSessionThreadFileEventStore(pool),
+			SandboxHolders:         db.NewSessionSandboxHolderStore(pool),
+			Automations:            automationStore,
+			AutomationRuns:         automationRunStore,
+			AutomationTargets:      db.NewAutomationTargetStore(pool),
+			ReviewLoops:            db.NewSessionReviewLoopStore(pool),
+			CodeReviews:            codeReviewStore,
+			CodeReviewAssessments:  db.NewCodeReviewAssessmentStore(pool),
+			CodeReviewRechecks:     codeReviewRecheckStore,
+			CodeReviewDisputes:     workerCodeReviewDisputeStore,
+			CodeReviewInsights:     workerCodeReviewInsightStore,
+			SessionIssueLinks:      db.NewSessionIssueLinkStore(pool),
+			Previews:               previewStore,
+			PullRequests:           pullRequestStore,
+			PullRequestFeedback:    workerPullRequestFeedbackStore,
+			SlackInstallations:     db.NewSlackInstallationStore(pool),
+			SlackOrgSelections:     db.NewSlackOrgSelectionStore(pool),
+			SlackBotSettings:       db.NewSlackBotSettingsStore(pool),
+			SlackUserLinks:         db.NewSlackUserLinkStore(pool),
+			LinearUserLinks:        db.NewLinearUserLinkStore(pool),
+			ExternalUserLinks:      db.NewExternalUserLinkStore(pool),
+			ExternalSuggestions:    db.NewExternalUserLinkSuggestionStore(pool),
+			SlackChannels:          db.NewSlackChannelSettingsStore(pool),
+			SlackSessionLinks:      db.NewSlackSessionLinkStore(pool),
+			SlackInboundEvents:     db.NewSlackInboundEventStore(pool),
+			SlackOutbound:          db.NewSlackOutboundMessageStore(pool),
+			SessionAttributions:    db.NewSessionAttributionStore(pool),
+			CodeReviewWorkspaces:   db.NewCodeReviewWorkspaceStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -612,11 +617,14 @@ func main() {
 		// workerServices.PR.WaitForPostPRSnapshotUploads().
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
+			services, err = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore,
 				projectStore, projectTaskStore, integrationStore,
 				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader, githubRateLimitController)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("failed to construct worker services")
+			}
 			if services != nil {
 				reviewAdmissionEvidence.ConfigureWorker(services.CodeReviewLifecycle)
 				wirePublicationCoordinator(cfg, services, stores, logger)
@@ -1445,12 +1453,12 @@ func buildServices(
 	sessionStreams *cache.SessionStreams,
 	fileReader sandbox.FileReader,
 	sharedGitHubControllers ...*githubratelimit.Controller,
-) *worker.Services {
+) (*worker.Services, error) {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to initialize GitHub App service — all Phase 3+ services disabled")
-		return nil
+		return nil, nil
 	}
 	var sharedGitHubController *githubratelimit.Controller
 	if len(sharedGitHubControllers) > 0 {
@@ -1459,7 +1467,7 @@ func buildServices(
 	githubRateLimitController, err := api.ResolveGitHubRateLimitController(cfg, redisClient, logger, sharedGitHubController)
 	if err != nil {
 		logger.Error().Err(err).Msg("invalid GitHub rate-limit controller configuration")
-		return nil
+		return nil, nil
 	}
 	ghSvc.SetRateLimitController(githubRateLimitController, logger)
 
@@ -1467,7 +1475,7 @@ func buildServices(
 	dockerCli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.Error().Err(err).Msg("Docker not available — all Phase 3+ services disabled")
-		return nil
+		return nil, nil
 	}
 	sandboxProvider := providers.NewDockerProvider(
 		dockerCli,
@@ -1504,7 +1512,7 @@ func buildServices(
 		if healthErr != nil {
 			if errors.Is(healthErr, providers.ErrDiskQuotaUnsupported) {
 				logger.Error().Err(healthErr).Msg("sandbox disk quota is required but Docker storage cannot enforce it — all Phase 3+ services disabled")
-				return nil
+				return nil, nil
 			}
 			if cfg.SandboxRuntime == "runsc" && !cfg.SandboxRequireGVisor {
 				logger.Warn().Err(healthErr).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
@@ -1522,11 +1530,11 @@ func buildServices(
 				healthCancel()
 				if fallbackErr != nil {
 					logger.Error().Err(fallbackErr).Msg("fallback runc sandbox health check failed — Phase 3+ services disabled")
-					return nil
+					return nil, nil
 				}
 			} else {
 				logger.Error().Err(healthErr).Msg("sandbox health check failed — Phase 3+ services disabled")
-				return nil
+				return nil, nil
 			}
 		}
 	}
@@ -1603,16 +1611,16 @@ func buildServices(
 	if cfg.SandboxAuthSocketDir != "" {
 		if executorID, ok, err := sessionExecutorIDFromEnv(); err != nil {
 			logger.Error().Err(err).Msg("sandbox auth: invalid session executor id — worker services disabled")
-			return nil
+			return nil, nil
 		} else if ok {
 			if strings.TrimSpace(cfg.PreviewInternalBaseURL) == "" {
 				logger.Error().Msg("sandbox auth: PREVIEW_INTERNAL_BASE_URL is required for session executor remote broker access")
-				return nil
+				return nil, nil
 			}
 			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
 			if keyringErr != nil {
 				logger.Error().Err(keyringErr).Msg("sandbox auth: preview RPC keyring is required for session executor remote broker access")
-				return nil
+				return nil, nil
 			}
 			orchestratorSandboxAuth = sandboxauth.NewRemoteBrokerClient(sandboxauth.RemoteBrokerClientConfig{
 				BaseURL:  cfg.PreviewInternalBaseURL,
@@ -1633,7 +1641,7 @@ func buildServices(
 						Err(err).
 						Str("socket_dir", cfg.SandboxAuthSocketDir).
 						Msg("sandbox auth: socket directory preflight failed — worker services disabled")
-					return nil
+					return nil, nil
 				}
 			}
 			sandboxAuthServer := sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
@@ -1748,14 +1756,22 @@ func buildServices(
 		issueStore, priorityScoreStore, complexityEstimateStore,
 		orgStore, llmClient, logger,
 	)
-	threadSvc := threadservice.NewService(
+	threadSendDependencies, err := threadservice.NewSendDependencies(pool, sessionStore, sessionThreadStore, jobStore)
+	if err != nil {
+		return nil, fmt.Errorf("construct worker-services thread send dependencies: %w", err)
+	}
+	threadSvc, err := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
 		sessionMessageStore,
 		sessionLogStore,
 		jobStore,
+		threadSendDependencies,
 		logger,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("construct worker-services thread service: %w", err)
+	}
 	threadSvc.SetCanceller(threadCancelRegistry)
 	threadSvc.SetOwnerLossOrchestrator(ownerloss.NewService(
 		sessionStore,
@@ -2088,7 +2104,7 @@ func buildServices(
 		b := sandboxAuthBroker
 		svc.SandboxAuthShutdown = b.Shutdown
 	}
-	return svc
+	return svc, nil
 }
 
 func buildUploadStore(ctx context.Context, cfg *config.Config, logger zerolog.Logger) storage.UploadStore {

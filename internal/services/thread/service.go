@@ -2,7 +2,6 @@ package thread
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -238,10 +237,13 @@ type UpdateThreadInput struct {
 // service to be wired with SetTxStarter and SetReviewCommentStore; handler
 // layers should reject the request with a 400 when those are absent.
 type SendMessageInput struct {
-	SessionID               uuid.UUID
-	OrgID                   uuid.UUID
-	ThreadID                uuid.UUID
-	ChangesetID             *uuid.UUID
+	SessionID   uuid.UUID
+	OrgID       uuid.UUID
+	ThreadID    uuid.UUID
+	ChangesetID *uuid.UUID
+	// LegacyChangesetPolicy preserves adapter-only v0 preflight. It is not
+	// semantic message intent and is ignored by the active protocol.
+	LegacyChangesetPolicy   LegacyChangesetPolicy
 	ClientMessageID         string
 	UserID                  *uuid.UUID
 	Message                 string
@@ -272,6 +274,9 @@ type SendMessageInput struct {
 // message create. The handler uses it to emit a SessionQuestionAnswered audit
 // after the tx commits — same shape as the session-level path.
 type SendMessageResult struct {
+	// Admission is present only for a canonical v1 receipt. It exposes no
+	// start permit and keeps waiting/replayed acceptance distinct from launch.
+	Admission          *db.Admission
 	Message            *models.SessionMessage
 	InboxEntry         *models.ThreadInboxEntry
 	ThreadStatus       models.ThreadStatus
@@ -299,6 +304,7 @@ type Service struct {
 	messageStore       MessageStore
 	logStore           LogStore
 	jobStore           JobStore
+	send               SendDependencies
 	inboxStore         ThreadInboxStore              // optional — enables durable per-thread input delivery state
 	runtimeOwnerStore  ThreadRuntimeOwnerStore       // optional — pins delivery notifications to the live runtime owner
 	fileEvents         FileEventStore                // optional — enables overlap and attribution surfaces
@@ -312,26 +318,31 @@ type Service struct {
 	logger             zerolog.Logger
 }
 
-// NewService creates a new thread service. fileEvents and canceller are
-// optional: passing nil disables the surfaces that depend on them but keeps
-// the rest of the service functional. Tests typically wire only the stores
-// they exercise.
+// NewService requires explicit send transaction, persistence and postcommit
+// dependencies. Missing or typed-nil send dependencies are construction errors,
+// never a legacy fallback. Optional surfaces remain configured through setters;
+// their legacy txStarter is independent of the mandatory send transaction runner.
 func NewService(
 	threadStore ThreadStore,
 	sessionStore SessionStore,
 	messageStore MessageStore,
 	logStore LogStore,
 	jobStore JobStore,
+	send SendDependencies,
 	logger zerolog.Logger,
-) *Service {
+) (*Service, error) {
+	if err := send.Validate(); err != nil {
+		return nil, fmt.Errorf("construct thread service: %w", err)
+	}
 	return &Service{
 		threadStore:  threadStore,
 		sessionStore: sessionStore,
 		messageStore: messageStore,
 		logStore:     logStore,
 		jobStore:     jobStore,
+		send:         send,
 		logger:       logger,
-	}
+	}, nil
 }
 
 // SetFileEventStore wires the optional file-event store post-construction.
@@ -752,7 +763,7 @@ func isActiveStatus(status models.ThreadStatus) bool {
 // On any downstream failure (message create, comment resolve, question
 // answer, enqueue) we best-effort revert the thread to idle and the session
 // to the status it had before the claim.
-func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
+func (s *Service) sendLegacyMessage(ctx context.Context, input SendMessageInput, holder *uuid.UUID) (*SendMessageResult, error) {
 	if err := s.rejectIfCodeReviewOwned(ctx, input.OrgID, input.SessionID); err != nil {
 		return nil, err
 	}
@@ -801,9 +812,14 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	var revertStatus models.SessionStatus
 	if !queueOnly {
 		var claimErr error
-		claimedSession, revertStatus, claimErr = s.claimSessionForSend(ctx, input.OrgID, input.SessionID)
+		claimedSession, revertStatus, claimErr = s.claimSessionForSend(ctx, input.OrgID, input.SessionID, input.ThreadID)
 		if claimErr != nil {
-			s.releaseThread(ctx, input.OrgID, input.ThreadID, "parent session claim failure")
+			if sendMustStop(claimErr) {
+				return nil, claimErr
+			}
+			if releaseErr := s.releaseThread(ctx, input.OrgID, input.SessionID, input.ThreadID, "parent session claim failure"); releaseErr != nil {
+				return nil, releaseErr
+			}
 			return nil, claimErr
 		}
 	}
@@ -866,11 +882,16 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		)
 		inboxAppendedInTx = err == nil && s.inboxStore != nil
 	} else {
-		err = s.createMessage(ctx, s.messageStore, msg)
+		err = s.createLegacyMessage(ctx, input, msg)
 	}
 	if err != nil {
+		if sendMustStop(err) {
+			return nil, err
+		}
 		if !queueOnly {
-			s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "message creation failure")
+			if revertErr := s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "message creation failure"); revertErr != nil {
+				return nil, revertErr
+			}
 		}
 		// Comment-validation errors are surfaced verbatim so the handler can
 		// match on *db.ErrReviewCommentsNotInSession; everything else gets
@@ -889,8 +910,13 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		inboxEntry, err = s.appendInboxForMessage(ctx, input, msg)
 	}
 	if err != nil {
+		if sendMustStop(err) {
+			return nil, err
+		}
 		if !queueOnly {
-			s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "inbox append failure")
+			if revertErr := s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "inbox append failure"); revertErr != nil {
+				return nil, revertErr
+			}
 		}
 		return nil, fmt.Errorf("append inbox entry: %w", err)
 	}
@@ -901,7 +927,10 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	// finishes (see ContinueSession's post-turn drain).
 	if queueOnly {
 		if !appendInboxInTx {
-			if incErr := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); incErr != nil {
+			if incErr := s.incrementLegacyPending(ctx, input); incErr != nil {
+				if sendMustStop(incErr) {
+					return nil, incErr
+				}
 				s.logger.Warn().Err(incErr).
 					Str("thread_id", input.ThreadID.String()).
 					Msg("failed to increment pending_message_count for queued message")
@@ -911,7 +940,10 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		} else {
 			s.recoverLostOwnerAfterQueuedSend(ctx, input.OrgID, input.SessionID, input.ThreadID)
 		}
-		if err := s.enqueueLiveThreadInboxDelivery(ctx, input); err != nil {
+		if err := s.enqueueLegacyLiveThreadInboxDelivery(ctx, input); err != nil {
+			if sendMustStop(err) {
+				return nil, err
+			}
 			s.logger.Warn().Err(err).
 				Str("session_id", input.SessionID.String()).
 				Str("thread_id", input.ThreadID.String()).
@@ -942,7 +974,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	}
 	if input.ChangesetID != nil {
 		payload["changeset_id"] = input.ChangesetID.String()
-		payload["changeset_lease_holder_id"] = uuid.NewString()
+		payload["changeset_lease_holder_id"] = holder.String()
 	}
 	if input.PostSuccessAction != "" {
 		payload["post_success_action"] = input.PostSuccessAction
@@ -953,7 +985,7 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 	if answeredHumanInput != nil {
 		payload["human_input_request_id"] = answeredHumanInput.ID.String()
 	}
-	if _, err := s.jobStore.EnqueueWithOpts(ctx, input.OrgID, db.EnqueueOpts{
+	if err := s.enqueueLegacySend(ctx, input, db.EnqueueOpts{
 		Queue:        "agent",
 		JobType:      "continue_session",
 		Payload:      payload,
@@ -961,6 +993,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		DedupeKey:    &dedupeKey,
 		TargetNodeID: models.SessionWorkerTarget(&claimedSession),
 	}); err != nil {
+		if sendMustStop(err) {
+			return nil, err
+		}
 		// Note: we do NOT roll back the resolved comments or answered
 		// question here. The message has been committed and is durably in
 		// the timeline; the orchestrator will retry the enqueue on the next
@@ -968,7 +1003,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		// create a worse inconsistency where the user sees their addressed
 		// comments re-appear despite the message already being in the
 		// conversation.
-		s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "enqueue failure")
+		if revertErr := s.revertAfterSendFailure(ctx, input.OrgID, input.SessionID, input.ThreadID, revertStatus, "enqueue failure"); revertErr != nil {
+			return nil, revertErr
+		}
 		return nil, fmt.Errorf("%w: %w", ErrEnqueueFailed, err)
 	}
 
@@ -1045,6 +1082,9 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 	if s.txStarter != nil && s.inboxStore != nil {
 		answeredQuestion, answeredHumanInput, inboxEntry, err = s.createQueuedMessageAndInboxInTx(ctx, msg, input, thread.Status)
 		if err != nil {
+			if sendMustStop(err) {
+				return nil, err
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrThreadNotFound
 			}
@@ -1057,12 +1097,18 @@ func (s *Service) queueMessageWaitingForSlot(ctx context.Context, input SendMess
 		}
 		inboxEntry, err = s.appendInboxForMessage(ctx, input, msg)
 		if err != nil {
+			if sendMustStop(err) {
+				return nil, err
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrThreadNotFound
 			}
 			return nil, fmt.Errorf("append queued inbox entry: %w", err)
 		}
-		if err := s.threadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
+		if err := s.incrementLegacyPending(ctx, input); err != nil {
+			if sendMustStop(err) {
+				return nil, err
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrThreadNotFound
 			}
@@ -1095,67 +1141,19 @@ func (s *Service) createQueuedMessage(ctx context.Context, msg *models.SessionMe
 	// queued message and creates the actual resume job.
 	answerPendingQuestion := threadStatus == models.ThreadStatusAwaitingInput && input.UserID != nil && s.questionStore != nil
 	if !answerPendingQuestion {
-		return nil, nil, s.createMessage(ctx, s.messageStore, msg)
+		return nil, nil, s.createLegacyMessage(ctx, input, msg)
 	}
 	_, answeredQuestion, _, _, err := s.createMessageInTx(ctx, msg, input, models.Session{}, true, false, false, false)
 	return answeredQuestion, nil, err
 }
 
 func (s *Service) createQueuedMessageAndInboxInTx(ctx context.Context, msg *models.SessionMessage, input SendMessageInput, threadStatus models.ThreadStatus) (*models.SessionQuestion, *models.HumanInputRequest, *models.ThreadInboxEntry, error) {
-	tx, err := s.txStarter.Begin(ctx)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("begin tx: %w", err)
-	}
-	committed := false
-	defer func() {
-		if committed {
-			return
-		}
-		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
-			s.logger.Error().Err(rollbackErr).
-				Str("session_id", input.SessionID.String()).
-				Str("thread_id", input.ThreadID.String()).
-				Msg("failed to rollback queued thread-message transaction")
-		}
-	}()
-
-	txMessageStore := db.NewSessionMessageStore(tx)
-	if err := s.createMessage(ctx, txMessageStore, msg); err != nil {
-		return nil, nil, nil, err
-	}
-
-	var answeredQuestion *models.SessionQuestion
 	answerPendingQuestion := threadStatus == models.ThreadStatusAwaitingInput && input.UserID != nil && s.questionStore != nil
-	if answerPendingQuestion {
-		txQuestionStore := db.NewSessionQuestionStore(tx)
-		question, qerr := txQuestionStore.AnswerLatestPendingBySession(ctx, input.OrgID, input.SessionID, input.Message, *input.UserID)
-		if qerr != nil {
-			if errors.Is(qerr, pgx.ErrNoRows) {
-				s.logger.Warn().
-					Str("session_id", input.SessionID.String()).
-					Msg("queued awaiting_input session resumed without a pending question to answer")
-			} else {
-				return nil, nil, nil, fmt.Errorf("answer pending question: %w", qerr)
-			}
-		} else {
-			answeredQuestion = &question
-		}
-	}
-
-	txInboxStore := db.NewThreadInboxStore(tx)
-	inboxEntry, err := s.appendInboxForMessageWithStore(ctx, txInboxStore, input, msg)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("append inbox entry: %w", err)
-	}
-	txThreadStore := db.NewSessionThreadStore(tx)
-	if err := txThreadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
-		return nil, nil, nil, fmt.Errorf("increment queued message count: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, nil, fmt.Errorf("commit tx: %w", err)
-	}
-	committed = true
-	return answeredQuestion, nil, inboxEntry, nil
+	// The original capacity-queue unit did not resolve review comments or
+	// durable human-input requests. Keep that exact grouped write set.
+	input.ResolveReviewCommentIDs = nil
+	_, answered, _, inbox, err := s.createMessageInTx(ctx, msg, input, models.Session{}, answerPendingQuestion, false, true, true)
+	return answered, nil, inbox, err
 }
 
 func (s *Service) validateInboxAdmission(ctx context.Context, input SendMessageInput) error {
@@ -1207,29 +1205,12 @@ func (s *Service) appendInboxForMessage(ctx context.Context, input SendMessageIn
 	if s.inboxStore == nil || msg == nil || msg.ID == 0 {
 		return nil, nil
 	}
-	return s.appendInboxForMessageWithStore(ctx, s.inboxStore, input, msg)
-}
-
-func (s *Service) appendInboxForMessageWithStore(ctx context.Context, store ThreadInboxStore, input SendMessageInput, msg *models.SessionMessage) (*models.ThreadInboxEntry, error) {
-	if store == nil || msg == nil || msg.ID == 0 {
-		return nil, nil
-	}
-	payload, err := json.Marshal(map[string]any{
-		"message_id":  msg.ID,
-		"turn_number": msg.TurnNumber,
-		"plan_mode":   input.PlanMode,
-		"content":     msg.Content,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal inbox payload: %w", err)
-	}
-	entry, err := store.AppendForMessage(ctx, input.OrgID, db.AppendThreadInboxEntryParams{
-		SessionID:       input.SessionID,
-		ThreadID:        input.ThreadID,
-		MessageID:       msg.ID,
-		ClientMessageID: input.ClientMessageID,
-		EntryType:       models.ThreadInboxEntryTypeUserMessage,
-		Payload:         payload,
+	var entry models.ThreadInboxEntry
+	err := s.runLegacySendUnit(ctx, input.OrgID, input.SessionID, input.ThreadID, func(unitCtx context.Context, tx pgx.Tx) error {
+		entry = models.ThreadInboxEntry{}
+		var err error
+		entry, err = s.appendLegacyInboxInTx(unitCtx, tx, input, msg)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -1308,13 +1289,18 @@ func threadStatusCanQueue(status models.ThreadStatus) bool {
 func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput, resolvingComments bool) (models.SessionThread, models.ThreadStatus, threadClaimOutcome, error) {
 	// 1. Try the idle claim first — happy path for a thread that has been
 	//    sitting idle waiting for the next user message.
-	thread, err := s.threadStore.ClaimIdleForSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
+	thread, err := s.claimLegacyThread(ctx, input, false)
 	if err == nil {
 		if thread.SessionID != input.SessionID {
-			s.releaseThread(ctx, input.OrgID, input.ThreadID, "session mismatch after idle claim")
+			if releaseErr := s.releaseThread(ctx, input.OrgID, input.SessionID, input.ThreadID, "session mismatch after idle claim"); releaseErr != nil {
+				return models.SessionThread{}, "", 0, releaseErr
+			}
 			return models.SessionThread{}, "", 0, ErrThreadNotFound
 		}
 		return thread, models.ThreadStatusIdle, threadClaimClaimed, nil
+	}
+	if sendClaimMustStop(err) {
+		return models.SessionThread{}, "", 0, err
 	}
 	if errors.Is(err, db.ErrThreadRunningLimitReached) {
 		return models.SessionThread{}, "", threadClaimQueueLimitReached, nil
@@ -1345,9 +1331,12 @@ func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput
 	// 4. Thread is in a resumable terminal/paused status: try to bring it
 	//    back to running, mirroring SessionStore.ClaimForResume.
 	if threadStatusIsResumable(existing.Status) {
-		resumed, resumeErr := s.threadStore.ClaimForResumeInSession(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
+		resumed, resumeErr := s.claimLegacyThread(ctx, input, true)
 		if resumeErr == nil {
 			return resumed, existing.Status, threadClaimClaimed, nil
+		}
+		if sendClaimMustStop(resumeErr) {
+			return models.SessionThread{}, "", 0, resumeErr
 		}
 		if errors.Is(resumeErr, db.ErrThreadRunningLimitReached) {
 			return models.SessionThread{}, "", threadClaimQueueLimitReached, nil
@@ -1381,16 +1370,20 @@ func (s *Service) claimThreadForSend(ctx context.Context, input SendMessageInput
 }
 
 // releaseThread is a small wrapper around UpdateStatus(idle) so failure
-// branches that need to undo a claim can do so without duplicating the
-// error-logging boilerplate. Failures here are always best-effort — the
-// caller already has a primary error to surface.
-func (s *Service) releaseThread(ctx context.Context, orgID, threadID uuid.UUID, reason string) {
-	if revertErr := s.threadStore.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); revertErr != nil {
+// branches that need to undo a claim can do so without duplicating logging.
+// Known mutation failures remain best-effort; ambiguity or a fresh guard
+// rejection stops the choreography instead of authorizing more cleanup.
+func (s *Service) releaseThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID, reason string) error {
+	if revertErr := s.updateLegacyThreadStatus(ctx, orgID, sessionID, threadID, models.ThreadStatusIdle); revertErr != nil {
 		s.logger.Error().Err(revertErr).
 			Str("thread_id", threadID.String()).
 			Str("reason", reason).
 			Msg("failed to revert thread to idle")
+		if sendMustStop(revertErr) {
+			return revertErr
+		}
 	}
+	return nil
 }
 
 // threadStatusIsResumable mirrors models.ResumableThreadStatuses without
@@ -1409,10 +1402,13 @@ func threadStatusIsResumable(status models.ThreadStatus) bool {
 // row, the status to revert to on failure (empty when the session was
 // already running due to a sibling tab and no claim was taken), and a
 // terminal error when neither claim succeeds.
-func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, models.SessionStatus, error) {
-	claimed, claimErr := s.sessionStore.ClaimIdle(ctx, orgID, sessionID)
+func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.Session, models.SessionStatus, error) {
+	claimed, claimErr := s.claimLegacySession(ctx, orgID, sessionID, threadID, false)
 	if claimErr == nil {
 		return claimed, models.SessionStatusIdle, nil
+	}
+	if sendClaimMustStop(claimErr) {
+		return models.Session{}, "", claimErr
 	}
 
 	// ClaimIdle failed because the session is not 'idle'. Read the actual
@@ -1436,8 +1432,11 @@ func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID uuid
 		return models.Session{}, "", ErrSessionSnapshotExpired
 	}
 
-	resumed, resumeErr := s.sessionStore.ClaimForResume(ctx, orgID, sessionID)
+	resumed, resumeErr := s.claimLegacySession(ctx, orgID, sessionID, threadID, true)
 	if resumeErr != nil {
+		if sendClaimMustStop(resumeErr) {
+			return models.Session{}, "", resumeErr
+		}
 		return models.Session{}, "", fmt.Errorf("%w: %w", ErrSessionNotResumable, resumeErr)
 	}
 	return resumed, existing.Status, nil
@@ -1453,8 +1452,9 @@ func (s *Service) claimSessionForSend(ctx context.Context, orgID, sessionID uuid
 // s.txStarter and s.reviewCommentStore are non-nil (via the
 // ErrReviewCommentsNotConfigured guard at the top of SendMessage). When
 // answering a question, s.questionStore is non-nil and input.UserID is set.
-// The tx itself requires s.txStarter; the awaiting_input path therefore
-// needs the txStarter wired even when no comments are involved.
+// Keep the historical s.txStarter configuration/grouping requirement even when
+// no comments are involved. The actual transaction now comes from mandatory
+// send.Transactions; this helper never begins or settles a nested transaction.
 func (s *Service) createMessageInTx(
 	ctx context.Context,
 	msg *models.SessionMessage,
@@ -1469,100 +1469,72 @@ func (s *Service) createMessageInTx(
 		return nil, nil, nil, nil, fmt.Errorf("tx starter not configured")
 	}
 
-	tx, err := s.txStarter.Begin(ctx)
+	var resolved []models.SessionReviewComment
+	var answered *models.SessionQuestion
+	var answeredHumanInput *models.HumanInputRequest
+	var inboxEntry *models.ThreadInboxEntry
+	var missingQuestion, missingHumanInput bool
+	original := *msg
+	err := s.runLegacySendUnit(ctx, input.OrgID, input.SessionID, input.ThreadID, func(unitCtx context.Context, tx pgx.Tx) error {
+		*msg = original
+		resolved, answered, answeredHumanInput, inboxEntry = nil, nil, nil, nil
+		missingQuestion, missingHumanInput = false, false
+		if err := s.send.Legacy.CreateMessageInTx(unitCtx, tx, input.OrgID, msg); err != nil {
+			return err
+		}
+		if len(input.ResolveReviewCommentIDs) > 0 {
+			var err error
+			resolved, err = db.NewSessionReviewCommentStore(tx).ValidateAndResolveByIDs(unitCtx, input.OrgID, input.SessionID, input.ResolveReviewCommentIDs, resolutionPass(&claimedSession))
+			if err != nil {
+				return err
+			}
+		}
+		if answerPendingQuestion {
+			question, err := db.NewSessionQuestionStore(tx).AnswerLatestPendingBySession(unitCtx, input.OrgID, input.SessionID, input.Message, *input.UserID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				missingQuestion = true
+			} else if err != nil {
+				return fmt.Errorf("answer pending question: %w", err)
+			} else {
+				answered = &question
+			}
+		}
+		if answerPendingHumanInput {
+			request, err := db.NewSessionHumanInputRequestStore(tx).AnswerLatestPendingFreeTextByThread(unitCtx, input.OrgID, input.SessionID, input.ThreadID, input.Message, *input.UserID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				missingHumanInput = true
+			} else if err != nil {
+				return fmt.Errorf("answer pending human input request: %w", err)
+			} else {
+				answeredHumanInput = &request
+			}
+		}
+		if appendInbox {
+			entry, err := s.appendLegacyInboxInTx(unitCtx, tx, input, msg)
+			if err != nil {
+				return fmt.Errorf("append inbox entry: %w", err)
+			}
+			inboxEntry = &entry
+		}
+		if incrementPending {
+			// The original grouped store had no stream publisher. Retain that
+			// eventless behavior rather than inventing a new postcommit event.
+			if _, err := s.send.Legacy.IncrementPendingMessagesInTx(unitCtx, tx, input.OrgID, input.ThreadID); err != nil {
+				return fmt.Errorf("increment queued message count: %w", err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("begin tx: %w", err)
-	}
-	committed := false
-	defer func() {
-		if committed {
-			return
-		}
-		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil {
-			s.logger.Error().Err(rollbackErr).
-				Str("session_id", input.SessionID.String()).
-				Str("thread_id", input.ThreadID.String()).
-				Msg("failed to rollback thread send-message transaction")
-		}
-	}()
-
-	txMessageStore := db.NewSessionMessageStore(tx)
-	if err := s.createMessage(ctx, txMessageStore, msg); err != nil {
+		*msg = original
 		return nil, nil, nil, nil, err
 	}
-
-	var resolved []models.SessionReviewComment
-	if len(input.ResolveReviewCommentIDs) > 0 {
-		txCommentStore := db.NewSessionReviewCommentStore(tx)
-		// Use the post-claim session state's CurrentTurn so the recorded
-		// pass matches what session-level SendMessage records on the same
-		// path.
-		resolved, err = txCommentStore.ValidateAndResolveByIDs(
-			ctx, input.OrgID, input.SessionID, input.ResolveReviewCommentIDs, resolutionPass(&claimedSession))
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
+	if missingQuestion {
+		s.logger.Warn().Str("session_id", input.SessionID.String()).Msg("awaiting_input session resumed without a pending question to answer")
 	}
-
-	var answered *models.SessionQuestion
-	if answerPendingQuestion {
-		// Bind the question store to the tx so the answer commits or
-		// rolls back atomically with the message and resolved comments.
-		// pgx.ErrNoRows is benign here: it just means there is no pending
-		// question to answer (the orchestrator already cleared it), so we
-		// log and proceed instead of failing the user's send.
-		txQuestionStore := db.NewSessionQuestionStore(tx)
-		question, qerr := txQuestionStore.AnswerLatestPendingBySession(ctx, input.OrgID, input.SessionID, input.Message, *input.UserID)
-		if qerr != nil {
-			if errors.Is(qerr, pgx.ErrNoRows) {
-				s.logger.Warn().
-					Str("session_id", input.SessionID.String()).
-					Msg("awaiting_input session resumed without a pending question to answer")
-			} else {
-				return nil, nil, nil, nil, fmt.Errorf("answer pending question: %w", qerr)
-			}
-		} else {
-			answered = &question
-		}
+	if missingHumanInput {
+		s.logger.Warn().Str("session_id", input.SessionID.String()).Str("thread_id", input.ThreadID.String()).Msg("awaiting_input thread resumed without a pending free-text human input request to answer")
 	}
-
-	var answeredHumanInput *models.HumanInputRequest
-	if answerPendingHumanInput {
-		txHumanInputStore := db.NewSessionHumanInputRequestStore(tx)
-		request, herr := txHumanInputStore.AnswerLatestPendingFreeTextByThread(ctx, input.OrgID, input.SessionID, input.ThreadID, input.Message, *input.UserID)
-		if herr != nil {
-			if errors.Is(herr, pgx.ErrNoRows) {
-				s.logger.Warn().
-					Str("session_id", input.SessionID.String()).
-					Str("thread_id", input.ThreadID.String()).
-					Msg("awaiting_input thread resumed without a pending free-text human input request to answer")
-			} else {
-				return nil, nil, nil, nil, fmt.Errorf("answer pending human input request: %w", herr)
-			}
-		} else {
-			answeredHumanInput = &request
-		}
-	}
-
-	var inboxEntry *models.ThreadInboxEntry
-	if appendInbox {
-		txInboxStore := db.NewThreadInboxStore(tx)
-		inboxEntry, err = s.appendInboxForMessageWithStore(ctx, txInboxStore, input, msg)
-		if err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("append inbox entry: %w", err)
-		}
-	}
-	if incrementPending {
-		txThreadStore := db.NewSessionThreadStore(tx)
-		if err := txThreadStore.IncrementPendingMessages(ctx, input.OrgID, input.ThreadID); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("increment queued message count: %w", err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("commit tx: %w", err)
-	}
-	committed = true
 	return resolved, answered, answeredHumanInput, inboxEntry, nil
 }
 
@@ -1576,10 +1548,13 @@ func (s *Service) createMessageInTx(
 // running sibling out from under the orchestrator.
 //
 // Logs each revert error individually so partial reverts are debuggable, but
-// never returns — callers always have a primary error to surface.
-func (s *Service) revertAfterSendFailure(ctx context.Context, orgID, sessionID, threadID uuid.UUID, revertStatus models.SessionStatus, reason string) {
+// returns ambiguity or a fresh guard rejection to stop later compensation.
+func (s *Service) revertAfterSendFailure(ctx context.Context, orgID, sessionID, threadID uuid.UUID, revertStatus models.SessionStatus, reason string) error {
 	if revertStatus != "" {
-		if revertErr := s.sessionStore.UpdateStatus(ctx, orgID, sessionID, revertStatus); revertErr != nil {
+		if revertErr := s.updateLegacySessionStatus(ctx, orgID, sessionID, threadID, revertStatus); revertErr != nil {
+			if sendMustStop(revertErr) {
+				return revertErr
+			}
 			s.logger.Error().Err(revertErr).
 				Str("session_id", sessionID.String()).
 				Str("revert_status", string(revertStatus)).
@@ -1587,12 +1562,16 @@ func (s *Service) revertAfterSendFailure(ctx context.Context, orgID, sessionID, 
 				Msg("failed to revert session after thread send failure")
 		}
 	}
-	if revertErr := s.threadStore.UpdateStatus(ctx, orgID, threadID, models.ThreadStatusIdle); revertErr != nil {
+	if revertErr := s.updateLegacyThreadStatus(ctx, orgID, sessionID, threadID, models.ThreadStatusIdle); revertErr != nil {
+		if sendMustStop(revertErr) {
+			return revertErr
+		}
 		s.logger.Error().Err(revertErr).
 			Str("thread_id", threadID.String()).
 			Str("reason", reason).
 			Msg("failed to revert thread to idle after send failure")
 	}
+	return nil
 }
 
 // resolutionPass mirrors handlers.currentResolutionPass: the comment is

@@ -696,66 +696,67 @@ func hasServiceHandlersDependencies(services *Services) bool {
 
 // Stores holds all the database stores needed by job handlers.
 type Stores struct {
-	Issues                *db.IssueStore
-	Sessions              *db.SessionStore
-	SessionChangesets     *db.SessionChangesetStore
-	SessionPublications   *db.SessionPublicationStore
-	SessionPRIntents      *db.SessionPRIntentStore
-	TeamReviewRequests    *db.TeamReviewRequestStore
-	Jobs                  *db.JobStore
-	Integrations          *db.IntegrationStore
-	Users                 *db.UserStore
-	Memberships           *db.OrganizationMembershipStore
-	Webhooks              *db.WebhookDeliveryStore
-	PriorityScores        *db.PriorityScoreStore
-	ComplexityEstimates   *db.ComplexityEstimateStore
-	Projects              *db.ProjectStore         // nil-safe: projects feature disabled if nil
-	ProjectTasks          *db.ProjectTaskStore     // nil-safe
-	Credentials           *db.OrgCredentialStore   // nil-safe: needed for sync_slack
-	AuditLogs             *db.AuditLogStore        // nil-safe: audit retention cleanup
-	Organizations         *db.OrganizationStore    // nil-safe: needed for audit retention
-	SessionLogs           *db.SessionLogStore      // nil-safe: data retention cleanup
-	EvalTasks             *db.EvalTaskStore        // nil-safe: eval feature
-	EvalRuns              *db.EvalRunStore         // nil-safe: eval feature
-	EvalBatches           *db.EvalBatchStore       // nil-safe: eval feature
-	EvalBootstraps        *db.EvalBootstrapStore   // nil-safe: eval bootstrap feature
-	EvalReleaseGates      *db.EvalReleaseGateStore // nil-safe: eval release gates
-	Repositories          *db.RepositoryStore      // nil-safe: needed for eval repo lookup
-	GitHubInstallations   *db.GitHubInstallationStore
-	SessionMessages       *db.SessionMessageStore // nil-safe: needed for title regeneration
-	SessionThreads        *db.SessionThreadStore  // nil-safe: needed for thread-scoped continuation status
-	ThreadInbox           *db.ThreadInboxStore    // nil-safe: settles queued input when a thread is cancelled
-	ThreadSendTx          db.TxStarter            // nil-safe: enables atomic queued thread-message admission
-	HumanInputRequests    *db.SessionHumanInputRequestStore
-	ThreadFileEvents      *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
-	SandboxHolders        *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
-	IssueSnapshots        *db.SessionTurnIssueSnapshotStore
-	Automations           *db.AutomationStore       // nil-safe: automations feature disabled if nil
-	AutomationRuns        *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
-	AutomationTargets     *db.AutomationTargetStore // nil-safe: per-target continuity disabled if nil
-	ReviewLoops           *db.SessionReviewLoopStore
-	CodeReviews           *db.CodeReviewStore
-	CodeReviewAssessments *db.CodeReviewAssessmentStore
-	CodeReviewRechecks    *db.CodeReviewRecheckStore
-	CodeReviewDisputes    *db.CodeReviewDisputeStore
-	CodeReviewInsights    *db.CodeReviewInsightStore
-	SessionIssueLinks     *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
-	Previews              *db.PreviewStore
-	PullRequests          *db.PullRequestStore
-	PullRequestFeedback   *db.PullRequestFeedbackStore
-	SlackInstallations    *db.SlackInstallationStore
-	SlackOrgSelections    *db.SlackOrgSelectionStore
-	SlackBotSettings      *db.SlackBotSettingsStore
-	SlackUserLinks        *db.SlackUserLinkStore
-	LinearUserLinks       *db.LinearUserLinkStore
-	ExternalUserLinks     *db.ExternalUserLinkStore
-	ExternalSuggestions   *db.ExternalUserLinkSuggestionStore
-	SlackChannels         *db.SlackChannelSettingsStore
-	SlackSessionLinks     *db.SlackSessionLinkStore
-	SlackInboundEvents    *db.SlackInboundEventStore
-	SlackOutbound         *db.SlackOutboundMessageStore
-	SessionAttributions   *db.SessionAttributionStore
-	CodeReviewWorkspaces  *db.CodeReviewWorkspaceStore // nil-safe: durable shared review preparation
+	Issues                 *db.IssueStore
+	Sessions               *db.SessionStore
+	SessionChangesets      *db.SessionChangesetStore
+	SessionPublications    *db.SessionPublicationStore
+	SessionPRIntents       *db.SessionPRIntentStore
+	TeamReviewRequests     *db.TeamReviewRequestStore
+	Jobs                   *db.JobStore
+	Integrations           *db.IntegrationStore
+	Users                  *db.UserStore
+	Memberships            *db.OrganizationMembershipStore
+	Webhooks               *db.WebhookDeliveryStore
+	PriorityScores         *db.PriorityScoreStore
+	ComplexityEstimates    *db.ComplexityEstimateStore
+	Projects               *db.ProjectStore         // nil-safe: projects feature disabled if nil
+	ProjectTasks           *db.ProjectTaskStore     // nil-safe
+	Credentials            *db.OrgCredentialStore   // nil-safe: needed for sync_slack
+	AuditLogs              *db.AuditLogStore        // nil-safe: audit retention cleanup
+	Organizations          *db.OrganizationStore    // nil-safe: needed for audit retention
+	SessionLogs            *db.SessionLogStore      // nil-safe: data retention cleanup
+	EvalTasks              *db.EvalTaskStore        // nil-safe: eval feature
+	EvalRuns               *db.EvalRunStore         // nil-safe: eval feature
+	EvalBatches            *db.EvalBatchStore       // nil-safe: eval feature
+	EvalBootstraps         *db.EvalBootstrapStore   // nil-safe: eval bootstrap feature
+	EvalReleaseGates       *db.EvalReleaseGateStore // nil-safe: eval release gates
+	Repositories           *db.RepositoryStore      // nil-safe: needed for eval repo lookup
+	GitHubInstallations    *db.GitHubInstallationStore
+	SessionMessages        *db.SessionMessageStore    // nil-safe: needed for title regeneration
+	SessionThreads         *db.SessionThreadStore     // nil-safe: needed for thread-scoped continuation status
+	ThreadInbox            *db.ThreadInboxStore       // nil-safe: settles queued input when a thread is cancelled
+	ThreadSendTx           db.TxStarter               // nil-safe: enables atomic queued thread-message admission
+	ThreadSendDependencies threadsvc.SendDependencies // mandatory for constructing worker thread services
+	HumanInputRequests     *db.SessionHumanInputRequestStore
+	ThreadFileEvents       *db.SessionThreadFileEventStore // nil-safe: tab-level file write attribution
+	SandboxHolders         *db.SessionSandboxHolderStore   // nil-safe: snapshot quiescence for shared sandbox thread runtimes
+	IssueSnapshots         *db.SessionTurnIssueSnapshotStore
+	Automations            *db.AutomationStore       // nil-safe: automations feature disabled if nil
+	AutomationRuns         *db.AutomationRunStore    // nil-safe: automations feature disabled if nil
+	AutomationTargets      *db.AutomationTargetStore // nil-safe: per-target continuity disabled if nil
+	ReviewLoops            *db.SessionReviewLoopStore
+	CodeReviews            *db.CodeReviewStore
+	CodeReviewAssessments  *db.CodeReviewAssessmentStore
+	CodeReviewRechecks     *db.CodeReviewRecheckStore
+	CodeReviewDisputes     *db.CodeReviewDisputeStore
+	CodeReviewInsights     *db.CodeReviewInsightStore
+	SessionIssueLinks      *db.SessionIssueLinkStore // nil-safe: needed for Linear milestones
+	Previews               *db.PreviewStore
+	PullRequests           *db.PullRequestStore
+	PullRequestFeedback    *db.PullRequestFeedbackStore
+	SlackInstallations     *db.SlackInstallationStore
+	SlackOrgSelections     *db.SlackOrgSelectionStore
+	SlackBotSettings       *db.SlackBotSettingsStore
+	SlackUserLinks         *db.SlackUserLinkStore
+	LinearUserLinks        *db.LinearUserLinkStore
+	ExternalUserLinks      *db.ExternalUserLinkStore
+	ExternalSuggestions    *db.ExternalUserLinkSuggestionStore
+	SlackChannels          *db.SlackChannelSettingsStore
+	SlackSessionLinks      *db.SlackSessionLinkStore
+	SlackInboundEvents     *db.SlackInboundEventStore
+	SlackOutbound          *db.SlackOutboundMessageStore
+	SessionAttributions    *db.SessionAttributionStore
+	CodeReviewWorkspaces   *db.CodeReviewWorkspaceStore // nil-safe: durable shared review preparation
 
 	LifecycleWriters *db.LifecycleWriterInstanceStore // nil-safe: global passive observation retention
 }
@@ -765,11 +766,14 @@ type Stores struct {
 // persist a session_messages row without the matching inbox entry, leaving a
 // sibling turn's post-run drain unable to tell that the message is already in
 // flight or consumed.
-func newWorkerThreadService(stores *Stores, logger zerolog.Logger) *threadsvc.Service {
+func newWorkerThreadService(stores *Stores, logger zerolog.Logger) (*threadsvc.Service, error) {
 	if stores == nil {
-		return threadsvc.NewService(nil, nil, nil, nil, nil, logger)
+		return nil, fmt.Errorf("construct worker thread service: stores are required")
 	}
-	service := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, logger)
+	service, err := threadsvc.NewService(stores.SessionThreads, stores.Sessions, stores.SessionMessages, stores.SessionLogs, stores.Jobs, stores.ThreadSendDependencies, logger)
+	if err != nil {
+		return nil, fmt.Errorf("construct worker thread service: %w", err)
+	}
 	if stores.ThreadInbox != nil {
 		if stores.ThreadSendTx != nil {
 			service.SetThreadInboxStore(stores.ThreadInbox, stores.ThreadSendTx)
@@ -777,7 +781,7 @@ func newWorkerThreadService(stores *Stores, logger zerolog.Logger) *threadsvc.Se
 			service.SetThreadInboxStore(stores.ThreadInbox)
 		}
 	}
-	return service
+	return service, nil
 }
 
 func ensureSessionSnapshotQuiescent(ctx context.Context, stores *Stores, run models.Session) error {
@@ -13359,7 +13363,10 @@ func enqueuePRPushReconciliation(ctx context.Context, stores *Stores, logger zer
 	}
 	clientMessageID := fmt.Sprintf("push-reconcile:%s:%d", run.ID, revision)
 	dedupeKey := fmt.Sprintf("continue_session_push_reconcile:%s:%d", run.ID, revision)
-	threadService := newWorkerThreadService(stores, logger)
+	threadService, err := newWorkerThreadService(stores, logger)
+	if err != nil {
+		return err
+	}
 	_, err = threadService.SendMessage(ctx, threadsvc.SendMessageInput{
 		SessionID:                     run.ID,
 		OrgID:                         run.OrgID,

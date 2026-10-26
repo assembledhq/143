@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/rs/zerolog"
 )
 
 // SendTransactions owns one bounded, top-level DB-only unit. A callback may run
@@ -18,6 +19,12 @@ import (
 // Run succeeds. Production construction accepts only an owned pgx pool.
 type SendTransactions interface {
 	Run(context.Context, func(context.Context, pgx.Tx) error) error
+}
+
+// SendChangesetReader is a scoped read-only compatibility dependency. It cannot
+// acquire a changeset lease or attest runtime availability for active admission.
+type SendChangesetReader interface {
+	GetByID(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (models.SessionChangeset, error)
 }
 
 // LegacySendPersistence supplies the original send mutations, not lifecycle
@@ -45,6 +52,7 @@ type LegacySendPersistence interface {
 // after an aborted or uncertain unit. Existing publishers retain their own
 // best-effort logging and snapshot-versus-current-row behavior.
 type SendEffects interface {
+	PublishLifecycle(context.Context, uuid.UUID, []db.LifecycleEffect)
 	PublishThreadClaim(context.Context, uuid.UUID, db.ThreadClaimPersistenceEffects)
 	PublishThreadPending(context.Context, uuid.UUID, db.ThreadPendingMessagePersistenceEffects)
 	PublishThreadStatus(context.Context, uuid.UUID, db.ThreadPersistenceEffects)
@@ -59,10 +67,14 @@ type SendDependencies struct {
 	Transactions SendTransactions
 	Legacy       LegacySendPersistence
 	Effects      SendEffects
+	// Optional for unchanged direct callers; requested legacy HTTP policy
+	// validates this dependency only after the sole router selects legacy.
+	Changesets SendChangesetReader
 }
 
-// Validate rejects missing dependencies, including typed nils, before SQL. The
-// service constructor must call it; validation is not an admission check.
+// Validate rejects missing mandatory dependencies, including typed nils, before
+// SQL. Optional legacy compatibility reads are checked at their chosen branch.
+// The service constructor must call it; validation is not an admission check.
 func (d SendDependencies) Validate() error {
 	for _, dependency := range []struct {
 		name  string
@@ -91,6 +103,7 @@ func NewSendDependencies(pool *pgxpool.Pool, sessions *db.SessionStore, threads 
 		Transactions: transactions,
 		Legacy:       &sqlLegacySendPersistence{sessions: sessions, threads: threads, jobs: jobs},
 		Effects:      &sqlSendEffects{sessions: sessions, threads: threads, jobs: jobs},
+		Changesets:   db.NewSessionChangesetStore(pool),
 	}, nil
 }
 
@@ -233,6 +246,30 @@ type sqlSendEffects struct {
 }
 
 var _ SendEffects = (*sqlSendEffects)(nil)
+
+func (e *sqlSendEffects) PublishLifecycle(ctx context.Context, orgID uuid.UUID, effects []db.LifecycleEffect) {
+	for _, effect := range effects {
+		if err := effect.Validate(); err != nil || effect.OrgID() != orgID {
+			zerolog.Ctx(ctx).Warn().Err(err).Msg("discarded invalid postcommit lifecycle effect")
+			continue
+		}
+		switch effect.Kind() {
+		case db.LifecycleEffectWakeJobs:
+			// The owner notifies the exact committed receipt's job separately.
+		case db.LifecycleEffectSessionChanged:
+			row, err := e.sessions.GetByID(ctx, orgID, effect.SessionID())
+			if err != nil {
+				zerolog.Ctx(ctx).Warn().Err(err).Msg("could not reload committed lifecycle session")
+				continue
+			}
+			e.sessions.PublishCommittedSessionStatus(ctx, orgID, row)
+		case db.LifecycleEffectThreadChanged, db.LifecycleEffectInboxChanged:
+			if err := e.threads.PublishCommittedLifecycleThreadEffect(ctx, orgID, effect); err != nil {
+				zerolog.Ctx(ctx).Warn().Err(err).Msg("could not publish committed lifecycle lane effect")
+			}
+		}
+	}
+}
 
 func (e *sqlSendEffects) PublishThreadClaim(ctx context.Context, orgID uuid.UUID, effects db.ThreadClaimPersistenceEffects) {
 	e.threads.PublishCommittedThreadClaimEffects(ctx, orgID, effects)

@@ -77,6 +77,13 @@ type legacyJobRouteObservation struct {
 	// This describes final strings, not every retained duplicate anchor;
 	// false cannot narrow ambiguous or malformed evidence to a lane.
 	sessionWideFallback bool
+
+	// Retained repair metadata prevents treating a sibling route as proof of
+	// lane-local physical scope. A.5 must supply that separate durable proof.
+	// The worker can enter repair through command_type without repair_run_id.
+	// Presence of either is retained even for null, empty, aliased or duplicate
+	// values; neither field supplies durable physical scope or ownership proof.
+	repairScopeUnproved bool
 }
 
 func (o legacyJobRouteObservation) candidateOrgIDs() []uuid.UUID {
@@ -167,6 +174,9 @@ func decodeLegacyJobRoute(jobOrgID uuid.UUID, payload json.RawMessage) legacyJob
 		if err := decoder.Decode(&raw); err != nil {
 			empty.problems = legacyJobRouteMalformedJSON
 			return empty
+		}
+		if strings.EqualFold(key, "repair_run_id") || strings.EqualFold(key, "command_type") {
+			observation.repairScopeUnproved = true
 		}
 		for i, canonical := range keys {
 			if !strings.EqualFold(key, canonical) {

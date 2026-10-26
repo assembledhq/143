@@ -601,14 +601,22 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		sessionHandler.SetPRTitleSyncer(prService)
 	}
-	threadSvc := threadservice.NewService(
+	threadSendDependencies, err := threadservice.NewSendDependencies(pool, sessionStore, sessionThreadStore, jobStore)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("construct API thread send dependencies: %w", err)
+	}
+	threadSvc, err := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
 		sessionMessageStore,
 		sessionLogStore,
 		jobStore,
+		threadSendDependencies,
 		logger,
 	)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("construct API thread service: %w", err)
+	}
 	threadSvc.SetThreadInboxStore(threadInboxStore, pool)
 	threadSvc.SetThreadRuntimeStore(threadRuntimeStore)
 	threadSvc.SetFileEventStore(sessionThreadFileEventStore)

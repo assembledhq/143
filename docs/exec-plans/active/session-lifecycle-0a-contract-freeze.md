@@ -298,6 +298,29 @@ invariants after validating durable release/normalization/provider evidence.
   Physical availability is mandatory at B.2/E.1 runtime start, so a bound job may
   defer before launch. Answer admission separately retains C.2's own-request
   Ready requirement. The supported three-slot concurrency is unchanged.
+  Unresolved repair evidence yields accepted waiting input with reason
+  `repair_reconciliation`, without a new job or logical claim; comment commands
+  instead roll back with the existing not-sent busy result. Released historical
+  association alone cannot reserve the session, and stale live work still blocks
+  dispatch independently of current reservation/head. Durable repair scope and
+  owning-job/runtime proof belong to A.5, not an inferred lane-local exception.
+
+Ordinary admission's active-reservation and pending legacy-question probes use
+concurrent partial indexes on the exact eligible tenant/session expressions.
+Their production predicates must stay coupled to those keys: adding redundant
+base-column scope or status predicates can reintroduce skew-sensitive plans.
+These indexes add no ownership schema or repair authority. Install them before
+their readers; the highest admission-index rollback floor refuses retained
+protocol, recovery or consumer state before any concurrent drop. Inactive
+rollback requires affected readers and writers to remain withdrawn across the
+entire maintenance operation, not only its preflight transaction.
+
+The PostgreSQL 17 resource fixtures measure the actual statements with directly
+inactive/answered history, cold and all-visible heaps, both tenant-key orderings,
+and custom, generic and default cached mixed bindings. They do not bound dead
+index versions left by recent active-to-inactive transitions or repeated updates.
+H must measure vacuum lag, churn and heavily populated eligible scopes before
+activation and revalidate access paths when optimizer behavior changes.
 
 Whole-root conversion, answer admission, provider starts, full status-site joins,
 activation and production acceptance are not established by these component exits.

@@ -23,6 +23,7 @@ import (
 	"github.com/assembledhq/143/internal/services/thread"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/rs/zerolog"
 )
 
@@ -55,6 +56,9 @@ type SessionThreadHandler struct {
 	linearLinker atomic.Pointer[linearLinkerHolder]
 }
 
+// SetChangesetStore retains the HTTP adapter's legacy targeting configuration.
+// SendThreadMessage parses target identity only; the chosen legacy service
+// branch owns its compatibility preflight after protocol routing and replay.
 func (h *SessionThreadHandler) SetChangesetStore(store *db.SessionChangesetStore) {
 	h.changesets = store
 }
@@ -559,26 +563,18 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 		userID = &user.ID
 	}
 	var targetChangesetID *uuid.UUID
+	legacyChangesetPolicy := thread.LegacyChangesetUnchanged
 	if strings.TrimSpace(body.ChangesetID) != "" {
 		changesetID, parseErr := uuid.Parse(body.ChangesetID)
 		if parseErr != nil {
 			writeError(w, r, http.StatusBadRequest, "INVALID_CHANGESET_ID", "invalid pull request target")
 			return
 		}
-		if h.changesets == nil {
-			writeError(w, r, http.StatusNotImplemented, "CHANGESETS_NOT_CONFIGURED", "pull request targeting is not configured")
-			return
+		legacyChangesetPolicy = thread.LegacyChangesetUnconfigured
+		if h.changesets != nil {
+			legacyChangesetPolicy = thread.LegacyChangesetRequireMaterialized
 		}
-		changeset, loadErr := h.changesets.GetByID(r.Context(), orgID, sessionID, changesetID)
-		if loadErr != nil {
-			writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request target not found")
-			return
-		}
-		if changeset.WorktreePath == nil || strings.TrimSpace(*changeset.WorktreePath) == "" {
-			writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "this pull request must be materialized before the agent can edit it")
-			return
-		}
-		targetChangesetID = &changeset.ID
+		targetChangesetID = &changesetID
 	}
 
 	result, err := h.svc.SendMessage(r.Context(), thread.SendMessageInput{
@@ -586,6 +582,7 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 		OrgID:                   orgID,
 		ThreadID:                threadID,
 		ChangesetID:             targetChangesetID,
+		LegacyChangesetPolicy:   legacyChangesetPolicy,
 		ClientMessageID:         strings.TrimSpace(body.ClientMessageID),
 		UserID:                  userID,
 		Message:                 body.Message,
@@ -596,6 +593,20 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 		ResolveReviewCommentIDs: resolveCommentIDs,
 	})
 	if err != nil {
+		if writeThreadMessageAdmissionError(w, r, err, orgID, sessionID, threadID, strings.TrimSpace(body.ClientMessageID)) {
+			return
+		}
+		switch {
+		case errors.Is(err, thread.ErrSendChangesetsNotConfigured):
+			writeError(w, r, http.StatusNotImplemented, "CHANGESETS_NOT_CONFIGURED", "pull request targeting is not configured")
+			return
+		case errors.Is(err, thread.ErrSendChangesetNotFound):
+			writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request target not found")
+			return
+		case errors.Is(err, thread.ErrSendChangesetNotMaterialized):
+			writeError(w, r, http.StatusConflict, "CHANGESET_NOT_MATERIALIZED", "this pull request must be materialized before the agent can edit it")
+			return
+		}
 		// Comment-resolution errors take priority over the generic switch
 		// because they're more specific (the request shape is well-formed,
 		// but the comment IDs are bad). renderReviewCommentResolveError
@@ -627,9 +638,30 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message")
 		case errors.Is(err, thread.ErrEnqueueFailed):
 			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
+		case errors.Is(err, pgx.ErrNoRows):
+			// Active scope absence is a safe 404. Keep this after legacy
+			// domain errors, which can wrap a no-rows claim diagnostic.
+			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "thread not found")
 		default:
 			writeError(w, r, http.StatusInternalServerError, "CREATE_FAILED", "failed to create message", err)
 		}
+		return
+	}
+	response, status, replayed, responseErr := threadMessageAcceptedResponse(result, orgID, sessionID, threadID)
+	if responseErr != nil {
+		// The service reported success, so a malformed result cannot establish
+		// rejection or permit a new command. Do not expose its unverified scope.
+		var details any
+		if key := strings.TrimSpace(body.ClientMessageID); validThreadMessageReceiptText(key) {
+			details = sessionMessageUnknownDetails{ClientMessageID: key}
+		}
+		writeErrorWithDetails(w, r, http.StatusServiceUnavailable, "COMMAND_OUTCOME_UNKNOWN", "message acceptance is pending confirmation; retain the same command key", details)
+		return
+	}
+	if replayed {
+		// Returning an exact original receipt is not new adapter work. Do not
+		// repeat question/comment audits or the asynchronous Linear link hook.
+		writeJSON(w, status, models.SingleResponse[models.SendThreadMessageResponse]{Data: response})
 		return
 	}
 
@@ -637,10 +669,10 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	// awaiting_input session and flipped a pending question to answered.
 	// Same shape as the session-level path so audit consumers see one row
 	// per answered question regardless of the surface.
-	if result.AnsweredQuestion != nil && userID != nil {
+	if result.Admission == nil && result.AnsweredQuestion != nil && userID != nil {
 		emitThreadAnsweredQuestionAudit(h.audit, h.logger, r, sessionID, *result.AnsweredQuestion, *userID, len(body.Message))
 	}
-	if result.AnsweredHumanInput != nil && userID != nil {
+	if result.Admission == nil && result.AnsweredHumanInput != nil && userID != nil {
 		emitThreadAnsweredHumanInputAudit(h.audit, h.logger, r, sessionID, *result.AnsweredHumanInput, *userID, len(body.Message))
 	}
 
@@ -648,7 +680,13 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	// as session-level SendMessage so audit consumers see consistent
 	// before/after values regardless of which surface triggered the
 	// resolution.
-	emitReviewCommentResolutionAudits(h.audit, h.logger, r, sessionID, result.Message.ID, result.ResolvedComments)
+	resolvedComments := result.ResolvedComments
+	if result.Admission != nil {
+		// Canonical ordinary admission never answers an input request, and its
+		// committed comment receipt is the only source of new comment audits.
+		resolvedComments = result.Admission.ResolvedComments()
+	}
+	emitReviewCommentResolutionAudits(h.audit, h.logger, r, sessionID, response.Message.ID, resolvedComments)
 
 	// Mid-session Linear linking, fire-and-forget — mirrors the session-level
 	// SendMessage hook so refs in a follow-up are detected and linked
@@ -656,14 +694,7 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 	// surface.
 	h.maybeLinkLinearMidSession(r.Context(), orgID, sessionID, body.Message, userID)
 
-	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SendThreadMessageResponse]{
-		Data: models.SendThreadMessageResponse{
-			Message:       *result.Message,
-			InboxEntry:    result.InboxEntry,
-			ThreadStatus:  result.ThreadStatus,
-			DeliveryState: result.DeliveryState,
-		},
-	})
+	writeJSON(w, status, models.SingleResponse[models.SendThreadMessageResponse]{Data: response})
 }
 
 // GetThreadMessages handles GET /sessions/{id}/threads/{tid}/messages —
