@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
@@ -68,6 +69,13 @@ type lifecycleConsumerLimits struct {
 	structuredRows, legacyJobs, payloadBytes, laneAnchors int
 }
 
+// Scalar pair probes expose exact generation values to custom planning. Keep
+// their total round trips finite as well as their returned rows: at most 32
+// generation probes plus the fixed scope/evidence reads, within the caller's
+// unchanged transaction deadline. Overflow is never an unqueried clear tail.
+// This is a conservative availability limit, not a complete census above 32.
+const lifecycleConsumerGenerationProbeLimit = 32
+
 // Fixed private work budgets are discovery limits, not product configuration.
 // Overflow cannot become a partial negative result. B's legacy normalization
 // must retire uninterpretable historical physical records before clear reads.
@@ -83,46 +91,103 @@ type lifecycleConsumerEvidence struct {
 	wholeSession, physical, ownerMatches                    bool
 }
 
-// Each branch is independently bounded before the final bounded union. Reverse
-// references discover scope even when the job is absent or its payload is bad.
-// Runtime/executor/inbox/holder membership uses both the recorded session and
-// the actual tenant-scoped thread parent, including contradictory legacy rows.
+// Scope keys are complete, bounded observations of the actual target session,
+// not trusted ownership or permission. Disjoint recorded-session and actual-lane
+// arms retain contradictory/missing references once per source ID. The runtime
+// key set also includes actual-lane predecessors whose recorded session differs.
+// Eligibility precedes each output cap; irrelevant inbox/dispatch history cannot
+// hide a later consumer. Caps bound returned evidence, not all target-scope work.
+// Skew-sensitive reads use QueryExecModeExec: custom planning must see concrete
+// scope values rather than generic joined-ID estimates that scan tenant history.
+// Retained per-run links are independent anchors, not fallback display routes;
+// unresolved same-tenant targets and contradictory ownership stay uncertain.
+const lifecycleConsumerLaneKeysQuery = `SELECT id FROM session_threads
+ WHERE org_id=$1 AND session_id=$2 ORDER BY id LIMIT $3`
+
+const lifecycleConsumerGenerationKeysQuery = `SELECT target_id,generation FROM automation_target_sessions
+ WHERE org_id=$1 AND session_id=$2 ORDER BY target_id,generation LIMIT $3`
+
+const lifecycleConsumerRuntimeKeysQuery = `(
+ SELECT id FROM thread_runtimes WHERE org_id=$1 AND session_id=$2 ORDER BY id LIMIT $4)
+ UNION ALL (
+ SELECT id FROM thread_runtimes WHERE org_id=$1 AND thread_id=ANY($3::uuid[])
+ AND session_id IS DISTINCT FROM $2 ORDER BY id LIMIT $4)
+ LIMIT $4`
+
 const lifecycleConsumerEvidenceQuery = `WITH evidence AS (
  (SELECT 'dispatch'::text source,d.id,d.org_id,d.session_id,d.thread_id,t.session_id thread_session_id,
    d.job_id,d.runtime_id,COALESCE(d.admission_state,'') state,COALESCE(d.control_state,'') control_state,
    false whole_session,false physical,true owner_matches
   FROM session_input_dispatches d LEFT JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id
   LEFT JOIN jobs j ON j.org_id=d.org_id AND j.id=d.job_id
-  WHERE d.org_id=$1 AND (d.session_id=$2 OR t.session_id=$2)
+  WHERE d.org_id=$1 AND d.session_id=$2
+    AND (d.admission_state='bound' OR d.control_state IN ('awaiting_control','retry_queued','superseded_delivery_uncertain')
+      OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `)
+  ORDER BY d.id LIMIT $3)
+ UNION ALL
+ (SELECT 'dispatch',d.id,d.org_id,d.session_id,d.thread_id,t.session_id,
+   d.job_id,d.runtime_id,COALESCE(d.admission_state,''),COALESCE(d.control_state,''),false,false,true
+  FROM session_input_dispatches d LEFT JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id
+  LEFT JOIN jobs j ON j.org_id=d.org_id AND j.id=d.job_id
+  WHERE d.org_id=$1 AND d.thread_id=ANY($4::uuid[]) AND d.session_id IS DISTINCT FROM $2
     AND (d.admission_state='bound' OR d.control_state IN ('awaiting_control','retry_queued','superseded_delivery_uncertain')
       OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `)
   ORDER BY d.id LIMIT $3)
  UNION ALL
  (SELECT 'runtime',r.id,r.org_id,r.session_id,r.thread_id,t.session_id,r.job_id,r.id,r.status,'',false,true,true
   FROM thread_runtimes r LEFT JOIN session_threads t ON t.org_id=r.org_id AND t.id=r.thread_id
-  WHERE r.org_id=$1 AND (r.session_id=$2 OR t.session_id=$2) ORDER BY r.id LIMIT $3)
+  WHERE r.org_id=$1 AND r.session_id=$2 ORDER BY r.id LIMIT $3)
+ UNION ALL
+ (SELECT 'runtime',r.id,r.org_id,r.session_id,r.thread_id,t.session_id,r.job_id,r.id,r.status,'',false,true,true
+  FROM thread_runtimes r LEFT JOIN session_threads t ON t.org_id=r.org_id AND t.id=r.thread_id
+  WHERE r.org_id=$1 AND r.thread_id=ANY($4::uuid[]) AND r.session_id IS DISTINCT FROM $2 ORDER BY r.id LIMIT $3)
  UNION ALL
  (SELECT 'executor',e.id,e.org_id,e.session_id,e.thread_id,t.session_id,e.job_id,NULL::uuid,e.status,'',false,true,true
   FROM session_executors e LEFT JOIN session_threads t ON t.org_id=e.org_id AND t.id=e.thread_id
-  WHERE e.org_id=$1 AND (e.session_id=$2 OR t.session_id=$2) ORDER BY e.id LIMIT $3)
+  WHERE e.org_id=$1 AND e.session_id=$2 ORDER BY e.id LIMIT $3)
+ UNION ALL
+ (SELECT 'executor',e.id,e.org_id,e.session_id,e.thread_id,t.session_id,e.job_id,NULL::uuid,e.status,'',false,true,true
+  FROM session_executors e LEFT JOIN session_threads t ON t.org_id=e.org_id AND t.id=e.thread_id
+  WHERE e.org_id=$1 AND e.thread_id=ANY($4::uuid[]) AND e.session_id IS DISTINCT FROM $2 ORDER BY e.id LIMIT $3)
  UNION ALL
  (SELECT 'inbox',i.id,i.org_id,i.session_id,i.thread_id,t.session_id,NULL::uuid,i.runtime_id,i.delivery_state,'',false,true,true
   FROM thread_inbox_entries i LEFT JOIN session_threads t ON t.org_id=i.org_id AND t.id=i.thread_id
-  WHERE i.org_id=$1 AND (i.session_id=$2 OR t.session_id=$2) AND i.applied_at IS NULL
-    AND i.delivery_state IN ('delivering','delivered','unknown_delivery','acked') ORDER BY i.id LIMIT $3)
+  WHERE i.org_id=$1 AND i.session_id=$2 AND i.applied_at IS NULL
+    AND (i.delivered_at IS NOT NULL OR i.delivery_state IN ('delivering','delivered','unknown_delivery','acked'))
+  ORDER BY i.id LIMIT $3)
+ UNION ALL
+ (SELECT 'inbox',i.id,i.org_id,i.session_id,i.thread_id,t.session_id,NULL::uuid,i.runtime_id,i.delivery_state,'',false,true,true
+  FROM thread_inbox_entries i LEFT JOIN session_threads t ON t.org_id=i.org_id AND t.id=i.thread_id
+  WHERE i.org_id=$1 AND i.thread_id=ANY($4::uuid[]) AND i.session_id IS DISTINCT FROM $2 AND i.applied_at IS NULL
+    AND (i.delivered_at IS NOT NULL OR i.delivery_state IN ('delivering','delivered','unknown_delivery','acked'))
+  ORDER BY i.id LIMIT $3)
  UNION ALL
  (SELECT 'preparation',p.id,p.org_id,p.session_id,p.thread_id,t.session_id,p.job_id,NULL::uuid,p.state,'',
    p.physical_operation_scope='whole_session',p.physical_operation_state<>'none',true
   FROM session_runtime_start_preparations p LEFT JOIN session_threads t ON t.org_id=p.org_id AND t.id=p.thread_id
   LEFT JOIN jobs j ON j.org_id=p.org_id AND j.id=p.job_id
-  WHERE p.org_id=$1 AND (p.session_id=$2 OR t.session_id=$2)
+  WHERE p.org_id=$1 AND p.session_id=$2
+    AND (p.state IN ('preparing','authorized') OR p.physical_operation_state<>'none'
+      OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `) ORDER BY p.id LIMIT $3)
+ UNION ALL
+ (SELECT 'preparation',p.id,p.org_id,p.session_id,p.thread_id,t.session_id,p.job_id,NULL::uuid,p.state,'',
+   p.physical_operation_scope='whole_session',p.physical_operation_state<>'none',true
+  FROM session_runtime_start_preparations p LEFT JOIN session_threads t ON t.org_id=p.org_id AND t.id=p.thread_id
+  LEFT JOIN jobs j ON j.org_id=p.org_id AND j.id=p.job_id
+  WHERE p.org_id=$1 AND p.thread_id=ANY($4::uuid[]) AND p.session_id IS DISTINCT FROM $2
     AND (p.state IN ('preparing','authorized') OR p.physical_operation_state<>'none'
       OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `) ORDER BY p.id LIMIT $3)
  UNION ALL
  (SELECT 'recheck',d.assessment_id,d.org_id,d.session_id,d.thread_id,t.session_id,d.job_id,NULL::uuid,d.status,'',false,false,true
   FROM code_review_recheck_dispatches d LEFT JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id
   LEFT JOIN jobs j ON j.org_id=d.org_id AND j.id=d.job_id
-  WHERE d.org_id=$1 AND (d.session_id=$2 OR t.session_id=$2)
+  WHERE d.org_id=$1 AND d.session_id=$2
+    AND (d.status IN ('pending','running') OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `) ORDER BY d.assessment_id LIMIT $3)
+ UNION ALL
+ (SELECT 'recheck',d.assessment_id,d.org_id,d.session_id,d.thread_id,t.session_id,d.job_id,NULL::uuid,d.status,'',false,false,true
+  FROM code_review_recheck_dispatches d LEFT JOIN session_threads t ON t.org_id=d.org_id AND t.id=d.thread_id
+  LEFT JOIN jobs j ON j.org_id=d.org_id AND j.id=d.job_id
+  WHERE d.org_id=$1 AND d.thread_id=ANY($4::uuid[]) AND d.session_id IS DISTINCT FROM $2
     AND (d.status IN ('pending','running') OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `) ORDER BY d.assessment_id LIMIT $3)
  UNION ALL
  (SELECT 'automation',a.id,a.org_id,COALESCE(a.session_id,g.session_id,t.session_id),a.thread_id,t.session_id,a.job_id,NULL::uuid,a.status,'',false,false,
@@ -130,14 +195,29 @@ const lifecycleConsumerEvidenceQuery = `WITH evidence AS (
   FROM automation_runs a LEFT JOIN session_threads t ON t.org_id=a.org_id AND t.id=a.thread_id
   LEFT JOIN automation_target_sessions g ON g.org_id=a.org_id AND g.target_id=a.target_id AND g.generation=a.target_generation
   LEFT JOIN jobs j ON j.org_id=a.org_id AND j.id=a.job_id
-  WHERE a.org_id=$1 AND (a.session_id=$2 OR t.session_id=$2 OR g.session_id=$2) AND a.job_id IS NOT NULL
+  WHERE a.org_id=$1 AND a.session_id=$2 AND a.job_id IS NOT NULL
     AND (a.status IN ('pending','running') OR a.dispatch_state='executing' OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `) ORDER BY a.id LIMIT $3)
  UNION ALL
- (SELECT 'automation',a.id,a.org_id,l.session_id,NULL::uuid,NULL::uuid,a.job_id,NULL::uuid,a.status,'',false,false,true
-  FROM session_automation_links l JOIN automation_runs a ON a.org_id=l.org_id AND a.id=l.automation_run_id
+ (SELECT 'automation',a.id,a.org_id,COALESCE(a.session_id,g.session_id,t.session_id),a.thread_id,t.session_id,a.job_id,NULL::uuid,a.status,'',false,false,
+   a.session_id IS NOT NULL AND (g.session_id IS NULL OR g.session_id=a.session_id)
+  FROM automation_runs a LEFT JOIN session_threads t ON t.org_id=a.org_id AND t.id=a.thread_id
+  LEFT JOIN automation_target_sessions g ON g.org_id=a.org_id AND g.target_id=a.target_id AND g.generation=a.target_generation
   LEFT JOIN jobs j ON j.org_id=a.org_id AND j.id=a.job_id
-  WHERE l.org_id=$1 AND l.session_id=$2 AND a.session_id IS NULL AND a.job_id IS NOT NULL
+  WHERE a.org_id=$1 AND a.thread_id=ANY($4::uuid[]) AND a.session_id IS DISTINCT FROM $2 AND a.job_id IS NOT NULL
     AND (a.status IN ('pending','running') OR a.dispatch_state='executing' OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `) ORDER BY a.id LIMIT $3)
+ UNION ALL
+ (SELECT 'automation',l.automation_run_id,l.org_id,l.session_id,a.thread_id,t.session_id,a.job_id,NULL::uuid,COALESCE(a.status,''),'',false,false,
+   a.id IS NOT NULL AND (a.session_id IS NULL OR a.session_id=l.session_id)
+    AND (a.thread_id IS NULL OR COALESCE(t.session_id=l.session_id,false))
+    AND ((a.target_id IS NULL AND a.target_generation IS NULL) OR COALESCE(g.session_id=l.session_id,false))
+  FROM session_automation_links l LEFT JOIN automation_runs a ON a.org_id=l.org_id AND a.id=l.automation_run_id
+  LEFT JOIN session_threads t ON t.org_id=a.org_id AND t.id=a.thread_id
+  LEFT JOIN automation_target_sessions g ON g.org_id=a.org_id AND g.target_id=a.target_id AND g.generation=a.target_generation
+  LEFT JOIN jobs j ON j.org_id=a.org_id AND j.id=a.job_id
+  WHERE l.org_id=$1 AND l.session_id=$2
+    AND a.session_id IS DISTINCT FROM $2 AND t.session_id IS DISTINCT FROM $2 AND g.session_id IS DISTINCT FROM $2
+    AND (a.id IS NULL OR (a.job_id IS NOT NULL AND (a.status IN ('pending','running') OR a.dispatch_state='executing' OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `)))
+  ORDER BY l.automation_run_id LIMIT $3)
  UNION ALL
  (SELECT 'holder',h.id,h.org_id,h.session_id,r.thread_id,t.session_id,r.job_id,h.holder_id,COALESCE(r.status,''),'',false,true,
    h.holder_kind='thread_runtime' AND r.id IS NOT NULL AND r.session_id=h.session_id
@@ -145,18 +225,121 @@ const lifecycleConsumerEvidenceQuery = `WITH evidence AS (
   FROM session_sandbox_holders h
   LEFT JOIN thread_runtimes r ON r.org_id=h.org_id AND r.id=h.holder_id AND h.holder_kind='thread_runtime'
   LEFT JOIN session_threads t ON t.org_id=r.org_id AND t.id=r.thread_id
-  WHERE h.org_id=$1 AND (h.session_id=$2 OR r.session_id=$2 OR t.session_id=$2)
+  WHERE h.org_id=$1 AND h.session_id=$2
     AND h.holder_kind NOT IN ('preview','snapshot','operator','code_review') ORDER BY h.id LIMIT $3)
+ UNION ALL
+ (SELECT 'holder',h.id,h.org_id,h.session_id,r.thread_id,t.session_id,r.job_id,h.holder_id,COALESCE(r.status,''),'',false,true,
+   r.session_id=h.session_id AND r.container_id=h.container_id AND r.owner_node_id=h.owner_node_id AND r.lease_token=h.lease_token
+  FROM session_sandbox_holders h JOIN thread_runtimes r ON r.org_id=h.org_id AND r.id=h.holder_id
+  LEFT JOIN session_threads t ON t.org_id=r.org_id AND t.id=r.thread_id
+  WHERE h.org_id=$1 AND h.holder_kind='thread_runtime' AND h.holder_id=ANY($5::uuid[])
+    AND h.session_id IS DISTINCT FROM $2 ORDER BY h.id LIMIT $3)
 )
 SELECT e.source,e.id,e.session_id,e.thread_id,e.thread_session_id,e.job_id,e.runtime_id,
  e.state,e.control_state,COALESCE(e.whole_session,false),e.physical,e.owner_matches,j.id,COALESCE(j.status,'')
 FROM evidence e LEFT JOIN jobs j ON j.org_id=e.org_id AND j.id=e.job_id
 LIMIT $3`
 
+// Exact scalar generation pairs preserve provenance and expose skew to custom
+// planning. One bounded probe per discovered pair shares the total evidence cap;
+// independent target/generation ANY arrays would admit a Cartesian product.
+const lifecycleConsumerGenerationEvidenceQuery = `SELECT 'automation'::text,a.id,
+ COALESCE(a.session_id,g.session_id,t.session_id),a.thread_id,t.session_id,a.job_id,NULL::uuid,a.status,''::text,
+ false,false,a.session_id IS NOT NULL AND (g.session_id IS NULL OR g.session_id=a.session_id),
+ j.id,COALESCE(j.status,'')
+ FROM automation_runs a
+ JOIN automation_target_sessions g ON g.org_id=a.org_id AND g.target_id=a.target_id AND g.generation=a.target_generation
+ LEFT JOIN session_threads t ON t.org_id=a.org_id AND t.id=a.thread_id
+ LEFT JOIN jobs j ON j.org_id=a.org_id AND j.id=a.job_id
+ WHERE a.org_id=$1 AND a.target_id=$4 AND a.target_generation=$5 AND g.session_id=$2
+ AND a.session_id IS DISTINCT FROM $2 AND t.session_id IS DISTINCT FROM $2 AND a.job_id IS NOT NULL
+ AND (a.status IN ('pending','running') OR a.dispatch_state='executing' OR j.status IN ` + jobNonterminalInputConsumerStatusesSQL + `)
+ ORDER BY a.id LIMIT $3`
+
 const lifecycleConsumerLegacyJobsQuery = `SELECT id,octet_length(payload::text),
  CASE WHEN octet_length(payload::text)<=$3 THEN payload ELSE NULL END
  FROM jobs WHERE org_id=$1 AND job_type IN ('run_agent','continue_session')
  AND status IN ` + jobNonterminalInputConsumerStatusesSQL + ` ORDER BY id LIMIT $2`
+
+type lifecycleConsumerGenerationKey struct {
+	targetID   uuid.UUID
+	generation int
+}
+
+type lifecycleConsumerScopeKeys struct {
+	lanes, runtimes []uuid.UUID
+	generations     []lifecycleConsumerGenerationKey
+}
+
+// Exec mode cannot infer pgx's array codec from []uuid.UUID. Bind canonical
+// UUID-array text to the explicit SQL casts instead of changing connection-wide
+// type mappings. Every element comes from a typed UUID, never caller SQL text.
+func lifecycleConsumerUUIDArray(ids []uuid.UUID) string {
+	var array strings.Builder
+	array.Grow(2 + len(ids)*37)
+	array.WriteByte('{')
+	for i, id := range ids {
+		if i != 0 {
+			array.WriteByte(',')
+		}
+		array.WriteString(id.String())
+	}
+	array.WriteByte('}')
+	return array.String()
+}
+
+// readLifecycleConsumerScopeKeysInTx observes actual scope, including hidden and
+// archived lanes and every runtime status. These keys are not ownership proof.
+// A partial list can never reach a negative consumer result. Runtime rows are
+// already eligible physical evidence, so their shared structured-row cap is
+// checked before building the holder reverse array, not before eligibility.
+func readLifecycleConsumerScopeKeysInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, fence AdmissionFence, limits lifecycleConsumerLimits) (lifecycleConsumerScopeKeys, error) {
+	rows, err := tx.Query(ctx, lifecycleConsumerLaneKeysQuery, pgx.QueryExecModeExec, orgID, fence.sessionID, limits.laneAnchors+1)
+	if err != nil {
+		return lifecycleConsumerScopeKeys{}, fmt.Errorf("read actual lifecycle consumer lanes: %w", err)
+	}
+	lanes, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return lifecycleConsumerScopeKeys{}, fmt.Errorf("collect actual lifecycle consumer lanes: %w", err)
+	}
+	if len(lanes) > limits.laneAnchors {
+		return lifecycleConsumerScopeKeys{}, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerDispatch}
+	}
+	generationLimit := min(limits.laneAnchors, lifecycleConsumerGenerationProbeLimit)
+	rows, err = tx.Query(ctx, lifecycleConsumerGenerationKeysQuery, pgx.QueryExecModeExec, orgID, fence.sessionID, generationLimit+1)
+	if err != nil {
+		return lifecycleConsumerScopeKeys{}, fmt.Errorf("read actual lifecycle consumer generations: %w", err)
+	}
+	generations, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (lifecycleConsumerGenerationKey, error) {
+		var key lifecycleConsumerGenerationKey
+		err := row.Scan(&key.targetID, &key.generation)
+		return key, err
+	})
+	if err != nil {
+		return lifecycleConsumerScopeKeys{}, fmt.Errorf("collect actual lifecycle consumer generations: %w", err)
+	}
+	if len(generations) > generationLimit {
+		return lifecycleConsumerScopeKeys{}, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerAutomation}
+	}
+	rows, err = tx.Query(ctx, lifecycleConsumerRuntimeKeysQuery, pgx.QueryExecModeExec, orgID, fence.sessionID, lifecycleConsumerUUIDArray(lanes), limits.structuredRows+1)
+	if err != nil {
+		return lifecycleConsumerScopeKeys{}, fmt.Errorf("read actual lifecycle consumer runtimes: %w", err)
+	}
+	runtimes, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return lifecycleConsumerScopeKeys{}, fmt.Errorf("collect actual lifecycle consumer runtimes: %w", err)
+	}
+	if len(runtimes) > limits.structuredRows {
+		return lifecycleConsumerScopeKeys{}, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerRuntime}
+	}
+	return lifecycleConsumerScopeKeys{lanes: lanes, runtimes: runtimes, generations: generations}, nil
+}
+
+func scanLifecycleConsumerEvidence(row pgx.CollectableRow) (lifecycleConsumerEvidence, error) {
+	var v lifecycleConsumerEvidence
+	err := row.Scan(&v.source, &v.id, &v.sessionID, &v.threadID, &v.threadSessionID, &v.jobID, &v.runtimeID, &v.state, &v.controlState, &v.wholeSession, &v.physical, &v.ownerMatches, &v.foundJobID, &v.jobStatus)
+	return v, err
+}
 
 // HasCompetingInputConsumerInTx is the canonical observation/predicate for the
 // supplied tenant/session/lane scope. The caller already holds the parent and
@@ -209,20 +392,34 @@ func hasCompetingInputConsumerInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 	if err != nil {
 		return false, err
 	}
-	rows, err := tx.Query(ctx, lifecycleConsumerEvidenceQuery, orgID, fence.sessionID, limits.structuredRows+1)
+	keys, err := readLifecycleConsumerScopeKeysInTx(ctx, tx, orgID, fence, limits)
+	if err != nil {
+		return false, err
+	}
+	rows, err := tx.Query(ctx, lifecycleConsumerEvidenceQuery, pgx.QueryExecModeExec, orgID, fence.sessionID, limits.structuredRows+1, lifecycleConsumerUUIDArray(keys.lanes), lifecycleConsumerUUIDArray(keys.runtimes))
 	if err != nil {
 		return false, fmt.Errorf("read structured lifecycle consumers: %w", err)
 	}
-	evidence, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (lifecycleConsumerEvidence, error) {
-		var v lifecycleConsumerEvidence
-		err := row.Scan(&v.source, &v.id, &v.sessionID, &v.threadID, &v.threadSessionID, &v.jobID, &v.runtimeID, &v.state, &v.controlState, &v.wholeSession, &v.physical, &v.ownerMatches, &v.foundJobID, &v.jobStatus)
-		return v, err
-	})
+	evidence, err := pgx.CollectRows(rows, scanLifecycleConsumerEvidence)
 	if err != nil {
 		return false, fmt.Errorf("collect structured lifecycle consumers: %w", err)
 	}
 	if len(evidence) > limits.structuredRows {
 		return false, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerDispatch}
+	}
+	for _, key := range keys.generations {
+		rows, err := tx.Query(ctx, lifecycleConsumerGenerationEvidenceQuery, pgx.QueryExecModeExec, orgID, fence.sessionID, limits.structuredRows-len(evidence)+1, key.targetID, key.generation)
+		if err != nil {
+			return false, fmt.Errorf("read exact generation lifecycle consumers: %w", err)
+		}
+		generationEvidence, err := pgx.CollectRows(rows, scanLifecycleConsumerEvidence)
+		if err != nil {
+			return false, fmt.Errorf("collect exact generation lifecycle consumers: %w", err)
+		}
+		evidence = append(evidence, generationEvidence...)
+		if len(evidence) > limits.structuredRows {
+			return false, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerAutomation}
+		}
 	}
 	blocked := recovery
 	scopedJobs := make(map[uuid.UUID]bool)

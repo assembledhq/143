@@ -11,8 +11,6 @@ END $$;
 DROP TRIGGER trg_sessions_retain_workspace_recovery ON sessions;
 DROP TRIGGER trg_sessions_recovery_no_truncate ON sessions;
 DROP FUNCTION lifecycle143_retain_workspace_recovery();
-DROP INDEX idx_sessions_workspace_recovery_id;
-DROP INDEX idx_sessions_workspace_recovery_due;
 ALTER TABLE sessions DROP CONSTRAINT sessions_workspace_recovery_shape_check,
     DROP COLUMN workspace_recovery_id, DROP COLUMN workspace_recovery_token,
     DROP COLUMN workspace_recovery, DROP COLUMN workspace_recovery_next_attempt_at;

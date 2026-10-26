@@ -229,10 +229,36 @@ func TestLifecycleConsumerInactiveMigrationRoundTripPostgres(t *testing.T) {
 	err := pool.QueryRow(context.Background(), `SELECT to_jsonb(r) FROM thread_runtimes r WHERE org_id=$1 AND id=$2`, org, runtime.ID).Scan(&before)
 	require.NoError(t, err, "capture every legacy runtime field before dependency-ordered rollback")
 	files := []string{
+		"000379_lifecycle_consumer_index_rollback_floor.down.sql",
+		"000378_automation_consumer_job_index.down.sql",
+		"000377_holder_consumer_runtime_index.down.sql",
+		"000376_holder_consumer_session_index.down.sql",
+		"000375_automation_consumer_target_index.down.sql",
+		"000374_automation_consumer_thread_index.down.sql",
+		"000373_recheck_consumer_session_index.down.sql",
+		"000372_executor_consumer_thread_index.down.sql",
+		"000371_executor_consumer_session_index.down.sql",
+		"000370_runtime_consumer_thread_lookup.down.sql",
+		"000369_dispatch_consumer_thread_index.down.sql",
+		"000368_workspace_recovery_due_index.down.sql",
+		"000367_workspace_recovery_identity_index.down.sql",
 		"000366_validate_preparation_references.down.sql", "000365_workspace_recovery_reservation.down.sql", "000364_start_preparation_request_reference.down.sql", "000363_start_preparation_job_reference.down.sql", "000362_start_preparation_thread_reference.down.sql", "000361_start_preparation_session_reference.down.sql", "000360_runtime_start_preparations.down.sql",
 		"000359_validate_consumer_references.down.sql", "000358_dispatch_consumer_runtime_reference.down.sql", "000357_dispatch_consumer_job_reference.down.sql", "000356_runtime_consumer_job_reference.down.sql", "000355_runtime_consumer_job_index.down.sql", "000354_dispatch_input_consumers.down.sql", "000353_runtime_input_allocation.down.sql",
 		"000353_runtime_input_allocation.up.sql", "000354_dispatch_input_consumers.up.sql", "000355_runtime_consumer_job_index.up.sql", "000356_runtime_consumer_job_reference.up.sql", "000357_dispatch_consumer_job_reference.up.sql", "000358_dispatch_consumer_runtime_reference.up.sql", "000359_validate_consumer_references.up.sql",
 		"000360_runtime_start_preparations.up.sql", "000361_start_preparation_session_reference.up.sql", "000362_start_preparation_thread_reference.up.sql", "000363_start_preparation_job_reference.up.sql", "000364_start_preparation_request_reference.up.sql", "000365_workspace_recovery_reservation.up.sql", "000366_validate_preparation_references.up.sql",
+		"000367_workspace_recovery_identity_index.up.sql",
+		"000368_workspace_recovery_due_index.up.sql",
+		"000369_dispatch_consumer_thread_index.up.sql",
+		"000370_runtime_consumer_thread_lookup.up.sql",
+		"000371_executor_consumer_session_index.up.sql",
+		"000372_executor_consumer_thread_index.up.sql",
+		"000373_recheck_consumer_session_index.up.sql",
+		"000374_automation_consumer_thread_index.up.sql",
+		"000375_automation_consumer_target_index.up.sql",
+		"000376_holder_consumer_session_index.up.sql",
+		"000377_holder_consumer_runtime_index.up.sql",
+		"000378_automation_consumer_job_index.up.sql",
+		"000379_lifecycle_consumer_index_rollback_floor.up.sql",
 	}
 	for _, name := range files {
 		migration, err := os.ReadFile("../../migrations/" + name)

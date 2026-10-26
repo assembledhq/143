@@ -98,6 +98,8 @@ func TestLifecycleConsumerEvidenceClassification(t *testing.T) {
 		{name: "completed executor needs physical proof", source: lifecycleConsumerExecutor, state: "completed", expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerReconciliation}},
 		{name: "unknown inbox survives own exception", source: lifecycleConsumerInbox, state: "unknown_delivery", owned: true, expected: lifecycleConsumerTestResult{blocked: true}},
 		{name: "acked inbox lacks positive application", source: lifecycleConsumerInbox, state: "acked", expected: lifecycleConsumerTestResult{blocked: true}},
+		{name: "previously delivered pending inbox remains uncertain", source: lifecycleConsumerInbox, state: "pending", expected: lifecycleConsumerTestResult{blocked: true}},
+		{name: "previously delivered dead letter remains uncertain", source: lifecycleConsumerInbox, state: "dead_letter", expected: lifecycleConsumerTestResult{blocked: true}},
 		{name: "open own preparation is not automatically excluded", source: lifecycleConsumerPreparation, state: "authorized", owned: true, expected: lifecycleConsumerTestResult{blocked: true}},
 		{name: "closed physical operation remains unresolved", source: lifecycleConsumerPreparation, state: "closed", physical: true, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerReconciliation}},
 		{name: "runtime holder resolves actual own allocation", source: lifecycleConsumerHolder, state: "live", owned: true},
@@ -188,7 +190,10 @@ func TestLifecycleConsumerSuppliedTransactionBoundary(t *testing.T) {
 			mock.ExpectQuery(regexp.QuoteMeta(lifecycleTransactionPolicyQuery)).WillReturnRows(pgxmock.NewRows([]string{"isolation", "marker", "lock", "statement"}).AddRow(tt.policy, "1", "250ms", "1500ms"))
 			if tt.errorText == "" {
 				mock.ExpectQuery("SELECT workspace_recovery_id IS NOT NULL").WithArgs(org, session, true, lane).WillReturnRows(pgxmock.NewRows([]string{"recovery", "member"}).AddRow(tt.recovery, true))
-				mock.ExpectQuery(regexp.QuoteMeta(lifecycleConsumerEvidenceQuery)).WithArgs(org, session, 513).WillReturnRows(pgxmock.NewRows([]string{"source", "id", "session", "thread", "parent", "job", "runtime", "state", "control", "whole", "physical", "owner", "found_job", "job_status"}))
+				mock.ExpectQuery(regexp.QuoteMeta(lifecycleConsumerLaneKeysQuery)).WithArgs(pgx.QueryExecModeExec, org, session, 4097).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(lane))
+				mock.ExpectQuery(regexp.QuoteMeta(lifecycleConsumerGenerationKeysQuery)).WithArgs(pgx.QueryExecModeExec, org, session, 33).WillReturnRows(pgxmock.NewRows([]string{"target_id", "generation"}))
+				mock.ExpectQuery(regexp.QuoteMeta(lifecycleConsumerRuntimeKeysQuery)).WithArgs(pgx.QueryExecModeExec, org, session, "{"+lane.String()+"}", 513).WillReturnRows(pgxmock.NewRows([]string{"id"}))
+				mock.ExpectQuery(regexp.QuoteMeta(lifecycleConsumerEvidenceQuery)).WithArgs(pgx.QueryExecModeExec, org, session, 513, "{"+lane.String()+"}", "{}").WillReturnRows(pgxmock.NewRows([]string{"source", "id", "session", "thread", "parent", "job", "runtime", "state", "control", "whole", "physical", "owner", "found_job", "job_status"}))
 				mock.ExpectQuery(regexp.QuoteMeta(lifecycleConsumerLegacyJobsQuery)).WithArgs(org, 513, legacyJobRouteMaxBytes).WillReturnRows(pgxmock.NewRows([]string{"id", "size", "payload"}))
 			}
 			blocked, err := HasCompetingInputConsumerInTx(ctx, mock, org, AdmissionFence{sessionID: session, threadID: lane, threaded: true}, nil)
@@ -198,6 +203,111 @@ func TestLifecycleConsumerSuppliedTransactionBoundary(t *testing.T) {
 				require.Equal(t, tt.expected, lifecycleConsumerResult(blocked, err), "the reader must compose read-only probes without beginning, locking discovered jobs or settling the owner transaction")
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "only the supplied transaction's bounded reads may execute")
+		})
+	}
+}
+
+func TestLifecycleConsumerUUIDArray(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		ids      []uuid.UUID
+		expected string
+	}{
+		{name: "nil is empty", expected: "{}"},
+		{name: "empty is empty", ids: []uuid.UUID{}, expected: "{}"},
+		{name: "canonical zero", ids: []uuid.UUID{uuid.Nil}, expected: "{00000000-0000-0000-0000-000000000000}"},
+		{name: "preserve exact ordered values", ids: []uuid.UUID{{15: 2}, {15: 1}}, expected: "{00000000-0000-0000-0000-000000000002,00000000-0000-0000-0000-000000000001}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, lifecycleConsumerUUIDArray(tt.ids), "custom-plan UUID-array parameters must be exact canonical bound text without connection-wide codec changes")
+		})
+	}
+}
+
+func TestLifecycleConsumerScopeKeyBudgets(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, failure string }{
+		{name: "complete exact keys"},
+		{name: "lane overflow", failure: "lanes"},
+		{name: "33 historical generations exceed scalar probe budget", failure: "generations"},
+		{name: "runtime overflow", failure: "runtimes"},
+		{name: "lane read error", failure: "lane error"},
+		{name: "generation read error", failure: "generation error"},
+		{name: "runtime read error", failure: "runtime error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create the isolated supplied scope-observation transaction")
+			t.Cleanup(mock.Close)
+			org, session, lane := legacyJobRouteTestIDs()
+			runtime, target := uuid.New(), uuid.New()
+			limits := defaultLifecycleConsumerLimits()
+			if tt.failure == "lanes" {
+				limits.laneAnchors = 1
+			}
+			if tt.failure == "runtimes" {
+				limits.structuredRows = 1
+			}
+			failure := errors.New("synthetic scope-key read failure")
+			// Independent SQL expectations pin unfiltered actual lane/history
+			// membership, not archived/hidden/active-only approximations.
+			laneRead := mock.ExpectQuery(regexp.QuoteMeta("SELECT id FROM session_threads WHERE org_id=$1 AND session_id=$2 ORDER BY id LIMIT $3")).WithArgs(pgx.QueryExecModeExec, org, session, limits.laneAnchors+1)
+			if tt.failure == "lane error" {
+				laneRead.WillReturnError(failure)
+			} else {
+				rows := pgxmock.NewRows([]string{"id"}).AddRow(lane)
+				if tt.failure == "lanes" {
+					rows.AddRow(uuid.New())
+				}
+				laneRead.WillReturnRows(rows)
+			}
+			if tt.failure != "lane error" && tt.failure != "lanes" {
+				generationRead := mock.ExpectQuery(regexp.QuoteMeta("SELECT target_id,generation FROM automation_target_sessions WHERE org_id=$1 AND session_id=$2 ORDER BY target_id,generation LIMIT $3")).WithArgs(pgx.QueryExecModeExec, org, session, min(limits.laneAnchors, 32)+1)
+				if tt.failure == "generation error" {
+					generationRead.WillReturnError(failure)
+				} else {
+					rows := pgxmock.NewRows([]string{"target_id", "generation"})
+					count := 1
+					if tt.failure == "generations" {
+						count = 33
+					}
+					for generation := 1; generation <= count; generation++ {
+						rows.AddRow(target, generation)
+					}
+					generationRead.WillReturnRows(rows)
+				}
+				if tt.failure != "generation error" && tt.failure != "generations" {
+					runtimeRead := mock.ExpectQuery(regexp.QuoteMeta(`( SELECT id FROM thread_runtimes WHERE org_id=$1 AND session_id=$2 ORDER BY id LIMIT $4)
+					 UNION ALL ( SELECT id FROM thread_runtimes WHERE org_id=$1 AND thread_id=ANY($3::uuid[]) AND session_id IS DISTINCT FROM $2 ORDER BY id LIMIT $4) LIMIT $4`)).WithArgs(pgx.QueryExecModeExec, org, session, "{"+lane.String()+"}", limits.structuredRows+1)
+					if tt.failure == "runtime error" {
+						runtimeRead.WillReturnError(failure)
+					} else {
+						rows := pgxmock.NewRows([]string{"id"}).AddRow(runtime)
+						if tt.failure == "runtimes" {
+							rows.AddRow(uuid.New())
+						}
+						runtimeRead.WillReturnRows(rows)
+					}
+				}
+			}
+			keys, err := readLifecycleConsumerScopeKeysInTx(context.Background(), mock, org, AdmissionFence{sessionID: session}, limits)
+			if tt.failure == "" {
+				require.NoError(t, err, "complete target scope observation must preserve all exact actual keys")
+				require.Equal(t, lifecycleConsumerScopeKeys{lanes: []uuid.UUID{lane}, runtimes: []uuid.UUID{runtime}, generations: []lifecycleConsumerGenerationKey{{targetID: target, generation: 1}}}, keys, "scope keys must retain exact generation pairs and actual UUID membership without manufacturing authority")
+			} else {
+				require.Equal(t, lifecycleConsumerScopeKeys{}, keys, "overflow or SQL failure must return no partial key set that a caller could mistake for a complete negative")
+				if strings.Contains(tt.failure, "error") {
+					require.ErrorIs(t, err, failure, "the original scope observation failure must remain available to the owner")
+				} else {
+					require.ErrorIs(t, err, ErrLifecycleConsumerDiscoveryIncomplete, "a bounded array or generation-query budget overflow must never become clear or partial success")
+				}
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "overflow must stop before later probes and every skew-sensitive read must request custom planning rather than a cached generic plan")
 		})
 	}
 }

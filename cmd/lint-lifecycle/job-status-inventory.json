@@ -24,11 +24,11 @@
     },
     {
       "id": "internal/db/session_lifecycle_consumers.go:hasCompetingInputConsumerInTx:sql:1",
-      "source_sha256": "886f83d63b3fcdadea2ea53b14f6a97f1ffcb38c8be2d8644af6e3fafa17200d",
+      "source_sha256": "58ee2a499e3a86f739d21870e71852cdeae36884c9eca52bfcaf8cb129921519",
       "classification": "nonterminal-consumer",
-      "action_0a": "Discover scoped reverse references independently of payload routing, retaining pending/running/parked jobs and uncertain physical evidence. A LEFT JOIN must not turn an absent or foreign job into a clear result.",
+      "action_0a": "Discover scoped reverse references through disjoint stored-session and exact observed lane/runtime arms independently of payload routing, retaining pending/running/parked jobs and uncertain physical evidence. Keep local automation links when their same-tenant run is absent or contradicts the route, without reading foreign data. Concrete custom planning must not scan unrelated tenant history, and a LEFT JOIN must not turn an absent or foreign job into a clear result.",
       "reason": "Canonical cross-key ownership discovery observes jobs but does not claim or execute them.",
-      "evidence": ["j . status", "j . status in ( 'pending' , 'running' , 'awaiting_start_control' )", "internal/db/session_lifecycle_consumers_postgres_test.go"],
+      "evidence": ["j . status", "j . status in ( 'pending' , 'running' , 'awaiting_start_control' )", "internal/db/session_lifecycle_consumers_postgres_test.go", "internal/db/session_lifecycle_consumer_query_postgres_test.go"],
       "predicate_policies": [
         {
           "fact": "j . status",
@@ -39,6 +39,26 @@
           "fact": "j . status in ( 'pending' , 'running' , 'awaiting_start_control' )",
           "classification": "nonterminal-consumer",
           "action_0a": "Preserve all three nonterminal input states across dispatch/preparation/domain associations without widening any runnable or lease-owned predicate."
+        }
+      ]
+    },
+    {
+      "id": "internal/db/session_lifecycle_consumers.go:hasCompetingInputConsumerInTx:sql:2",
+      "source_sha256": "4b5b4db3324b0f45f898ff1c300c6cc5401d5b845e1e321257e8433431bb5179",
+      "classification": "nonterminal-consumer",
+      "action_0a": "Probe each exact retained target/generation pair for reverse automation ownership, excluding source IDs already covered by stored-session and actual-lane arms. Preserve pending/running/parked job evidence; generation or result-budget overflow is discovery-incomplete, never a clear result.",
+      "reason": "Finite exact scalar pairs keep indexed scope planning without inventing ownership from a Cartesian target/generation combination or silently dropping malformed reverse references.",
+      "evidence": ["j . status", "j . status in ( 'pending' , 'running' , 'awaiting_start_control' )", "internal/db/session_lifecycle_consumer_query_postgres_test.go"],
+      "predicate_policies": [
+        {
+          "fact": "j . status",
+          "classification": "nonterminal-consumer",
+          "action_0a": "Validate the actual tenant-scoped joined job; absent or unsupported status must not establish that retained automation ownership is clear."
+        },
+        {
+          "fact": "j . status in ( 'pending' , 'running' , 'awaiting_start_control' )",
+          "classification": "nonterminal-consumer",
+          "action_0a": "All three logical input-consuming states retain generation-associated ownership independently of controller status, without widening execution claim or lease predicates."
         }
       ]
     },
@@ -2208,14 +2228,15 @@
     },
     {
       "id": "migrations/000352_jobs_start_control_status.down.sql:SQL",
-      "source_sha256": "a017bbea702762b8eba3cb628a9bd318291e18070b3f1f05f598b004f74dceb9",
+      "source_sha256": "8e61ad8a71b74e5553e9209b6f71919c4ecfac65bdf0cc49dadc553b474f3b15",
       "classification": "lifecycle-cleanup",
-      "action_0a": "Under exclusive schema/evidence locks, refuse rollback if any parked intent or active protocol remains; only an inactive empty-parked rollback restores the legacy six-status check.",
+      "action_0a": "Under exclusive schema/evidence locks, refuse rollback if any parked intent or active protocol remains; only an inactive empty-parked rollback restores the legacy six-status check as NOT VALID. Migration 351 down validates it in a separate weaker-lock transaction.",
       "reason": "Rollback cannot discard or reinterpret a durable parked consumer.",
       "evidence": [
         "migrations/000352_jobs_start_control_status.down.sql:1",
         "status = 'awaiting_start_control'",
         "status in ( 'pending' , 'running' , 'succeeded' , 'failed' , 'cancelled' , 'dead_letter' )",
+        "migrations/000351_jobs_start_control_checks_validate.down.sql:1",
         "internal/db/job_status_policy_postgres_test.go:TestJobStatusParkedRollbackRefusalPostgres"
       ],
       "predicate_policies": [
@@ -2227,7 +2248,7 @@
         {
           "fact": "status in ( 'pending' , 'running' , 'succeeded' , 'failed' , 'cancelled' , 'dead_letter' )",
           "classification": "lifecycle-cleanup",
-          "action_0a": "Restore the legacy validated set only after fresh absence and protocol rollback checks under retained locks."
+          "action_0a": "Install the legacy set only after fresh absence and protocol rollback checks under retained locks; validate separately in migration 351 down."
         }
       ]
     },
@@ -2277,6 +2298,26 @@
         "migrations/000363_start_preparation_job_reference.up.sql:1",
         "j . status in ( 'succeeded' , 'failed' )",
         "internal/db/session_lifecycle_preparation_postgres_test.go:TestLifecyclePreparationRetainedJobsDoNotStarveBatchPostgres"
+      ]
+    },
+    {
+      "id": "migrations/000379_lifecycle_consumer_index_rollback_floor.down.sql:SQL",
+      "source_sha256": "a5f57f4377287673f026598683d1afa30c41104972f70c339ba68ca919890a11",
+      "classification": "lifecycle-cleanup",
+      "action_0a": "Before any standalone consumer/recovery index down, take bounded schema/evidence locks and refuse positive protocol stamps or retained recovery, preparation, dispatch/runtime binding, parked or unresolved resource-job evidence. This preflight does not inhibit writers across later concurrent drops.",
+      "reason": "A refused rollback must leave the complete supporting index floor, including recovery identity uniqueness, installed rather than weaken it before a later column guard runs.",
+      "evidence": [
+        "migrations/000379_lifecycle_consumer_index_rollback_floor.down.sql:1",
+        "status = 'awaiting_start_control'",
+        "internal/db/session_lifecycle_index_rollback_postgres_test.go:TestLifecycleConsumerIndexRollbackFloorPostgres",
+        "docs/exec-plans/active/session-lifecycle-0a-contract-freeze.md"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "status = 'awaiting_start_control'",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "Any retained parked job prevents removal of consumer/recovery lookup indexes before its status and structural guards can be considered for inactive rollback."
+        }
       ]
     }
   ]

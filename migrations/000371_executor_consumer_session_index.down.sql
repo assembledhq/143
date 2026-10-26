@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_executor_consumer_session;

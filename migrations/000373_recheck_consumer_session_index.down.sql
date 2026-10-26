@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_recheck_consumer_session;

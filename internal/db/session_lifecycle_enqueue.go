@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 
@@ -45,6 +46,12 @@ func enqueueLifecycleJobInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, bi
 	}
 	if orgID == uuid.Nil || orgID != binding.orgID || opts.Queue != "agent" || (opts.JobType != "run_agent" && opts.JobType != "continue_session") {
 		return lifecycleEnqueueResult{}, errors.New("lifecycle enqueue requires its exact tenant and a recognized input-consuming agent job")
+	}
+	// Freeze concrete scheduling/retry options with the command. Database
+	// defaults are useful for legacy enqueue, but cannot be wildcards when
+	// proving replay of one exact immutable consumer.
+	if opts.RunAt == nil || opts.MaxAttempts <= 0 || opts.MaxAttempts > math.MaxInt32 {
+		return lifecycleEnqueueResult{}, errors.New("lifecycle enqueue requires explicit run time and positive integer max attempts")
 	}
 	if len(binding.dispatchIDs) > defaultLifecycleConsumerLimits().structuredRows {
 		return lifecycleEnqueueResult{}, ErrLifecycleConsumerDiscoveryIncomplete
@@ -101,8 +108,7 @@ func enqueueLifecycleJobInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, bi
 	 AND payload::text=($5::jsonb)::text AND priority=$6
 	 AND dedupe_key IS NOT DISTINCT FROM $7::text
 	 AND target_node_id IS NOT DISTINCT FROM $8::text
-	 AND ($9::timestamptz IS NULL OR run_at=$9)
-	 AND ($10::integer=0 OR max_attempts=$10)
+	 AND run_at=$9::timestamptz AND max_attempts=$10::integer
 	 FROM jobs WHERE org_id=$1 AND id=$2`, orgID, binding.jobID,
 		opts.Queue, opts.JobType, payload, opts.Priority, opts.DedupeKey,
 		opts.TargetNodeID, opts.RunAt, opts.MaxAttempts).Scan(&exact)

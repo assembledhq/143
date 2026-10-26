@@ -246,11 +246,23 @@ its durable parked control even without a lease, provider and uncertain
 predecessor, plus actual exclusive wholeworkspace holder/reservation. Real drain
 proof, not lease expiry or a different dedupe key, removes a predecessor blocker.
 Independently admitted sibling lanes retain the supported three-slot concurrency.
-Compatible sibling scope means a different lane, no exclusive wholeworkspace
-holder/recovery reservation, and positive current-generation workspace availability
-under the same-session trusted workspace/HOME model, not merely absence of a running job. Neither a
-pending nor unprovable request certificate creates an exclusive holder or vetoes
-another lane's authorized workspace mutation. Dedupe collisions cannot answer/grant.
+Compatible sibling admission scope means a different lane, no session-wide,
+threadless or legacy-unattributed nonterminal consumer, and no exclusive
+wholeworkspace holder or reservation. Any present workspace recovery slot or
+unresolved whole-session physical operation blocks it. This preserves the
+same-session trusted workspace/HOME model. A pending sibling job or an unprovable
+request certificate creates no exclusive holder or veto over another lane's
+authorized workspace mutation. Dedupe collisions cannot answer/grant.
+
+Ordinary non-answer admission binds input to its exact logical consumer, not to
+a physical workspace target. Positive current-generation availability is checked
+at runtime start: B.2 establishes reservation/quiescence and E.1's final
+authorization consumes the current C.1 descriptor and fresh exact-target receipt
+before every launch. Unknown availability can therefore leave an input bound to
+a job that must return `StartDeferred`, rather than an unbound waiting input.
+No admission result permits provider work or bypasses this start gate. Answer
+admission still requires its own request's Ready disposition under C.2; a
+compatible sibling never supplies another request's availability or native state.
 `JobStore.RetryWithoutConsumingAttempt*` can reset attempts and clear ownership
 after actual execution, so attempts=0 is not “never claimed”. Monotonic claim
 marker/payload rebinding is a separate future reviewed optimization, not this
@@ -886,8 +898,13 @@ finalization and actual drain anchor. Current B checkpoint producer/revision
 cannot replace A's identity. Parent running/idle from B is not A's readiness
 test; answer admission checks A plus current compatible capacity/holders, not
 fabricated parent awaiting_input. Compatible sibling scope is a different lane,
-no exclusive wholeworkspace holder/recovery reservation, and positive usable
-current-generation workspace evidence. It preserves the supported three lanes.
+no session-wide/threadless/legacy-unattributed nonterminal consumer, and no
+exclusive wholeworkspace holder or reservation, including any present workspace
+recovery slot or unresolved whole-session physical operation. It preserves the
+supported three lanes. This scope test supplies no answer readiness: A's own
+Ready disposition still requires positive usable target evidence under C.2, and
+E.1 verifies the selected target again before launch. Ordinary non-answer input
+does not need that availability proof at admission.
 Request identity has explicit ProviderRequest(exact native provider_request_id)
 and CapabilityRequest(internal request UUID, capability item and exact producing
 phase/runtime) variants. The latter has no fabricated provider request ID;
@@ -938,7 +955,7 @@ compatible flag or numeric >= test substitutes for real receipt joins.
 | Sibling checkpoint/diff, metadata revision/key update, ordinary publication promotion, preview metadata | Preserve exact-base A certification by default in this trusted same-session model; advance every watermark. Keep A native conversation/workdir/phase. Prior pending remains pending through both B checkpoint AND diff. No per-B filesystem hash/export fanout. |
 | Final pause metadata seal | Raw snapshot capture can precede final diff metadata; typed pause_metadata_seal binds final revision/time and unchanged selected image. Final proof follows finalization, without unnecessary image retake for metadata alone. This is identity/order evidence, not immutable HOME evidence. |
 | AcceptSplit / primary pointer update | Preserve by default only when A retains its recorded workdir/native scope. A scope-retarget operation marks A pending for exact selected verification; do not silently retarget its provider conversation or block B's authorized split. |
-| Physical snapshot restore/context-replacing installation or generation change | Unlike ordinary B checkpoint publication, this changes the target native scope: mark affected A pending, verify actual target/native identity; absence is unavailable. Raw unreceipted generation drift is unprovable. An accepted answer stays bound to its recorded generation, not implicitly rebound. End/reset/recovery epoch changes still supersede/fence old A. |
+| Physical snapshot restore/context-replacing installation or physical-target generation change | Unlike ordinary B checkpoint publication, this changes the target native scope: mark affected A pending, verify actual target/native identity; absence is unavailable. Raw unreceipted physical-generation drift is unprovable. C.1 must distinguish physical-target identity from the legacy per-turn counter, as specified in the 0a delivery plan. An accepted answer stays bound to its recorded generation, not implicitly rebound. End/reset/recovery epoch changes still supersede/fence old A. |
 | Expiry/delete / destroyed workspace | Tombstone exact key/availability before physical deletion. Mark affected restore-dependent requests unavailable; a positively usable live target may be selected explicitly, never inferred from missing key. Shared snapshot loss is not automatically native context loss on an independently verified live target. |
 | Same-lane successor/end or unauthorized mutation | Old request/answer cannot authorize successor work. Unauthorized workspace write rejects; unknown A evidence is unprovable and visible, not reset permission. |
 

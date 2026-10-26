@@ -124,7 +124,9 @@ workspace execution until its owner releases it; deadlines and revoked execution
 do not release physical exclusion. The passive retention guard has no clear or
 replacement path. F must install the exact immutable accepted/outcome/isolation
 receipt check before adding conditional release. This current slot does not
-replace F's durable recovery history.
+replace F's durable recovery history. Its identity and due indexes are built by
+separate concurrent migrations, not while the column installer holds the parent
+lock. F must verify both indexes are valid before installing its first writer.
 
 These SQL checks establish shape and retention. B/E/F must decode full typed
 targets and observations and verify authoritative settlement at their locked
@@ -208,26 +210,42 @@ and a shape-valid replacement still proves no provider conformance or target aut
 Bulk maintenance also retains provenance. TRUNCATE takes nonwaiting SHARE locks
 on both evidence tables before its fresh READ COMMITTED assertion, including the
 table other than its target. A relation-lock conflict remains a real PostgreSQL
-lock error, without the advisory-busy label. Each down migration locks both
-evidence tables with a bounded acquisition before checking for positive/active
-evidence and removing guards in that same transaction. REPEATABLE READ and
+lock error, without the advisory-busy label. Guarded column/table removals and
+the preflight before concurrent index removal lock both evidence tables with a
+bounded acquisition before checking for positive/active evidence. The
+column/table guards remove their schema in that same transaction; standalone
+concurrent index steps cannot retain those locks. REPEATABLE READ and
 SERIALIZABLE are rejected because an old transaction snapshot cannot establish
 that activation evidence is absent.
 
 An inactive rollback still requires withdrawing readers and inhibiting activation.
+It must also inhibit and naturally drain lifecycle, recovery and relevant
+operator writers before preflight, and keep them inhibited throughout the
+separate concurrent index-removal phase, including any failure, interruption or
+partial rollback until forward repair. Re-enable them only after verifying the
+restored supported floor. H owns and must test this durable maintenance
+inhibition; preflight success alone does not establish it. Before the first
+such down migration, a fresh bounded-lock
+preflight refuses positive protocol stamps, retained recovery/preparation,
+dispatch/runtime bindings and parked or unresolved resource jobs. Its locks end
+with the preflight transaction; it is not a cross-migration inhibition mechanism.
 The future H controller must acquire schema-protecting relation locks and then
-freshly validate its required installed schema/guard floor before normalization
-or stamping. An activator waiting behind a successful down migration must fail
-that post-lock validation. The retention core supplies no activation controller
+freshly validate its required installed schema/guard/index floor before
+normalization or stamping. An activator waiting behind a successful down
+migration must fail that post-lock validation. The retention core supplies no
+activation controller
 and does not prove this later H integration gate. Once positive/active evidence
 exists, these down migrations refuse removal rather than reopening legacy mode.
 
 H must bound the distinct scope locks held by each bulk statement and measure
 shared lock-table pressure and forward progress. Row-level advisory acquisition
 does not provide an unbounded bulk-operation guarantee. H must also measure the
-rollback availability window: the retained-evidence check can scan the session
-table while the rollback holds exclusive relation locks. Neither capacity nor a
-table-size-independent rollback duration is established by this component.
+rollback availability window: retained-evidence checks can scan sessions, and
+migration 356's resource-job-kind absence check can scan retained jobs, while
+rollback holds exclusive relation locks. Migration 352 restores the legacy
+status check without validation; 351 down validates it in a separate weaker-lock
+transaction. Neither capacity nor a table-size-independent rollback duration is
+established by this component.
 
 The decision matrix also fixes these error boundaries: missing exact parent is
 not-found, while a soft-deleted parent still retains provenance and is not hidden
@@ -269,9 +287,39 @@ invariants after validating durable release/normalization/provider evidence.
 - A.1: prove the actual ordinary non-answer `SendMessage` call-through for both
   versions, compatible legacy ordering/boundaries, atomic new admission,
   replay/conflict/rollback, sibling independence and capacity/wait outcomes.
+  Sibling admission checks lane scope, nonterminal session-wide/legacy consumers
+  and exclusive reservations; any recovery slot or unresolved whole-session
+  physical operation blocks it. A sibling's pending job or request certificate
+  cannot veto another lane. Ordinary input binds no workspace target and reads
+  no availability, generation, snapshot or holder-liveness fact as permission.
+  Physical availability is mandatory at B.2/E.1 runtime start, so a bound job may
+  defer before launch. Answer admission separately retains C.2's own-request
+  Ready requirement. The supported three-slot concurrency is unchanged.
 
 Whole-root conversion, answer admission, provider starts, full status-site joins,
 activation and production acceptance are not established by these component exits.
+
+G's remaining child-table guard exit must also cover bulk `TRUNCATE ... CASCADE`
+of jobs, dispatches and runtimes. The provenance and preparation/recovery guards
+installed so far are not complete child-evidence protection: without that later
+guard, a cascade can erase parked jobs, bound controls and allocation rows. The
+legacy inactive-fixture reset test proves only the preparation/recovery retention
+boundary. It is not evidence that maintenance of an active scope is safe. H must
+require this child-table guard coverage before any activation.
+
+The private lifecycle enqueue path requires concrete `run_at` and `max_attempts`
+options frozen with its command. Exact replay compares both values; omitted
+options cannot act as wildcards. Legacy enqueue retains its database defaults.
+
+Consumer discovery also bounds scope-key reads and exact generation probes.
+It observes archived lanes and retained generations without treating those keys
+as ownership proof. At most 32 retained target/generation pairs are probed in
+one operation, within the existing transaction budget. More pairs return
+discovery-incomplete before a partial clear result is possible. This is a
+conservative availability limit, not a complete census above that size. Indexed
+scope probes avoid scanning unrelated tenant history; row limits do not promise
+table-size-independent work within a heavily populated target scope. H must
+measure that cost and the bounded tenant nonterminal-job scan before activation.
 
 Before their first consumers, C.1p owns certificate transition policy (fresh
 operation, no-op/idempotent handling and generation-change dispositions), E.1/C.2

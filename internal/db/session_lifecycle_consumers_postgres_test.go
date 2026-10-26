@@ -77,6 +77,16 @@ func TestLifecycleConsumerPredicatePostgres(t *testing.T) {
 			other := seedLifecycleConsumerSession(t, p, f.org)
 			createSeedRuntime(t, p, f.org, other.ID, f.lane)
 		}, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerReconciliation}},
+		{name: "archived actual lane retains contradictory runtime", setup: func(t *testing.T, p *pgxpool.Pool, f *lifecyclePredicateFixture) {
+			other := seedLifecycleConsumerSession(t, p, f.org)
+			createSeedRuntime(t, p, f.org, other.ID, f.lane)
+			predicateExec(t, p, "UPDATE session_threads SET archived_at=now() WHERE org_id=$1 AND id=$2", f.org, f.lane)
+		}, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerReconciliation}},
+		{name: "hidden actual parent retains contradictory runtime", setup: func(t *testing.T, p *pgxpool.Pool, f *lifecyclePredicateFixture) {
+			other := seedLifecycleConsumerSession(t, p, f.org)
+			createSeedRuntime(t, p, f.org, other.ID, f.lane)
+			predicateExec(t, p, "UPDATE sessions SET archived_at=now(),deleted_at=now() WHERE org_id=$1 AND id=$2", f.org, f.session)
+		}, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerReconciliation}},
 		{name: "live runtime lease expired", setup: func(t *testing.T, p *pgxpool.Pool, f *lifecyclePredicateFixture) {
 			r := createSeedRuntime(t, p, f.org, f.session, f.lane)
 			predicateExec(t, p, `UPDATE thread_runtimes SET lease_expires_at=now()-interval '1 day' WHERE org_id=$1 AND id=$2`, f.org, r.ID)
@@ -102,6 +112,20 @@ func TestLifecycleConsumerPredicatePostgres(t *testing.T) {
 		}, expected: lifecycleConsumerTestResult{cause: ErrLifecycleConsumerReconciliation}},
 		{name: "pending inbox is waiting input", setup: func(t *testing.T, p *pgxpool.Pool, f *lifecyclePredicateFixture) {
 			seedRuntimeInbox(t, p, f.org, f.session, f.lane, 1, "pending", nil)
+		}},
+		{name: "pending inbox retains prior delivery uncertainty", setup: func(t *testing.T, p *pgxpool.Pool, f *lifecyclePredicateFixture) {
+			seedPredicatePreviouslyDeliveredInbox(t, p, *f, models.ThreadInboxDeliveryStatePending)
+		}, expected: lifecycleConsumerTestResult{blocked: true}},
+		{name: "dead letter retains prior delivery uncertainty", setup: func(t *testing.T, p *pgxpool.Pool, f *lifecyclePredicateFixture) {
+			seedPredicatePreviouslyDeliveredInbox(t, p, *f, models.ThreadInboxDeliveryStateDeadLetter)
+		}, expected: lifecycleConsumerTestResult{blocked: true}},
+		{name: "applied pending delivery is no longer uncertain", setup: func(t *testing.T, p *pgxpool.Pool, f *lifecyclePredicateFixture) {
+			seedPredicatePreviouslyDeliveredInbox(t, p, *f, models.ThreadInboxDeliveryStatePending)
+			predicateExec(t, p, `UPDATE thread_inbox_entries SET applied_at=now() WHERE org_id=$1 AND thread_id=$2`, f.org, f.lane)
+		}},
+		{name: "applied dead letter delivery is no longer uncertain", setup: func(t *testing.T, p *pgxpool.Pool, f *lifecyclePredicateFixture) {
+			seedPredicatePreviouslyDeliveredInbox(t, p, *f, models.ThreadInboxDeliveryStateDeadLetter)
+			predicateExec(t, p, `UPDATE thread_inbox_entries SET applied_at=now() WHERE org_id=$1 AND thread_id=$2`, f.org, f.lane)
 		}},
 		{name: "unknown inbox survives absent runtime", setup: func(t *testing.T, p *pgxpool.Pool, f *lifecyclePredicateFixture) {
 			seedRuntimeInbox(t, p, f.org, f.session, f.lane, 1, "unknown_delivery", nil)
@@ -513,4 +537,22 @@ func predicateExec(t *testing.T, pool *pgxpool.Pool, query string, args ...any) 
 	t.Helper()
 	_, err := pool.Exec(context.Background(), query, args...)
 	require.NoError(t, err, "prepare synthetic full-schema consumer evidence")
+}
+
+func seedPredicatePreviouslyDeliveredInbox(t *testing.T, pool *pgxpool.Pool, f lifecyclePredicateFixture, state models.ThreadInboxDeliveryState) {
+	t.Helper()
+	seedRuntimeInbox(t, pool, f.org, f.session, f.lane, 1, "unknown_delivery", nil)
+	predicateExec(t, pool, `UPDATE thread_inbox_entries SET delivered_at=now() WHERE org_id=$1 AND thread_id=$2`, f.org, f.lane)
+	var id uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(), "SELECT id FROM thread_inbox_entries WHERE org_id=$1 AND thread_id=$2", f.org, f.lane).Scan(&id), "read the exact synthetic uncertain-delivery entry")
+	var entry models.ThreadInboxEntry
+	var err error
+	if state == models.ThreadInboxDeliveryStatePending {
+		entry, err = NewThreadInboxStore(pool).RetryRecoverable(context.Background(), f.org, f.lane, id, true)
+	} else {
+		entry, err = NewThreadInboxStore(pool).MarkDeadLetter(context.Background(), f.org, f.lane, id, "synthetic retained delivery")
+	}
+	require.NoError(t, err, "exercise the actual legacy transition that preserves a previous unknown delivery timestamp")
+	require.Equal(t, state, entry.DeliveryState, "the legacy transition must genuinely reach the pending or dead-letter state the predicate observes")
+	require.NotNil(t, entry.DeliveredAt, "the actual legacy transition must retain earlier delivery uncertainty independently of the new state label")
 }
