@@ -762,6 +762,39 @@ func claimModeSetClause(mode claimMode) string {
 // correct, because resuming such a target does not increase the session's
 // total active occupancy. The cap is enforced strictly against siblings.
 func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForSessionArgs) (models.SessionThread, error) {
+	thread, err := s.claimForSessionRow(ctx, s.db, args)
+	if err != nil {
+		return models.SessionThread{}, err
+	}
+	s.publishThreadRuntime(ctx, thread)
+	return thread, nil
+}
+
+// claimForSessionRow preserves the legacy implicit-statement adapter. Its
+// mutation statement releases row locks before the best-effort diagnostic when
+// conn is the store's standalone pool, just as before the persistence split.
+func (s *SessionThreadStore) claimForSessionRow(ctx context.Context, conn DBTX, args claimForSessionArgs) (models.SessionThread, error) {
+	thread, collectionMiss, err := s.claimForSessionMutationRow(ctx, conn, args)
+	if err != nil {
+		// Preserve the original collection-stage errors.Is match without
+		// mistaking a wrapped query-stage error for a mutation miss.
+		if collectionMiss {
+			limited, lookupErr := s.isAtRunningLimit(ctx, conn, args.orgID, args.sessionID, args.threadID, args.maxRunning, args.claimableStatuses)
+			if lookupErr == nil && limited {
+				return models.SessionThread{}, ErrThreadRunningLimitReached
+			}
+		}
+		return models.SessionThread{}, err
+	}
+	return thread, nil
+}
+
+// claimForSessionMutationRow executes only the original CTE/UPDATE and scans
+// its returned row. The private flag preserves collection-stage no-row origin
+// for the legacy adapter, including wrapped rows.Err errors; query-stage errors
+// never set it. Diagnosing a supplied unit's miss belongs after its owner's
+// confirmed commit, never while retaining row locks or after uncertain commit.
+func (s *SessionThreadStore) claimForSessionMutationRow(ctx context.Context, conn DBTX, args claimForSessionArgs) (models.SessionThread, bool, error) {
 	maxRunning := args.maxRunning
 	if maxRunning <= 0 {
 		maxRunning = models.MaxRunningThreadsPerSession
@@ -800,7 +833,7 @@ func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForS
 		  AND EXISTS (SELECT 1 FROM eligible)
 		RETURNING ` + sessionThreadSelectColumns
 
-	rows, err := s.db.Query(ctx, query, pgx.NamedArgs{
+	rows, err := conn.Query(ctx, query, pgx.NamedArgs{
 		"id":                 args.threadID,
 		"org_id":             args.orgID,
 		"session_id":         args.sessionID,
@@ -808,44 +841,47 @@ func (s *SessionThreadStore) claimForSession(ctx context.Context, args claimForS
 		"claimable_statuses": args.claimableStatuses,
 	})
 	if err != nil {
-		return models.SessionThread{}, fmt.Errorf("claim session thread: %w", err)
+		return models.SessionThread{}, false, fmt.Errorf("claim session thread: %w", err)
 	}
 	thread, err := pgx.CollectOneRow(rows, pgx.RowToStructByNameLax[models.SessionThread])
 	if err != nil {
-		// pgx.ErrNoRows means the WHERE-with-EXISTS predicate did not match.
-		// Best-effort distinguish "limit reached" from "status not claimable"
-		// by re-inspecting state without holding the FOR UPDATE lock. A
-		// sibling can transition between the failed claim and this lookup; on
-		// that race we surface the original ErrNoRows and the caller maps it
-		// to "thread not claimable in this status". Acceptable trade-off: the
-		// worst case is the user sees the busy-tab affordance instead of the
-		// queued-message one for one cycle, then retries.
-		if errors.Is(err, pgx.ErrNoRows) {
-			limited, lookupErr := s.isAtRunningLimit(ctx, args.orgID, args.sessionID, args.threadID, maxRunning, args.claimableStatuses)
-			if lookupErr == nil && limited {
-				return models.SessionThread{}, ErrThreadRunningLimitReached
-			}
-		}
-		return models.SessionThread{}, err
+		return models.SessionThread{}, errors.Is(err, pgx.ErrNoRows), err
 	}
-	s.publishThreadRuntime(ctx, thread)
-	return thread, nil
+	return thread, false, nil
+}
+
+// IsAtRunningLimitForIdleClaim is the legacy read-only idle-claim diagnostic.
+// It is best-effort current state, not a fence or admission decision. A caller
+// classifying an InTx miss must first confirm the entire owner's commit; false
+// or error retains that original pgx.ErrNoRows. Never use it after unknown commit.
+func (s *SessionThreadStore) IsAtRunningLimitForIdleClaim(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error) {
+	return s.isAtRunningLimit(ctx, s.db, orgID, sessionID, threadID, maxRunning, []string{string(models.ThreadStatusIdle)})
+}
+
+// IsAtRunningLimitForResumeClaim is the same read-only diagnostic with the
+// fixed legacy resumable statuses. It owns no transaction, acquires no row lock
+// and publishes nothing; it is not execution or lifecycle authority.
+func (s *SessionThreadStore) IsAtRunningLimitForResumeClaim(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error) {
+	return s.isAtRunningLimit(ctx, s.db, orgID, sessionID, threadID, maxRunning, threadStatusStrings(models.ResumableThreadStatuses))
 }
 
 // isAtRunningLimit returns true when the target thread is in a claimable
 // status (so otherwise eligible) but the session already has maxRunning
 // sibling threads active. Used by claimForSession to differentiate
-// "limit reached" from "status changed under us" without holding the
-// FOR UPDATE lock.
+// "limit reached" from "status changed under us" without adding a new
+// FOR UPDATE query. This read never acquires the mutation's row locks.
 //
 // Uses COALESCE on the target subquery so a deleted-out-from-under-us row
 // scans as the empty string instead of erroring on NULL → string. In that
 // case we report "not limited" — the caller will fall through to its
 // generic ErrNoRows path which the service maps to ErrThreadNotFound.
-func (s *SessionThreadStore) isAtRunningLimit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int, claimableStatuses []string) (bool, error) {
+func (s *SessionThreadStore) isAtRunningLimit(ctx context.Context, conn DBTX, orgID, sessionID, threadID uuid.UUID, maxRunning int, claimableStatuses []string) (bool, error) {
+	if maxRunning <= 0 {
+		maxRunning = models.MaxRunningThreadsPerSession
+	}
 	var targetStatus string
 	var siblingActive int
-	err := s.db.QueryRow(ctx, `
+	err := conn.QueryRow(ctx, `
 		SELECT
 		    COALESCE((SELECT status FROM session_threads WHERE id = @id AND org_id = @org_id AND archived_at IS NULL), '') AS target_status,
 		    (SELECT count(*) FROM session_threads
@@ -918,7 +954,15 @@ func (s *SessionThreadStore) AddCost(ctx context.Context, orgID, threadID uuid.U
 // that is currently busy with another turn. The composer reads this counter
 // to render a "queued (N)" affordance.
 func (s *SessionThreadStore) IncrementPendingMessages(ctx context.Context, orgID, threadID uuid.UUID) error {
-	tag, err := s.db.Exec(ctx,
+	if err := s.incrementPendingMessagesRow(ctx, s.db, orgID, threadID); err != nil {
+		return err
+	}
+	s.publishThreadInboxByID(ctx, orgID, threadID, models.SessionStreamEventThreadInboxQueued)
+	return nil
+}
+
+func (s *SessionThreadStore) incrementPendingMessagesRow(ctx context.Context, conn DBTX, orgID, threadID uuid.UUID) error {
+	tag, err := conn.Exec(ctx,
 		`UPDATE session_threads
 		 SET pending_message_count = pending_message_count + 1
 		 WHERE id = @id AND org_id = @org_id AND archived_at IS NULL`,
@@ -930,7 +974,6 @@ func (s *SessionThreadStore) IncrementPendingMessages(ctx context.Context, orgID
 	if tag.RowsAffected() == 0 {
 		return pgx.ErrNoRows
 	}
-	s.publishThreadInboxByID(ctx, orgID, threadID, models.SessionStreamEventThreadInboxQueued)
 	return nil
 }
 
