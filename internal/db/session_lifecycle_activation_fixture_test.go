@@ -96,7 +96,7 @@ func seedActivatedLifecycleFixtureInTx(t *testing.T, ctx context.Context, tx pgx
 			},
 		},
 		normalization: activatedLifecycleNormalizationFixture{SchemaVersion: 1, ReceiptID: uuid.New(), FloorReceiptID: uuid.New(), CutoffID: 1, Complete: true},
-		capability:    activatedLifecycleCapabilityFixture{SchemaVersion: 1, ReleaseReceiptID: uuid.New(), Tuples: []activatedLifecycleCapabilityTupleFixture{{Provider: "synthetic", CLIBuild: "synthetic-cli-v1", ImageBuild: "synthetic-image-v1", ResumeIdentity: "native_conversation", VerificationProtocol: "synthetic-verify-v1", ConformanceReceiptID: uuid.New()}}},
+		capability:    activatedLifecycleCapabilityFixture{SchemaVersion: 1, ReleaseReceiptID: uuid.New(), Tuples: []activatedLifecycleCapabilityTupleFixture{{Provider: string(session.AgentType), CLIBuild: "synthetic-cli-v1", ImageBuild: "synthetic-image-v1", ResumeIdentity: "native_conversation", VerificationProtocol: "synthetic-verify-v1", ConformanceReceiptID: uuid.New()}}},
 	}
 	slices.SortFunc(fixture.want.threads, func(a, b lifecycleLockedThread) int { return bytes.Compare(a.id[:], b.id[:]) })
 	tag, err := tx.Exec(ctx, `UPDATE sessions SET admission_epoch=$3,end_epoch=NULL,lifecycle_version=1 WHERE org_id=$1 AND id=$2`, orgID, session.ID, sessionEpoch)
@@ -110,7 +110,7 @@ func seedActivatedLifecycleFixtureInTx(t *testing.T, ctx context.Context, tx pgx
 	capability, err := json.Marshal(fixture.capability)
 	require.NoError(t, err, "encode the exact synthetic provider CLI image identity and verification tuple")
 	activatedAt, minimum := time.Date(2026, time.January, 2, 3, 4, 5, 123456000, time.UTC), 1
-	fixture.cutover = lifecycleCutoverObservation{orgID: orgID, sessionID: session.ID, version: 1, state: models.LifecycleCutoverStateActive, legacyInputCutoffID: requestLifecycleScopePointer(fixture.normalization.CutoffID), normalization: normalization, activatedAt: &activatedAt, minimumWriterVersion: &minimum, resumabilityCapability: capability}
+	fixture.cutover = lifecycleCutoverObservation{orgID: orgID, sessionID: session.ID, version: 3, state: models.LifecycleCutoverStateActive, legacyInputCutoffID: requestLifecycleScopePointer(fixture.normalization.CutoffID), normalization: normalization, activatedAt: &activatedAt, minimumWriterVersion: &minimum, resumabilityCapability: capability}
 	err = tx.QueryRow(ctx, `INSERT INTO session_lifecycle_cutovers(org_id,session_id,version,state,legacy_input_cutoff_id,normalization,activated_at,minimum_writer_version,resumability_capability) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING normalization,activated_at,resumability_capability`, orgID, session.ID, fixture.cutover.version, fixture.cutover.state, fixture.cutover.legacyInputCutoffID, normalization, activatedAt, minimum, capability).
 		Scan(&fixture.cutover.normalization, &fixture.cutover.activatedAt, &fixture.cutover.resumabilityCapability)
 	require.NoError(t, err, "install and retain the exact PostgreSQL cutover evidence in the same commit as parent and lane stamps")
@@ -142,13 +142,25 @@ func TestActivatedLifecycleFixtureInvariantsPostgres(t *testing.T) {
 	wantSessionFence, err := NewAdmissionFence(fixture.sessionID, nil, 3, nil)
 	require.NoError(t, err, "construct the independent expected session-wide fence")
 	require.Equal(t, wantSessionFence, fixture.sessionFence, "session-wide tests must receive no inferred lane or lane epoch")
-	require.Equal(t, int64(1), actualCutover.version, "the fixture must retain an active version-one cutover")
+	require.Equal(t, int64(3), actualCutover.version, "the fixture must retain cutover CAS revision three independently of the protocol stamp")
+	require.Equal(t, []int16{1, 1, 1}, []int16{actual.session.epochs.LifecycleVersion, actual.threads[0].epochs.LifecycleVersion, actual.threads[1].epochs.LifecycleVersion}, "the parent and both lanes must retain protocol stamp one independently of the cutover CAS revision")
+	require.NotEqual(t, actualCutover.version, int64(actual.session.epochs.LifecycleVersion), "a cutover CAS revision must never be interpreted as the lifecycle protocol stamp")
 	require.Equal(t, models.LifecycleCutoverStateActive, actualCutover.state, "the fixture's persisted state must be explicitly active")
 	require.Equal(t, requestLifecycleScopePointer(int64(1)), actualCutover.legacyInputCutoffID, "the positive synthetic watermark must satisfy the existing full-schema cutoff constraint")
 	require.Equal(t, requestLifecycleScopePointer(1), actualCutover.minimumWriterVersion, "the fixture must require positive writer version one")
-	require.Equal(t, []int64{1, 1, 2, 1, 0, 0, 0}, activatedLifecycleFixtureCounts(t, ctx, pool, fixture.orgID, fixture.sessionID), "activation setup must create only its tenant parent two lanes and cutover with no jobs dispatches or executors")
+	provider := models.AgentType(fixture.capability.Tuples[0].Provider)
+	require.NoError(t, provider.Validate(), "the tested capability tuple must name a supported provider rather than an invented agent type")
+	var sessionProvider, primaryProvider, threadProvider models.AgentType
+	err = tx.QueryRow(workCtx, `SELECT
+		(SELECT agent_type FROM sessions WHERE org_id=$1 AND id=$2),
+		(SELECT agent_type FROM session_threads WHERE org_id=$1 AND session_id=$2 AND id=$3),
+		(SELECT agent_type FROM session_threads WHERE org_id=$1 AND session_id=$2 AND id=$4)`, fixture.orgID, fixture.sessionID, fixture.primaryThreadID, fixture.threadID).
+		Scan(&sessionProvider, &primaryProvider, &threadProvider)
+	require.NoError(t, err, "read actual provider identities from the exact persisted parent primary lane and explicit lane")
+	require.Equal(t, []models.AgentType{provider, provider, provider}, []models.AgentType{sessionProvider, primaryProvider, threadProvider}, "the tested provider tuple must cover the actual parent and every runnable lane in the fixture")
+	require.Equal(t, []int64{1, 1, 2, 1, 0, 0, 0, 0, 0}, activatedLifecycleFixtureCounts(t, ctx, pool, fixture.orgID, fixture.sessionID), "activation setup must create only its tenant parent two lanes and cutover with no jobs dispatches executors runtimes or inbox entries")
 	require.JSONEq(t, fmt.Sprintf(`{"schema_version":1,"receipt_id":%q,"floor_receipt_id":%q,"cutoff_id":1,"complete":true}`, fixture.normalization.ReceiptID, fixture.normalization.FloorReceiptID), string(actualCutover.normalization), "normalization metadata must use exactly the frozen synthetic receipt envelope")
-	require.JSONEq(t, fmt.Sprintf(`{"schema_version":1,"release_receipt_id":%q,"tuples":[{"provider":"synthetic","cli_build":"synthetic-cli-v1","image_build":"synthetic-image-v1","resume_identity":"native_conversation","verification_protocol":"synthetic-verify-v1","conformance_receipt_id":%q}]}`, fixture.capability.ReleaseReceiptID, fixture.capability.Tuples[0].ConformanceReceiptID), string(actualCutover.resumabilityCapability), "capability metadata must retain the explicit synthetic tuple without implying real provider conformance")
+	require.JSONEq(t, fmt.Sprintf(`{"schema_version":1,"release_receipt_id":%q,"tuples":[{"provider":%q,"cli_build":"synthetic-cli-v1","image_build":"synthetic-image-v1","resume_identity":"native_conversation","verification_protocol":"synthetic-verify-v1","conformance_receipt_id":%q}]}`, fixture.capability.ReleaseReceiptID, models.DefaultDefaultAgentType, fixture.capability.Tuples[0].ConformanceReceiptID), string(actualCutover.resumabilityCapability), "capability metadata must retain the actual provider and synthetic build tuple without implying real provider conformance")
 }
 
 func TestActivatedLifecycleFixtureAtomicSettlementPostgres(t *testing.T) {
@@ -159,8 +171,8 @@ func TestActivatedLifecycleFixtureAtomicSettlementPostgres(t *testing.T) {
 		commit bool
 		want   []int64
 	}{
-		{name: "commit installs one complete fixture", commit: true, want: []int64{1, 1, 2, 1, 0, 0, 0}},
-		{name: "rollback installs no fixture rows", want: []int64{0, 0, 0, 0, 0, 0, 0}},
+		{name: "commit installs one complete fixture", commit: true, want: []int64{1, 1, 2, 1, 0, 0, 0, 0, 0}},
+		{name: "rollback installs no fixture rows", want: []int64{0, 0, 0, 0, 0, 0, 0, 0, 0}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -174,8 +186,8 @@ func TestActivatedLifecycleFixtureAtomicSettlementPostgres(t *testing.T) {
 			defer func() { _ = tx.Rollback(context.Background()) }()
 			require.NoError(t, ConfigureLifecycleTransactionInTx(workCtx, tx), "configure the supplied owner before fixture installation")
 			fixture := seedActivatedLifecycleFixtureInTx(t, workCtx, tx)
-			require.Equal(t, []int64{1, 1, 2, 1, 0, 0, 0}, activatedLifecycleFixtureCounts(t, workCtx, tx, fixture.orgID, fixture.sessionID), "the supplied owner must see its entire staged fixture before settlement")
-			require.Equal(t, []int64{0, 0, 0, 0, 0, 0, 0}, activatedLifecycleFixtureCounts(t, workCtx, pool, fixture.orgID, fixture.sessionID), "a separate connection must see no partial installation before the outer owner settles")
+			require.Equal(t, []int64{1, 1, 2, 1, 0, 0, 0, 0, 0}, activatedLifecycleFixtureCounts(t, workCtx, tx, fixture.orgID, fixture.sessionID), "the supplied owner must see its entire staged fixture before settlement")
+			require.Equal(t, []int64{0, 0, 0, 0, 0, 0, 0, 0, 0}, activatedLifecycleFixtureCounts(t, workCtx, pool, fixture.orgID, fixture.sessionID), "a separate connection must see no partial installation before the outer owner settles")
 			contender, err := pool.BeginTx(workCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 			require.NoError(t, err, "begin an independent contender for the exact staged cutover key")
 			defer func() { _ = contender.Rollback(context.Background()) }()
@@ -229,14 +241,14 @@ func TestActivatedLifecycleFixtureTenantIsolationPostgres(t *testing.T) {
 			cutover, err := observeLifecycleCutoverInTx(workCtx, tx, queryOrg, scope.sessionID)
 			require.ErrorIs(t, err, pgx.ErrNoRows, "cutover evidence must require the same exact tenant and session as its stamped rows")
 			require.Equal(t, lifecycleCutoverObservation{}, cutover, "foreign tenant observation must expose no active cutover evidence")
-			require.Equal(t, []int64{1, 0, 0, 0, 0, 0, 0}, activatedLifecycleFixtureCounts(t, ctx, pool, queryOrg, scope.sessionID), "tenant-scoped SQL must find only the query tenant and no foreign lifecycle rows")
+			require.Equal(t, []int64{1, 0, 0, 0, 0, 0, 0, 0, 0}, activatedLifecycleFixtureCounts(t, ctx, pool, queryOrg, scope.sessionID), "tenant-scoped SQL must find only the query tenant and no foreign lifecycle rows")
 		})
 	}
 }
 
 func activatedLifecycleFixtureCounts(t *testing.T, ctx context.Context, database DBTX, orgID, sessionID uuid.UUID) []int64 {
 	t.Helper()
-	counts := make([]int64, 7)
+	counts := make([]int64, 9)
 	err := database.QueryRow(ctx, `SELECT
 		(SELECT count(*) FROM organizations WHERE id=$1),
 		(SELECT count(*) FROM sessions WHERE org_id=$1 AND id=$2),
@@ -244,8 +256,10 @@ func activatedLifecycleFixtureCounts(t *testing.T, ctx context.Context, database
 		(SELECT count(*) FROM session_lifecycle_cutovers WHERE org_id=$1 AND session_id=$2),
 		(SELECT count(*) FROM jobs WHERE org_id=$1),
 		(SELECT count(*) FROM session_input_dispatches WHERE org_id=$1 AND session_id=$2),
-		(SELECT count(*) FROM session_executors WHERE org_id=$1 AND session_id=$2)`, orgID, sessionID).
-		Scan(&counts[0], &counts[1], &counts[2], &counts[3], &counts[4], &counts[5], &counts[6])
+		(SELECT count(*) FROM session_executors WHERE org_id=$1 AND session_id=$2),
+		(SELECT count(*) FROM thread_runtimes WHERE org_id=$1 AND session_id=$2),
+		(SELECT count(*) FROM thread_inbox_entries WHERE org_id=$1 AND session_id=$2)`, orgID, sessionID).
+		Scan(&counts[0], &counts[1], &counts[2], &counts[3], &counts[4], &counts[5], &counts[6], &counts[7], &counts[8])
 	require.NoError(t, err, "read exact tenant-scoped fixture components and prove setup creates no executable work")
 	return counts
 }
