@@ -65,7 +65,7 @@ func TestPreviewToolLifecycleRequests(t *testing.T) {
 						t.Error(err)
 					}
 				}))
-				defer server.Close()
+				defer closeCLIHTTPTestServer(t, server)
 				executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "user-token"})}
 				result := executor.call(context.Background(), tt.tool, json.RawMessage(tt.args))
 				require.Equal(t, fail, result.IsError, "backend failure must remain visible to the agent")
@@ -173,7 +173,7 @@ func TestRemoteToolSourceGatewayLifecycle(t *testing.T) {
 					t.Error(err)
 				}
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 			source, err := NewRemoteToolSource(context.Background(), Config{ServerURL: server.URL, Token: "public-token"})
 			if tt.listStatus != 0 {
 				require.ErrorContains(t, err, "401", "tool list failure must not grant an empty or unrestricted source")

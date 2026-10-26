@@ -102,7 +102,7 @@ func TestChangesetCommandLifecycle(t *testing.T) {
 					t.Error(err)
 				}
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 			if tt.name != "missing credentials" {
 				require.NoError(t, SaveConfig(Config{ServerURL: server.URL, Token: "public-token"}), "save isolated CLI config")
 			}

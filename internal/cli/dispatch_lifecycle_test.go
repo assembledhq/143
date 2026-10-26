@@ -75,7 +75,7 @@ func TestToolBackendCredentialPrecedence(t *testing.T) {
 					t.Error(err)
 				}
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 			cfg := Config{ServerURL: server.URL, Token: "saved-token"}
 			if !tt.noConfig {
 				require.NoError(t, SaveConfig(cfg), "seed isolated laptop credentials")
@@ -158,7 +158,7 @@ func TestLaptopPreviewCommandDispatch(t *testing.T) {
 					t.Error(err)
 				}
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 			if tt.name != "help bypasses credentials" {
 				require.NoError(t, SaveConfig(Config{ServerURL: server.URL, Token: "user-token"}), "seed isolated preview credentials")
 			}

@@ -1185,18 +1185,13 @@ func (e *AgentEnv) effectiveOpenCodeModel(ctx context.Context, orgID uuid.UUID, 
 	return openCodeCLIModelID(models.DefaultOpenCodePhysicalModelForBacking(backing), backing)
 }
 
-// resolveOpenCodeProviderConfig resolves an OpenCode model selection to a
+// resolveOpenCodeProviderConfigWithCredential resolves an OpenCode model selection to a
 // concrete provider config by walking the selection's routes in priority order
 // and returning the first one backed by a runnable credential. A logical
 // selection auto-routes (OpenRouter first, OpenCode-native gated by org
 // policy); a pinned "provider/model" id resolves a single explicit transport.
 // Returns nil and records a structured credential block when no route is
 // runnable.
-func (e *AgentEnv) resolveOpenCodeProviderConfig(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) models.ProviderConfig {
-	cfg, _, _, _ := e.resolveOpenCodeProviderConfigWithCredential(ctx, orgID, userID, modelOverride)
-	return cfg
-}
-
 func (e *AgentEnv) resolveOpenCodeProviderConfigWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, modelOverride string) (models.ProviderConfig, *models.DecryptedCodingCredential, bool, error) {
 	selection, routes, modelAware := e.openCodeRuntimeRoutes(ctx, orgID, modelOverride)
 	if !modelAware {
@@ -1289,15 +1284,10 @@ func (e *AgentEnv) openCodeAllowNativeFallback(ctx context.Context, orgID uuid.U
 	return !routing.RequireOpenRouter
 }
 
-// resolveAcrossOpenCodeRoutes walks routes in order and returns the first
+// resolveAcrossOpenCodeRoutesWithCredential walks routes in order and returns the first
 // OpenCode credential whose backing matches a route and is runnable, pinning
 // the config's Model to that route's physical id. Records a rate-limit or
 // no-runnable-route block when nothing matches.
-func (e *AgentEnv) resolveAcrossOpenCodeRoutes(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, selection string, routes []models.OpenCodeRoute) models.ProviderConfig {
-	cfg, _, _, _ := e.resolveAcrossOpenCodeRoutesWithCredential(ctx, orgID, userID, selection, routes)
-	return cfg
-}
-
 func (e *AgentEnv) resolveAcrossOpenCodeRoutesWithCredential(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, selection string, routes []models.OpenCodeRoute) (models.ProviderConfig, *models.DecryptedCodingCredential, bool, error) {
 	if e.codingCredentials == nil {
 		return nil, nil, false, nil
@@ -1914,11 +1904,6 @@ func agentLabelForProvider(provider models.ProviderName) string {
 	default:
 		return string(provider)
 	}
-}
-
-func (e *AgentEnv) listCodingProviderRows(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, bool, bool) {
-	rows, sawRows, err := e.listCodingProviderRowsWithError(ctx, orgID, userID, providers)
-	return rows, sawRows, err == nil
 }
 
 func (e *AgentEnv) listCodingProviderRowsWithError(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, providers []models.ProviderName) (map[models.ProviderName][]models.DecryptedCodingCredential, bool, error) {

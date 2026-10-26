@@ -49,7 +49,7 @@ func branchPreviewServer(t *testing.T, statusFor func(call int64) (int, string))
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	t.Cleanup(server.Close)
+	t.Cleanup(func() { closeCLIHTTPTestServer(t, server) })
 	return server
 }
 

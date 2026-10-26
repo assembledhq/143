@@ -42,7 +42,7 @@ func TestInternalToolSourceAllowlistFailsClosed(t *testing.T) {
 	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer failing.Close()
+	defer closeCLIHTTPTestServer(t, failing)
 	var stderr bytes.Buffer
 	source, _ := newInternalToolSource(context.Background(), base, "token", failing.URL, &stderr, models.PerTargetToolAllowlist)
 	names := toolNames(source)
@@ -61,7 +61,7 @@ func TestInternalToolSourceAllowlistFailsClosed(t *testing.T) {
 			},
 		}})
 	}))
-	defer granting.Close()
+	defer closeCLIHTTPTestServer(t, granting)
 	source, _ = newInternalToolSource(context.Background(), base, "token", granting.URL, &bytes.Buffer{}, models.PerTargetToolAllowlist)
 	names = toolNames(source)
 	require.Contains(t, names, "linear_get_task", "an allowlisted, granted read is available")
@@ -97,7 +97,7 @@ func TestReviewToolsIntersectWarmEnvironmentAndToken(t *testing.T) {
 				}
 				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"snapshot": snapshot, "tool_allowlist": allowed}}), "serve authenticated snapshot")
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 			source, _ := newInternalToolSource(context.Background(), allowlistTestSource{}, "token", server.URL, &bytes.Buffer{}, env)
 			require.Equal(t, tt.want, slices.Contains(toolNames(source), "automation_execute_action"), "both grant and current token scopes must allow the write")
 			require.NotContains(t, toolNames(source), "slack_send", "narrow exception must not expose general sends")
