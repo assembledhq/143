@@ -3540,9 +3540,10 @@ func TestHarvestCodeReviewOrchestratorResultRejectsMalformedSynthesis(t *testing
 
 	policy := codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig())
 	stores := &Stores{
-		CodeReviews:     db.NewCodeReviewStore(mock),
-		SessionThreads:  db.NewSessionThreadStore(mock),
-		SessionMessages: db.NewSessionMessageStore(mock),
+		CodeReviews:            db.NewCodeReviewStore(mock),
+		SessionThreads:         db.NewSessionThreadStore(mock),
+		SessionMessages:        db.NewSessionMessageStore(mock),
+		ThreadSendDependencies: requiredWorkerThreadSendDependencies(t),
 	}
 	err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
 		OrgID:     orgID,

@@ -184,6 +184,15 @@ reserved for session-wide execution that conflicts with every lane; it is not a
 shared pointer rewritten by independent siblings. The session running status
 remains a derived projection of active siblings, not logical claim ownership.
 
+Before typed repair composition supplies durable scope and exact owning-job/runtime
+proof, unresolved repair evidence keeps affected ordinary input waiting with
+`repair_reconciliation`, without a new job or claim. Comment-resolution commands
+still roll back if immediate new-job admission is unavailable. Released history
+alone is not a reservation; stale live work blocks dispatch even if the reservation
+is inactive or no longer matches the current head. A thread association alone
+cannot establish that repair work excludes only that lane. A.5 owns the missing
+repair scope/proof writers and their eventual reconciliation.
+
 The passive lane-claim representation uses an exact token-bound FK from
 `session_threads(org_id,session_id,id,admission_claim_dispatch_id,admission_claim_token)`
 to `session_input_dispatches(org_id,session_id,thread_id,id,admission_claim_token)`.

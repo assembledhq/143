@@ -757,7 +757,10 @@ func cancelActiveCodeReviewThreads(ctx context.Context, stores *Stores, services
 	if stores == nil || stores.SessionThreads == nil || stores.Sessions == nil || stores.Jobs == nil {
 		return nil
 	}
-	threads := newWorkerThreadService(stores, logger)
+	threads, err := newWorkerThreadService(stores, logger)
+	if err != nil {
+		return err
+	}
 	if services != nil && services.Orchestrator != nil {
 		threads.SetCanceller(codeReviewThreadCanceller{orchestrator: services.Orchestrator})
 	}
@@ -1406,7 +1409,10 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			return fmt.Errorf("set code review prompt record key: %w", err)
 		}
 	}
-	threads := newWorkerThreadService(stores, logger)
+	threads, err := newWorkerThreadService(stores, logger)
+	if err != nil {
+		return err
+	}
 	fileScope := codeReviewChangedPaths(changedFiles)
 	timedOutBeforeStart := codeReviewReviewTimedOut(cfg, metadata)
 	selections, err := resolveCodeReviewReviewerAvailability(ctx, services, job.OrgID, cfg, results, timedOutBeforeStart)
@@ -1955,7 +1961,10 @@ func cancelCodeReviewThread(ctx context.Context, stores *Stores, logger zerolog.
 	if stores == nil || stores.SessionThreads == nil {
 		return models.SessionThread{}, fmt.Errorf("session thread store is required")
 	}
-	threads := newWorkerThreadService(stores, logger)
+	threads, err := newWorkerThreadService(stores, logger)
+	if err != nil {
+		return models.SessionThread{}, err
+	}
 	return threads.CancelThread(ctx, job.OrgID, job.SessionID, threadID)
 }
 
@@ -3210,7 +3219,10 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}); err != nil {
 		return err
 	}
-	threads := newWorkerThreadService(stores, logger)
+	threads, err := newWorkerThreadService(stores, logger)
+	if err != nil {
+		return err
+	}
 	// Legacy first synthesis uses Main. Assessment-enabled reviews use an
 	// explicit read-only synthesis thread; runtime fallbacks use separate
 	// threads because an agent's provider cannot be edited after its first turn.
@@ -3560,7 +3572,10 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis, visualEvidence)
 		}
 		if synthesisErr != nil {
-			threads := newWorkerThreadService(stores, logger)
+			threads, err := newWorkerThreadService(stores, logger)
+			if err != nil {
+				return err
+			}
 			repairHandled, repairStarted, repairErr := requestCodeReviewOrchestratorSynthesisRepair(
 				ctx,
 				stores,

@@ -439,7 +439,9 @@ func newTestService(t *testing.T) (*Service, *testDeps) {
 		jobStore:     &mockJobStore{},
 		inboxStore:   &mockThreadInboxStore{},
 	}
-	svc := NewService(deps.threadStore, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, zerolog.Nop())
+	svc, err := NewService(deps.threadStore, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, requiredTestSendDependencies(t), zerolog.Nop())
+	require.NoError(t, err, "construct the thread service with explicit mandatory send dependencies")
+	installLegacyGuardFixture(t, svc)
 	return svc, deps
 }
 
@@ -3841,7 +3843,8 @@ func (m *mockTranscriptStore) ListThreadWindow(ctx context.Context, orgID, threa
 func newServiceWithTranscript(t *testing.T, ts TranscriptStore) (*Service, *mockThreadStore) {
 	t.Helper()
 	threadStore := &mockThreadStore{}
-	svc := NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, zerolog.Nop())
+	svc, err := NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, requiredTestSendDependencies(t), zerolog.Nop())
+	require.NoError(t, err, "construct the transcript fixture with required send dependencies")
 	if ts != nil {
 		svc.SetTranscriptStore(ts)
 	}
@@ -3953,7 +3956,9 @@ func TestService_GetTranscriptWindow(t *testing.T) {
 			var threadStore *mockThreadStore
 			if tt.useNilStore {
 				threadStore = &mockThreadStore{}
-				svc = NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, zerolog.Nop())
+				var err error
+				svc, err = NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, requiredTestSendDependencies(t), zerolog.Nop())
+				require.NoError(t, err, "construct the missing-transcript fixture with required send dependencies")
 				// intentionally do NOT call svc.SetTranscriptStore
 			} else {
 				svc, threadStore = newServiceWithTranscript(t, ts)

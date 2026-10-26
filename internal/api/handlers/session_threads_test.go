@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
@@ -293,6 +294,22 @@ type threadTestDeps struct {
 	jobStore     *mockJobStore
 }
 
+type unexpectedThreadSendTransactions struct{ t *testing.T }
+
+func (r *unexpectedThreadSendTransactions) Run(context.Context, func(context.Context, pgx.Tx) error) error {
+	r.t.Helper()
+	r.t.Fatal("constructor-only handler fixture unexpectedly invoked lifecycle transactions")
+	return fmt.Errorf("unexpected lifecycle transactions")
+}
+
+func requiredThreadSendDependencies(t *testing.T) thread.SendDependencies {
+	t.Helper()
+	deps, err := thread.NewSendDependencies(&pgxpool.Pool{}, db.NewSessionStore(nil), db.NewSessionThreadStore(nil), db.NewJobStore(nil))
+	require.NoError(t, err, "construct handler dependencies without acquiring a database connection")
+	deps.Transactions = &unexpectedThreadSendTransactions{t: t}
+	return deps
+}
+
 func newThreadHandler(t *testing.T) (*SessionThreadHandler, *threadTestDeps) {
 	t.Helper()
 	deps := &threadTestDeps{
@@ -302,14 +319,16 @@ func newThreadHandler(t *testing.T) (*SessionThreadHandler, *threadTestDeps) {
 		logStore:     &mockLogStore{},
 		jobStore:     &mockJobStore{},
 	}
-	svc := thread.NewService(
+	svc, err := thread.NewService(
 		deps.threadStore,
 		deps.sessionStore,
 		deps.messageStore,
 		deps.logStore,
 		deps.jobStore,
+		requiredThreadSendDependencies(t),
 		zerolog.Nop(),
 	)
+	require.NoError(t, err, "construct the handler's thread service with mandatory send dependencies")
 	return NewSessionThreadHandler(svc), deps
 }
 
@@ -322,14 +341,16 @@ func newThreadHandlerWithInbox(t *testing.T, inbox thread.ThreadInboxStore) (*Se
 		logStore:     &mockLogStore{},
 		jobStore:     &mockJobStore{},
 	}
-	svc := thread.NewService(
+	svc, err := thread.NewService(
 		deps.threadStore,
 		deps.sessionStore,
 		deps.messageStore,
 		deps.logStore,
 		deps.jobStore,
+		requiredThreadSendDependencies(t),
 		zerolog.Nop(),
 	)
+	require.NoError(t, err, "construct the inbox handler fixture with mandatory send dependencies")
 	svc.SetThreadInboxStore(inbox)
 	return NewSessionThreadHandler(svc), deps
 }
@@ -1262,7 +1283,7 @@ func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 			body:           `{"message":"continue"}`,
 			setupDeps: func(deps *threadTestDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, fmt.Errorf("no rows")
+					return models.SessionThread{}, pgx.ErrNoRows
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{}, fmt.Errorf("no rows")
@@ -1282,7 +1303,7 @@ func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 			body:           `{"message":"please continue"}`,
 			setupDeps: func(deps *threadTestDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, fmt.Errorf("no rows")
+					return models.SessionThread{}, pgx.ErrNoRows
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{
@@ -1380,7 +1401,7 @@ func TestSessionThreadHandler_SendThreadMessage(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			handler, deps := newThreadHandler(t)
+			handler, deps := newThreadSendHandler(t)
 			tt.setupDeps(deps)
 
 			req := threadRequest(http.MethodPost, "/api/v1/sessions/"+tt.sessionIDParam+"/threads/"+tt.threadIDParam+"/messages", tt.body, orgID, map[string]string{"id": tt.sessionIDParam, "tid": tt.threadIDParam})
@@ -2192,14 +2213,16 @@ func newThreadHandlerWithTranscript(t *testing.T, transcriptStore thread.Transcr
 		logStore:     &mockLogStore{},
 		jobStore:     &mockJobStore{},
 	}
-	svc := thread.NewService(
+	svc, err := thread.NewService(
 		deps.threadStore,
 		deps.sessionStore,
 		deps.messageStore,
 		deps.logStore,
 		deps.jobStore,
+		requiredThreadSendDependencies(t),
 		zerolog.Nop(),
 	)
+	require.NoError(t, err, "construct the transcript handler fixture with mandatory send dependencies")
 	svc.SetTranscriptStore(transcriptStore)
 	return NewSessionThreadHandler(svc), deps
 }

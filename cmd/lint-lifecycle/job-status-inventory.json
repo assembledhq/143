@@ -15,6 +15,27 @@
   ],
   "entries": [
     {
+      "id": "migrations/000383_admission_lookup_rollback_floor.down.sql:SQL",
+      "source_sha256": "8090ac748401b6795dcff3f24271bbb620297f70fd212156df448ec38f9c7fd9",
+      "classification": "lifecycle-cleanup",
+      "action_0a": "Before either standalone ordinary-admission lookup index down, perform the schema-wide inactive rollback preflight under bounded evidence-table locks. Refuse positive protocol/cutover provenance or retained recovery, preparation, dispatch/runtime binding, any awaiting_start_control job or any snapshot_object_cleanup job regardless of status. Withdraw readers and inhibit activation and lifecycle/recovery/domain writers throughout the maintenance operation; these preflight locks do not span later concurrent index drops.",
+      "reason": "The first supported down must refuse before weakening the ordinary-admission lookup floor. A refused preflight preserves retained evidence and all indexes while the migration ledger remains visibly dirty for deliberate repair-forward. This maintenance guard grants no admission, runtime or activation authority; later activation must independently revalidate its complete schema/index floor.",
+      "evidence": [
+        "migrations/000383_admission_lookup_rollback_floor.down.sql",
+        "status = 'awaiting_start_control'",
+        "migrations/000346_lifecycle_protocol_retention_functions.up.sql:lifecycle143_assert_protocol_rollback_safe",
+        "cmd/migrate/admission_lookup_indexes_postgres_test.go:TestAdmissionLookupHighestRollbackFloorLedgerPostgres",
+        "cmd/migrate/admission_lookup_indexes_postgres_test.go:TestAdmissionLookupInactiveMigrationRoundTripPostgres"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "status = 'awaiting_start_control'",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "Any retained parked job, regardless of tenant or age, blocks the schema-wide inactive index rollback. This is maintenance-floor refusal, not a runnable, lease-expiry, physical-drain or input-consumption predicate."
+        }
+      ]
+    },
+    {
       "id": "internal/db/session_lifecycle_consumers.go:classifyLifecycleConsumerEvidence:go:1",
       "source_sha256": "3403a16027a21a1caa931b7c3e18ea0dd55edafa3d039ff6de6bcf87724c837d",
       "classification": "nonterminal-consumer",

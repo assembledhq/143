@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,7 +19,7 @@ func TestRuntimesWirePublicationCoordinatorBeforeProcessing(t *testing.T) {
 		name, filename, storesBuilt string
 	}{
 		{"worker", "main.go", "stores := &worker.Stores{"},
-		{"session executor", "session_executor_main.go", "stores := buildSessionExecutorStores("},
+		{"session executor", "session_executor_main.go", "stores, err := buildSessionExecutorStores("},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -45,7 +46,7 @@ func TestSessionExecutorWiresPublicationReviewEvidenceRefresher(t *testing.T) {
 	require.NoError(t, err, "session_executor_main.go should be readable")
 
 	body := string(source)
-	storesBuilt := strings.Index(body, "stores := buildSessionExecutorStores(")
+	storesBuilt := strings.Index(body, "stores, err := buildSessionExecutorStores(")
 	wired := strings.Index(body, "wirePublicationReviewEvidenceRefresher(services, stores)")
 	runtimeReturned := strings.Index(body, "return &worker.SessionExecutorRuntime{")
 	require.NotEqual(t, -1, storesBuilt, "session executor should build the complete worker store set")
@@ -58,7 +59,10 @@ func TestSessionExecutorWiresPublicationReviewEvidenceRefresher(t *testing.T) {
 func TestBuildSessionExecutorStoresIncludesSlackCompletionDependencies(t *testing.T) {
 	t.Parallel()
 
-	stores := buildSessionExecutorStores(sessionExecutorStoreDeps{})
+	// Constructor-only inert pool: this test must never acquire a connection.
+	stores, err := buildSessionExecutorStores(sessionExecutorStoreDeps{Pool: &pgxpool.Pool{}})
+	require.NoError(t, err, "complete executor store construction must not acquire a database connection")
+	require.NoError(t, stores.ThreadSendDependencies.Validate(), "executor stores must include mandatory thread send dependencies")
 
 	require.NotNil(t, stores.Jobs, "session executor stores should include jobs so Slack follow-up jobs can be enqueued")
 	require.NotNil(t, stores.SessionMessages, "session executor stores should include session messages for final response extraction")
@@ -76,6 +80,13 @@ func TestBuildSessionExecutorStoresIncludesSlackCompletionDependencies(t *testin
 	require.NotNil(t, stores.Memberships, "session executor stores should include memberships for Slack authorization")
 	require.NotNil(t, stores.GitHubInstallations, "session executor stores should include GitHub installations used by Slack context")
 	require.NotNil(t, stores.SandboxHolders, "session executor stores should include sandbox holders for runtime coordination")
+}
+
+func TestBuildSessionExecutorStoresRejectsMissingPool(t *testing.T) {
+	t.Parallel()
+	stores, err := buildSessionExecutorStores(sessionExecutorStoreDeps{})
+	require.EqualError(t, err, "construct session executor store thread send dependencies: thread send transactions: pool is required", "missing mandatory construction plumbing must reach executor startup")
+	require.Nil(t, stores, "invalid executor construction must expose no partial store set")
 }
 
 func TestSessionExecutorStoresWireSlackLifecycleDependencies(t *testing.T) {
