@@ -9,7 +9,7 @@ SANDBOX_CLI_EMBED_SOURCES := $(shell GOOS=linux CGO_ENABLED=0 go list -deps -f '
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json go.mod go.sum $(SANDBOX_CLI_PACKAGE_DIRS) $(SANDBOX_CLI_GO_SOURCES) $(SANDBOX_CLI_EMBED_SOURCES)
 
 .PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr-profile test-pr test-coverage-diff test-main test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
-.PHONY: audit-review-recipes
+.PHONY: audit-review-recipes preflight preflight-extended hooks-check security-check test-deploy-scripts
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
 GOLANGCI_LINT_BIN := $(CURDIR)/bin/golangci-lint
@@ -276,7 +276,9 @@ lint-stores:
 
 lint-bootstrap:
 	@mkdir -p $(CURDIR)/bin
-	GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) GOBIN=$(CURDIR)/bin go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@if ! $(GOLANGCI_LINT_BIN) version 2>/dev/null | grep -Fq "version $(patsubst v%,%,$(GOLANGCI_LINT_VERSION)) "; then \
+	  GOTOOLCHAIN=$(GO_TOOLCHAIN_VERSION) GOBIN=$(CURDIR)/bin go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION); \
+	fi
 
 # Explicit release gate for the code-review evidence rollout. The inventory
 # contains private repository snapshots and recipe-review evidence, so keep it
@@ -287,7 +289,8 @@ audit-review-recipes:
 	@go run ./cmd/audit-review-recipes --manifest "$$REVIEW_RECIPE_AUDIT_MANIFEST"
 
 # Point git at .githooks/. The pre-commit hook runs lint-schema / lint-stores
-# (scoped to the staged files) and gofmt before every commit. Skip with
+# (scoped to the staged files) and gofmt before every commit. Pre-push runs
+# the shared preflight selector against outgoing refs. Skip a WIP commit with
 # `git commit --no-verify` or disable with `make hooks-uninstall`.
 #
 # Refuses to clobber a pre-existing core.hooksPath pointing elsewhere (a
@@ -298,13 +301,37 @@ hooks-install:
 	@existing=$$(git config --get core.hooksPath 2>/dev/null || true); \
 	if [ -z "$$existing" ] || [ "$$existing" = ".githooks" ]; then \
 	  git config core.hooksPath .githooks; \
-	  echo "Installed: git will now run .githooks/pre-commit on every commit."; \
+	  echo "Installed commit and push hooks."; \
 	else \
 	  echo "ERROR: core.hooksPath is already set to '$$existing'." >&2; \
 	  echo "Refusing to overwrite. To use 143's hooks anyway, run:" >&2; \
 	  echo "  git config core.hooksPath .githooks" >&2; \
 	  exit 1; \
 	fi
+	@$(MAKE) hooks-check
+
+# Shared by setup and explicit installation; relative hooksPath works in worktrees.
+hooks-check:
+	@test "$$(git config --get core.hooksPath)" = .githooks || { echo 'Run make hooks-install'; exit 1; }
+	@test -x .githooks/pre-commit -a -x .githooks/pre-push
+	@echo 'Commit and push hooks are active in this checkout.'
+
+preflight:
+	python3 scripts/preflight.py
+
+preflight-extended:
+	python3 scripts/preflight.py --extended
+
+# Same scanner/version as the hosted Security Scan job.
+security-check:
+	@mkdir -p bin
+	@if ! go version -m bin/gosec 2>/dev/null | grep -Eq 'github.com/securego/gosec/v2[[:space:]]+v2[.]22[.]4([[:space:]]|$$)'; then \
+	  GOBIN=$(CURDIR)/bin go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4; \
+	fi
+	bin/gosec ./...
+
+test-deploy-scripts:
+	@set -e; export PYTHONDONTWRITEBYTECODE=1; for t in deploy/scripts/*_test.sh; do bash "$$t"; done
 
 hooks-uninstall:
 	@existing=$$(git config --get core.hooksPath 2>/dev/null || true); \

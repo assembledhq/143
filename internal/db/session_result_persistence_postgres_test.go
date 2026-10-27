@@ -3,22 +3,16 @@ package db
 import (
 	"context"
 	"encoding/json"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-	_ "github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/models"
+	testpostgres "github.com/assembledhq/143/internal/testutil/postgres"
 )
 
 func TestSessionPersistenceFullSchemaPostgres(t *testing.T) {
@@ -261,56 +255,8 @@ func dropSessionPersistencePostgresDatabase(t sessionPersistenceCleanupReporter,
 
 func newSessionPersistencePostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	raw := os.Getenv("TEST_DATABASE_URL")
-	if raw == "" {
-		t.Skip("set TEST_DATABASE_URL to disposable PostgreSQL 15+ for full-schema session persistence proofs")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	admin, err := pgx.Connect(ctx, raw)
-	require.True(t, err == nil, "connect only to the supplied disposable test server without printing its DSN")
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := admin.Close(ctx); err != nil {
-			t.Errorf("close this fixture's administrator connection: %v", err)
-		}
-	})
-	var serverVersion int
-	require.NoError(t, admin.QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&serverVersion), "read the actual server version before creating a fixture")
-	require.GreaterOrEqual(t, serverVersion, 150000, "the complete unchanged schema requires PostgreSQL 15 or newer")
-	name := "session_persistence_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	identifier := pgx.Identifier{name}.Sanitize()
-	_, err = admin.Exec(ctx, "CREATE DATABASE "+identifier)
-	require.NoError(t, err, "create only this test's independently generated database")
-	t.Cleanup(func() {
-		dropSessionPersistencePostgresDatabase(t, admin, name)
-	})
-	target, err := url.Parse(raw)
-	require.True(t, err == nil, "parse the fixture URI without publishing its connection details")
-	query := target.Query()
-	query.Del("dbname")
-	query.Del("database")
-	target.Path, target.RawPath, target.RawQuery = "/"+name, "", query.Encode()
-	isolated := target.String()
-	configuration, err := pgx.ParseConfig(isolated)
-	require.True(t, err == nil && configuration.Database == name, "the fixture and migration drivers must target only the generated database")
-	source, err := filepath.Abs("../../migrations")
-	require.NoError(t, err, "resolve the complete unmodified repository migration chain")
-	migration, err := migrate.New("file://"+source, isolated)
-	require.True(t, err == nil, "open the real migration driver only on the generated fixture")
-	t.Cleanup(func() {
-		sourceErr, databaseErr := migration.Close()
-		if sourceErr != nil {
-			t.Errorf("close the complete migration source before fixture cleanup: %v", sourceErr)
-		}
-		if databaseErr != nil {
-			t.Errorf("close the migration connection before fixture cleanup: %v", databaseErr)
-		}
-	})
-	require.NoError(t, migration.Up(), "apply the entire real production schema before exercising persistence composition")
-	pool, err := pgxpool.New(ctx, isolated)
-	require.True(t, err == nil, "open only the fully migrated generated test database without printing its DSN")
-	t.Cleanup(pool.Close)
-	return pool
+	// Clone the complete schema once migrated by the shared fixture manager.
+	// Do not retain an admin and migration connection for every paused parent
+	// test while its parallel subtests wait for their execution slots.
+	return testpostgres.NewPool(t, context.Background(), "../../migrations", 4)
 }

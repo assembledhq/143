@@ -25,22 +25,29 @@ func newReviewRecoveryPool(t *testing.T) *pgxpool.Pool {
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, dsn)
 	require.NoError(t, err, "connect to disposable PostgreSQL")
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		require.NoError(t, admin.Close(cleanupCtx), "close disposable admin connection")
+	})
 	schema := "review_recovery_causes_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	_, err = admin.Exec(ctx, `CREATE SCHEMA `+schema)
 	require.NoError(t, err, "create isolated recovery schema")
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := admin.Exec(cleanupCtx, `DROP SCHEMA `+schema+` CASCADE`)
+		require.NoError(t, err, "drop only this test's schema")
+	})
 	cfg, err := pgxpool.ParseConfig(dsn)
 	require.NoError(t, err, "parse disposable database configuration")
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
 	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-	cfg.MaxConns = 16
+	// Admission still races across goroutines, with a bounded connection budget.
+	cfg.MaxConns, cfg.MinConns, cfg.MinIdleConns = 4, 0, 0
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "create isolated recovery pool")
-	t.Cleanup(func() {
-		pool.Close()
-		_, err := admin.Exec(context.Background(), `DROP SCHEMA `+schema+` CASCADE`)
-		require.NoError(t, err, "drop only this test's schema")
-		require.NoError(t, admin.Close(context.Background()), "close disposable admin connection")
-	})
+	t.Cleanup(pool.Close)
 	_, err = pool.Exec(ctx, `
 CREATE TABLE nodes(id text PRIMARY KEY,host text,mode text DEFAULT 'worker',status text DEFAULT 'active',drain_intent text DEFAULT 'none',started_at timestamptz DEFAULT now(),last_heartbeat_at timestamptz DEFAULT now(),metadata jsonb DEFAULT '{}');
 CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid NOT NULL,origin text DEFAULT 'code_review',status text DEFAULT 'idle',container_id text,worker_node_id text,turn_holding_container boolean DEFAULT false,recovery_state text DEFAULT '',recovery_queued_at timestamptz,snapshot_key text,sandbox_state text DEFAULT 'running',created_at timestamptz DEFAULT now()-interval '1 day',last_activity_at timestamptz DEFAULT now()-interval '1 day');
