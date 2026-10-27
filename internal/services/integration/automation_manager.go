@@ -81,10 +81,7 @@ func (m *InternalAutomationManager) do(ctx context.Context, method, path string,
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != expectedStatus {
-		bodyStr := string(respBody)
-		if len(bodyStr) > 512 {
-			bodyStr = bodyStr[:512] + "...(truncated)"
-		}
+		bodyStr := truncateInternalAPIErrorBody(respBody)
 		return nil, fmt.Errorf("automation request failed (status %d): %s", resp.StatusCode, bodyStr)
 	}
 	return json.RawMessage(respBody), nil

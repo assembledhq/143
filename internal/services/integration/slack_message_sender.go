@@ -57,10 +57,7 @@ func (s *InternalSlackMessageSender) SendMessage(ctx context.Context, params Sen
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		bodyStr := string(respBody)
-		if len(bodyStr) > 512 {
-			bodyStr = bodyStr[:512] + "...(truncated)"
-		}
+		bodyStr := truncateInternalAPIErrorBody(respBody)
 		return nil, fmt.Errorf("slack message send failed (status %d): %s", resp.StatusCode, bodyStr)
 	}
 	var result SendMessageResult

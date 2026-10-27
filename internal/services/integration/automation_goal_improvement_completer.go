@@ -56,10 +56,7 @@ func (c *InternalAutomationGoalImprovementCompleter) CompleteGoalImprovement(ctx
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		bodyStr := string(respBody)
-		if len(bodyStr) > 512 {
-			bodyStr = bodyStr[:512] + "...(truncated)"
-		}
+		bodyStr := truncateInternalAPIErrorBody(respBody)
 		return nil, fmt.Errorf("automation goal improvement complete failed (status %d): %s", resp.StatusCode, bodyStr)
 	}
 

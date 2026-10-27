@@ -121,10 +121,7 @@ func (c *InternalPullRequestCreator) CreatePullRequest(ctx context.Context, para
 				Message:    apiError.Error.Message,
 			}
 		}
-		bodyStr := string(respBody)
-		if len(bodyStr) > 512 {
-			bodyStr = bodyStr[:512] + "...(truncated)"
-		}
+		bodyStr := truncateInternalAPIErrorBody(respBody)
 		return nil, &PullRequestCreationError{StatusCode: resp.StatusCode, Message: bodyStr}
 	}
 
@@ -189,10 +186,7 @@ func (c *InternalPullRequestCreator) UpdatePullRequest(ctx context.Context, para
 				Message:    apiError.Error.Message,
 			}
 		}
-		bodyStr := string(respBody)
-		if len(bodyStr) > 512 {
-			bodyStr = bodyStr[:512] + "...(truncated)"
-		}
+		bodyStr := truncateInternalAPIErrorBody(respBody)
 		return nil, &PullRequestUpdateError{StatusCode: resp.StatusCode, Message: bodyStr}
 	}
 
