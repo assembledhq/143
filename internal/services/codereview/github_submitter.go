@@ -132,14 +132,14 @@ type UpsertReviewStatusCommentRequest struct {
 	ExistingCommentID *int64
 }
 
-type HideReviewSummaryRequest struct {
-	InstallationID  int64
-	Repository      string
-	PullNumber      int
-	ReviewID        int64
-	OutputKey       string
-	StatusCommentID int64
-	Summary         string
+type SyncReviewSummaryRequest struct {
+	InstallationID        int64
+	Repository            string
+	PullNumber            int
+	ReviewID              int64
+	OutputKey             string
+	Body                  string
+	RemoveProgressComment bool
 }
 
 type PullRequestFilesRequest struct {
@@ -228,9 +228,10 @@ func (s *GitHubSubmitter) UpsertReviewStatusComment(ctx context.Context, req Ups
 	return s.createIssueComment(ctx, token, owner, repo, req.PullNumber, markedBody)
 }
 
-// HideReviewSummary replaces the formal review's fallback with its verdict and a link after
-// the rolling PR comment has durably received the same result.
-func (s *GitHubSubmitter) HideReviewSummary(ctx context.Context, req HideReviewSummaryRequest) error {
+// SyncReviewSummary keeps the full result on the formal review. Terminal
+// synchronization also removes its app-authored progress comment, after the
+// full body is confirmed. Retrying either step is safe.
+func (s *GitHubSubmitter) SyncReviewSummary(ctx context.Context, req SyncReviewSummaryRequest) error {
 	if s == nil || s.tokens == nil {
 		return fmt.Errorf("github submitter is not configured")
 	}
@@ -250,17 +251,30 @@ func (s *GitHubSubmitter) HideReviewSummary(ctx context.Context, req HideReviewS
 	if strings.TrimSpace(req.OutputKey) == "" {
 		return fmt.Errorf("output key is required")
 	}
-	if req.StatusCommentID <= 0 {
-		return fmt.Errorf("status comment id is required")
+	if s.appID <= 0 {
+		return fmt.Errorf("GitHub app identity is required to finalize the review summary")
 	}
-	summary := strings.TrimSpace(req.Summary)
-	if summary == "" {
-		return fmt.Errorf("review summary is required")
+	body := strings.TrimSpace(req.Body)
+	if body == "" {
+		return fmt.Errorf("review body is required")
 	}
 	ctx = withGitHubInstallationTelemetry(ctx, req.InstallationID)
 	token, err := s.tokens.GetInstallationToken(ctx, req.InstallationID)
 	if err != nil {
 		return fmt.Errorf("get installation token: %w", err)
+	}
+	if !req.RemoveProgressComment {
+		// A new result may already have reached GitHub while its durable
+		// assessment is still settling. Never restore an older publication
+		// over a body whose marker has advanced.
+		var existing githubReviewListItem
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d", url.PathEscape(owner), url.PathEscape(repo), req.PullNumber, req.ReviewID)
+		if _, err := s.getGitHubJSONPage(ctx, token, path, &existing); err != nil {
+			return fmt.Errorf("read previous GitHub review summary: %w", err)
+		}
+		if !strings.Contains(existing.Body, codeReviewOutputMarker(req.OutputKey)) {
+			return nil
+		}
 	}
 	_, err = s.updateReviewSummary(
 		ctx,
@@ -269,13 +283,22 @@ func (s *GitHubSubmitter) HideReviewSummary(ctx context.Context, req HideReviewS
 		repo,
 		req.PullNumber,
 		req.ReviewID,
-		withCodeReviewOutputMarker(summary+fmt.Sprintf("\n\n[View review summary](https://github.com/%s/%s/pull/%d#issuecomment-%d)",
-			url.PathEscape(owner), url.PathEscape(repo), req.PullNumber, req.StatusCommentID), req.OutputKey),
+		withCodeReviewOutputMarker(body, req.OutputKey),
 	)
 	if err != nil {
-		return fmt.Errorf("hide GitHub review summary: %w", err)
+		return fmt.Errorf("finalize GitHub review summary: %w", err)
 	}
-	return nil
+	if !req.RemoveProgressComment {
+		return nil
+	}
+	comment, found, err := s.findReviewStatusComment(ctx, token, owner, repo, req.PullNumber)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil
+	}
+	return s.deleteIssueComment(ctx, token, owner, repo, comment.ID)
 }
 
 func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequest) (SubmitReviewResult, error) {
@@ -314,8 +337,8 @@ func (s *GitHubSubmitter) SubmitReview(ctx context.Context, req SubmitReviewRequ
 		result.Body = visibleReviewBody
 		return result, err
 	}
-	// Keep a visible fallback on the formal review until the rolling PR
-	// comment is updated. The status-comment job removes it afterward.
+	// The formal review carries the final result. The status-comment job
+	// confirms that body before removing the temporary progress comment.
 	reviewBody := withCodeReviewOutputMarker(visibleReviewBody, req.OutputKey)
 	existing, found, err := s.findExistingReview(ctx, token, owner, repo, req.PullNumber, req.OutputKey)
 	if err != nil {
@@ -741,6 +764,30 @@ func (s *GitHubSubmitter) findReviewStatusComment(ctx context.Context, token, ow
 		path = nextPath
 	}
 	return githubIssueCommentItem{}, false, nil
+}
+
+func (s *GitHubSubmitter) deleteIssueComment(ctx context.Context, token, owner, repo string, commentID int64) error {
+	commentURL := fmt.Sprintf("%s/repos/%s/%s/issues/comments/%d", s.baseURL, url.PathEscape(owner), url.PathEscape(repo), commentID)
+	httpReq, err := http.NewRequestWithContext(githubtelemetry.WithJSONResponseObservation(ctx), http.MethodDelete, commentURL, nil)
+	if err != nil {
+		return fmt.Errorf("create progress comment deletion request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Accept", "application/vnd.github+json")
+	httpReq.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := s.client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("delete GitHub progress comment: %w", ghservice.NewGitHubRequestError(ctx, err))
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("delete GitHub progress comment: %w", readGitHubAPIResponseError(httpReq, resp))
+	}
+	s.observeMutationResponse(ctx, httpReq, resp)
+	return nil
 }
 
 func (s *GitHubSubmitter) createIssueComment(ctx context.Context, token, owner, repo string, pullNumber int, body string) (int64, error) {

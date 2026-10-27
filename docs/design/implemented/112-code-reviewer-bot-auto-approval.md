@@ -31,9 +31,9 @@ Implemented:
 - prompt record storage and recovery for rendered reviewer/orchestrator prompts and their structured outputs
 - inline-comment posting with marker-based dedupe/update and posted-comment id persistence
 - GitHub changed-file fetch support for PR file/line threshold and coarse risk-category evaluation
-- one rolling PR conversation comment that links to the active session while review is running, retains the prior completed verdict with its assessed head during a reassessment, and becomes the sole visible current summary when the replacement completes; the formal review retains a visible fallback until that rolling update succeeds, then becomes marker-only, without a redundant commit status that could be mistaken for a required CI check
-- durable per-PR storage of that rolling comment's GitHub ID, using direct updates normally and an app-authored marker scan only to recover a missing or deleted comment
-- in-place rolling-comment refresh for reassessments, with the prior completed assessment preserved until its replacement finishes, visible commit/time provenance, failure-safe formal-review fallback and marker-only convergence, prior inline findings updated by stable markers, and each assessment retained as a separate auditable 143 session
+- one temporary PR conversation comment for active review progress, with a link to a published previous review during reassessment; the formal review retains the complete final result and the temporary comment is removed only after that body is confirmed, without a redundant commit status that could be mistaken for a required CI check
+- durable per-PR storage of the temporary comment's GitHub ID, using direct updates during review, app-authored marker recovery, and tenant-scoped identity cleanup after removal
+- in-place formal-review refresh for reassessments, with visible commit/time provenance and the prior completed assessment preserved until its replacement finishes; progress-comment cleanup is retryable, prior inline findings use stable markers, and each assessment remains a separate auditable 143 session
 - stale requested-reviewer cleanup after final review submission for reviewer-login and team-slug triggers carried in the durable job payload
 - productized GitHub team-trigger setup that creates or repairs the `143-code-reviewer` org team, grants repository read access, and persists repo-scoped active trigger settings
 - final-review template rendering from persisted policy data with safe fallback to the built-in body
@@ -63,7 +63,7 @@ This feature fills the post-PR slot: reviewer automation in GitHub, where teams 
 
 1. **Approval requires evidence.** The bot approves only when every prerequisite passes and active policy says the PR is acceptable.
 2. **Risky work stays human-centered.** Non-acceptable PRs get review evidence, escalation reasons, and inline comments, not approval.
-3. **GitHub remains the action surface.** Reviewer assignment triggers the workflow; one rolling PR comment carries the visible result while formal reviews carry approval state and inline findings.
+3. **GitHub remains the action surface.** Reviewer assignment triggers the workflow; one formal review carries the full result, approval state, and inline findings; a separate progress comment exists only while review is active or no formal result has been published.
 4. **Organizations own policy.** Description requirements, agent roster, prompts, risk thresholds, and approval behavior are org/repo configurable.
 5. **Every decision is inspectable.** Each approval or non-approval links to the 143 session, policy version, reviewed SHA, and agent evidence.
 
@@ -82,7 +82,7 @@ Recommended v1 scope:
 - `agent_roster.reviewer_count` selects one to three usable reviews per run independently of the ranked model pool. `reviewers`, `reviewer_models`, and `reviewer_reasoning_efforts` remain aligned arrays with up to ten entries; later entries replace unavailable or failed attempts in order. Omitted or zero legacy counts resolve to the existing roster length. Quorum is bounded by the requested count, and adding fallbacks does not increase fan-out. This is stored in the existing versioned `agent_roster` JSONB, with no migration.
 - Each ranked entry is attempted at most once under the captured policy and reviewer-phase deadline. Usable output with blocking findings fills a reviewer slot. Failed attempts remain evidence; unused entries create no attempt records, including after timeout. Replacement threads preserve rank identity and reclaim only terminal system threads with persisted results and no queued work, within the four-visible-thread limit. Synthesis retains its separate phase budget.
 - Each reviewer has a policy-versioned reasoning-effort value aligned by index with `reviewers` and `reviewer_models`; the orchestrator keeps its own `reasoning_effort`. Omitted legacy reviewer values inherit the former roster-wide value, or `high` when that value is also absent.
-- One rolling PR comment with the visible summary, plus a formal GitHub review that converges from a visible fallback to marker-only and a configurable number of inline comments.
+- One final formal GitHub review with the full result and a configurable number of inline comments. A temporary progress comment is removed only after the formal result is confirmed.
 - Approval only for acceptable PRs; otherwise comment with escalation reasons.
 - Delivery-idempotent explicit requests, stale-head reruns, and GitHub review retries.
 - Top-level `Code reviews` surface for filtered sessions and configuration.
@@ -123,12 +123,12 @@ non-bypassable safeguards
         |
         v
 If there are no blocking signals and every safeguard passes:
-  submit a marker-only GitHub approval
+  submit a GitHub approval with the full result and publication marker
 Else:
-  submit a marker-only GitHub review comment
+  submit a GitHub review comment with the full result and publication marker
         |
         v
-Replace the rolling PR comment with the result
+Confirm the full formal review result, then remove the app-owned progress comment
         |
         v
 Until approval, later commits automatically rerun the assessment. If the head
@@ -137,7 +137,7 @@ latest-head reassessment is queued. A new explicit reviewer request reruns the
 latest head, including at the same head or after a prior approval. A triggering
 comment is included only in orchestrator synthesis as untrusted guidance. Both
 automatic and explicit reruns update the existing formal-review marker and
-rolling PR comment, and equivalent webhook deliveries are idempotent. Approval
+temporary progress comment, and equivalent webhook deliveries are idempotent. Approval
 ends automatic commit monitoring but does not disable explicit requests.
 ```
 
@@ -154,8 +154,10 @@ Primary interaction:
 - A user requests `@org/143-code-reviewer` as a team reviewer on a PR.
 - Alternatively, a repository owner, organization member, or collaborator mentions `@org/143-code-reviewer` in a PR conversation comment; this starts a fresh review and carries that comment into orchestrator synthesis as escaped, untrusted context. User-attributed comments remain eligible when a third-party GitHub App, such as Graphite, acts on the user's behalf. External users, bot-attributed comments, and comments performed by 143's own GitHub App cannot start reviews through comments.
 - 143 asynchronously creates or refreshes one PR conversation comment that links to the running review session.
-- The bot submits a formal GitHub review for approval state and a configurable number of inline comments on changed lines. Its body keeps the visible result as a fallback until the rolling comment update succeeds, then becomes marker-only; it does not publish a commit status.
-- The rolling conversation comment is replaced with the visible result, and later review passes reuse the same comment.
+- The bot submits a formal GitHub review with the complete result, approval state, and a configurable number of inline comments on changed lines. The publication marker remains in that body; it does not publish a commit status.
+- After confirming the complete formal result, the bot removes only its own marker-backed progress comment and clears its stored identity. Later review passes update the existing formal review and create temporary progress comments as needed. A failure before formal publication remains visible in the progress comment.
+
+Publication finalization uses the existing `code_review_session_metadata.github_review_id`, `review_output_key`, and `final_review_body`, plus nullable `pull_requests.code_review_status_comment_id`; there is no schema or 143 API change. The worker holds the existing per-PR publication lock and rechecks the latest tenant-scoped session. During reassessment it restores a shortened previous formal body only if that review still carries the previous publication marker; it never overwrites a newer result that is still settling. Terminal synchronization confirms the full formal body with GitHub's review-update endpoint before deleting any progress comment. Cleanup discovers the progress comment within that PR by both the hidden status marker and the configured GitHub App identity, so copied markers from humans or other apps are preserved. A missing comment or deletion 404 is harmless; update, lookup, deletion, or database failures are retried with the full result still visible. Only after successful provider cleanup does the worker clear the stored progress identity using both `org_id` and PR ID. Failed or cancelled attempts without a published formal review keep their issue comment as the visible outcome.
 
 This does not use CODEOWNERS and does not auto-request reviews on PR open. The team is only the selectable GitHub reviewer trigger; normal review submission still uses the installed GitHub App.
 
@@ -205,7 +207,7 @@ GitHub stays concise; the session keeps the full detail:
 - GitHub review submitted by the bot
 - audit trail for policy version, agent versions, and prompts
 
-The rolling PR comment always links to the session for both approval and non-approval paths. Formal review bodies contain only hidden idempotency markers.
+The final formal review always includes the result, session link, and hidden publication marker for both approval and non-approval paths. The temporary progress comment is removed only after that full body is confirmed.
 
 ### Code Reviews Navigation
 
@@ -448,7 +450,7 @@ The bot should not approve:
 - PRs from untrusted forks unless explicitly enabled
 - PRs where required context cannot be fetched
 
-Every approval stores the policy version and reviewed head SHA. The rolling PR comment includes enough evidence to understand the approval without opening 143.
+Every approval stores the policy version and reviewed head SHA. The formal review includes enough evidence to understand the approval without opening 143.
 
 ## Rerun And Idempotency Behavior
 
@@ -463,8 +465,8 @@ Rules:
 - Automatic new-commit reassessments schedule their durable starter after a 60-second quiet window. Each distinct head receives a delivery-idempotent job; when an older starter observes that GitHub has already advanced again, it queues the newest head behind a fresh quiet window and exits without starting obsolete reviewer work. Explicit rerequests and dispute-driven reassessments bypass this delay.
 - If new commits arrive while agents are running, retain a durable starter job until the older assessment finishes. The active worker also queues a latest-head starter after its live refresh as a fallback for a delayed or missed webhook, then marks the old commit assessment superseded. Re-read mutable PR metadata and check gates immediately before every final recommendation so an assessment for an older commit cannot approve. Title or description edits alone do not invalidate otherwise usable coding-agent evidence or queue a new session; their captured description evaluation is best effort, while live deterministic gates still apply.
 - A submitted 143 approval is the terminal gate for automatic commit reassessment. Later code changes are synchronized but do not enqueue or start reviewer work. A genuinely new explicit reviewer request may still start another assessment, and that assessment does not automatically dismiss the earlier GitHub approval.
-- Reassessments update the rolling PR comment in place so the PR has one current visible 143 recommendation. The automatic quiet window does not publish a new running-state comment. Once the replacement session is queued or running, the comment identifies the current head, preserves the previous completed verdict with its assessed head, and links to the active session; completion replaces that provisional presentation with the new verdict. Backing 143 sessions remain immutable audit history.
-- The original formal review carries the latest visible result until each reassessment updates the rolling comment, then returns to marker-only. When a previously non-approved result becomes acceptable, update the rolling comment and submit a separate, marker-only formal GitHub approval for the current head. Editing a submitted review body alone never represents a review-state transition.
+- Reassessments update the existing formal review so the PR has one final 143 recommendation. The automatic quiet window does not publish a new running-state comment. Once the replacement session is queued or running, a temporary progress comment links to the active session and the previous published review without repeating its verdict. Completion confirms the full replacement result on the formal review before removing the progress comment. Backing 143 sessions remain immutable audit history.
+- The original formal review carries the latest complete result. During reassessment, the temporary progress comment links to that previous formal review without copying its verdict. When a previously non-approved result becomes acceptable, update the full formal review and submit a separate, marker-only formal GitHub approval for the current head. Editing a submitted review body alone never represents a review-state transition.
 - New-commit webhook deliveries are keyed by the PR head SHA, while explicit requests are keyed by GitHub delivery ID, so equivalent deliveries reuse the same assessment without collapsing distinct user requests.
 - If the final GitHub review submission fails after session completion, retry idempotently using the assessment's stable review-output key; automatic keys capture head/policy state and explicit-request keys remain rooted in delivery identity.
 - If inline comments were already posted for the same head SHA, update or supersede them where GitHub permits; otherwise avoid posting duplicate line comments.
@@ -486,7 +488,7 @@ rewritten or deleted.
 
 ## Review Orchestration
 
-Each code review session has one orchestrator agent that owns review fan-out, synthesis, and the final assessment rendered into the rolling PR comment.
+Each code review session has one orchestrator agent that owns review fan-out, synthesis, and the final assessment rendered into the formal review.
 
 Session shape:
 
@@ -534,7 +536,7 @@ worker refreshes live checks, head SHA, changed files, prompt-injection guards,
 and other deterministic gates before publication. A head SHA change still
 supersedes the old assessment and queues a fresh review of the latest commit.
 
-The final rolling PR comment should include:
+The final formal review should include:
 
 - decision: approved or comment only
 - acceptable-risk result and policy version
@@ -544,7 +546,7 @@ The final rolling PR comment should include:
 - reasons approval was withheld, when not approved
 - link to the 143 code review session
 
-Inline PR comments are first-class review output. The orchestrator selects the highest-value line-specific P0 and P1 findings and submits them with the formal review while the synthesized assessment converges onto the rolling PR comment and the formal body is reduced to its marker. P2 and P3 findings are persisted in 143 as advisory evidence, never affect the approval decision, never create inline GitHub comments, and appear on GitHub only as an advisory count. Any code issue important enough to block must therefore be represented as P0 or P1. The inline comment cap is configurable per policy, defaults to four, and can be raised up to ten. The orchestrator deduplicates overlapping findings and posts only concrete comments tied to changed lines. The bot never requests changes; non-acceptable PRs receive comment-only output.
+Inline PR comments are first-class review output. The orchestrator selects the highest-value line-specific P0 and P1 findings and submits them with the formal review while the complete synthesized assessment remains on the formal review and its temporary progress comment is removed after confirmation. P2 and P3 findings are persisted in 143 as advisory evidence, never affect the approval decision, never create inline GitHub comments, and appear on GitHub only as an advisory count. Any code issue important enough to block must therefore be represented as P0 or P1. The inline comment cap is configurable per policy, defaults to four, and can be raised up to ten. The orchestrator deduplicates overlapping findings and posts only concrete comments tied to changed lines. The bot never requests changes; non-acceptable PRs receive comment-only output.
 
 Example inline comment selection:
 

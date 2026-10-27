@@ -146,85 +146,192 @@ func TestGitHubSubmitter_UpsertReviewStatusCommentRecoversStaleIDFromAppAuthored
 	require.Equal(t, int64(8001), patchedCommentID, "marker recovery must ignore a marker authored by another GitHub app")
 }
 
-func TestGitHubSubmitter_HideReviewSummaryLinksToPublishedSummary(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		summary string
-	}{
-		{name: "approved", summary: "✅ **143 Code Reviewer approved this PR**"},
-		{name: "needs human review", summary: "❌ **143 Code Reviewer needs human review**"},
-		{name: "not approved", summary: "❌ **143 Code Reviewer completed its review without approving this PR**"},
-		{name: "failed", summary: "143 Code Reviewer could not complete this review."},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			var gotBody map[string]string
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				require.Equal(t, http.MethodPut, r.Method, "summary hiding should update the existing review")
-				require.Equal(t, "/repos/acme/repo/pulls/42/reviews/143", r.URL.Path, "summary hiding should target the persisted review")
-				require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody), "summary update body should decode")
-				w.Header().Set("Content-Type", "application/json")
-				_, err := w.Write([]byte(`{"id":143,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-143"}`))
-				require.NoError(t, err, "test response should write the updated review")
-			}))
-			defer server.Close()
-
-			submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
-			err := submitter.HideReviewSummary(context.Background(), HideReviewSummaryRequest{
-				InstallationID:  99,
-				Repository:      "acme/repo",
-				PullNumber:      42,
-				ReviewID:        143,
-				OutputKey:       "review-output",
-				StatusCommentID: 7331,
-				Summary:         tt.summary,
-			})
-
-			require.NoError(t, err, "HideReviewSummary should replace the fallback summary")
-			require.Equal(t, tt.summary+"\n\n[View review summary](https://github.com/acme/repo/pull/42#issuecomment-7331)\n\n"+codeReviewOutputMarker("review-output"), gotBody["body"], "formal review should show the verdict, link to its published summary, and retain the idempotency marker")
-		})
-	}
-}
-
-func TestGitHubSubmitter_HideReviewSummaryRequiresPublishedComment(t *testing.T) {
+func TestGitHubSubmitter_SyncReviewSummary(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name          string
-		commentID     int64
-		summary       string
+		body          string
+		comments      string
+		updateStatus  int
+		listStatus    int
+		deleteStatus  int
+		repeat        bool
+		keepProgress  bool
+		newerReview   bool
+		expectedCalls []string
 		expectedError string
 	}{
-		{name: "missing comment", commentID: 0, summary: "Review completed.", expectedError: "status comment id is required"},
-		{name: "invalid comment", commentID: -1, summary: "Review completed.", expectedError: "status comment id is required"},
-		{name: "missing verdict", commentID: 7331, expectedError: "review summary is required"},
-		{name: "blank verdict", commentID: 7331, summary: " \n\t ", expectedError: "review summary is required"},
+		{
+			name:          "retains the complete approval before removing progress",
+			body:          "✅ **143 Code Reviewer approved this PR**\n\n**Why:** Tests and policy passed.\n\n[View full review](https://143.test/sessions/review)",
+			comments:      `[{"id":7331,"body":"<!-- 143-code-review-status -->\nReview is running","performed_via_github_app":{"id":143}}]`,
+			expectedCalls: []string{"PUT /repos/acme/repo/pulls/42/reviews/143", "GET /repos/acme/repo/issues/42/comments?per_page=100", "DELETE /repos/acme/repo/issues/comments/7331"},
+		},
+		{
+			name:          "retains the complete human review result",
+			body:          "❌ **143 Code Reviewer needs human review**\n\n**Human judgment needed:** Review the workflow change.",
+			comments:      `[{"id":7331,"body":"<!-- 143-code-review-status -->\nOld duplicate summary","performed_via_github_app":{"id":143}}]`,
+			expectedCalls: []string{"PUT /repos/acme/repo/pulls/42/reviews/143", "GET /repos/acme/repo/issues/42/comments?per_page=100", "DELETE /repos/acme/repo/issues/comments/7331"},
+		},
+		{
+			name: "already removed progress is idempotent",
+			body: "143 Code Reviewer completed its review.", comments: `[]`,
+			expectedCalls: []string{"PUT /repos/acme/repo/pulls/42/reviews/143", "GET /repos/acme/repo/issues/42/comments?per_page=100"},
+		},
+		{
+			name:          "a retried finalization does not create another result",
+			body:          "143 Code Reviewer completed its review.\n\nFull assessment details.",
+			comments:      `[{"id":7331,"body":"<!-- 143-code-review-status -->","performed_via_github_app":{"id":143}}]`,
+			repeat:        true,
+			expectedCalls: []string{"PUT /repos/acme/repo/pulls/42/reviews/143", "GET /repos/acme/repo/issues/42/comments?per_page=100", "DELETE /repos/acme/repo/issues/comments/7331", "PUT /repos/acme/repo/pulls/42/reviews/143", "GET /repos/acme/repo/issues/42/comments?per_page=100"},
+		},
+		{
+			name:          "preserves human and other app comments with copied markers",
+			body:          "143 Code Reviewer completed its review.",
+			comments:      `[{"id":7331,"body":"<!-- 143-code-review-status -->\nHuman comment"},{"id":7332,"body":"<!-- 143-code-review-status -->\nAnother app","performed_via_github_app":{"id":999}}]`,
+			expectedCalls: []string{"PUT /repos/acme/repo/pulls/42/reviews/143", "GET /repos/acme/repo/issues/42/comments?per_page=100"},
+		},
+		{
+			name:          "restores a prior full result without removing current progress",
+			body:          "❌ **143 Code Reviewer needs human review**\n\nComplete previous assessment.",
+			keepProgress:  true,
+			expectedCalls: []string{"GET /repos/acme/repo/pulls/42/reviews/143", "PUT /repos/acme/repo/pulls/42/reviews/143"},
+		},
+		{
+			name:          "does not overwrite a newer publication while its assessment settles",
+			body:          "Previous assessment result.",
+			keepProgress:  true,
+			newerReview:   true,
+			expectedCalls: []string{"GET /repos/acme/repo/pulls/42/reviews/143"},
+		},
+		{
+			name: "preserves progress when formal review update fails",
+			body: "143 Code Reviewer completed its review.", updateStatus: http.StatusServiceUnavailable,
+			expectedCalls: []string{"PUT /repos/acme/repo/pulls/42/reviews/143"},
+			expectedError: "finalize GitHub review summary",
+		},
+		{
+			name: "retries a failed progress lookup",
+			body: "143 Code Reviewer completed its review.", listStatus: http.StatusServiceUnavailable,
+			expectedCalls: []string{"PUT /repos/acme/repo/pulls/42/reviews/143", "GET /repos/acme/repo/issues/42/comments?per_page=100"},
+			expectedError: "list GitHub pull request issue comments",
+		},
+		{
+			name: "retries a failed deletion without clearing the full result",
+			body: "143 Code Reviewer completed its review.", deleteStatus: http.StatusServiceUnavailable,
+			comments:      `[{"id":7331,"body":"<!-- 143-code-review-status -->","performed_via_github_app":{"id":143}}]`,
+			expectedCalls: []string{"PUT /repos/acme/repo/pulls/42/reviews/143", "GET /repos/acme/repo/issues/42/comments?per_page=100", "DELETE /repos/acme/repo/issues/comments/7331"},
+			expectedError: "delete GitHub progress comment",
+		},
+		{
+			name: "concurrent deletion is harmless",
+			body: "143 Code Reviewer completed its review.", deleteStatus: http.StatusNotFound,
+			comments:      `[{"id":7331,"body":"<!-- 143-code-review-status -->","performed_via_github_app":{"id":143}}]`,
+			expectedCalls: []string{"PUT /repos/acme/repo/pulls/42/reviews/143", "GET /repos/acme/repo/issues/42/comments?per_page=100", "DELETE /repos/acme/repo/issues/comments/7331"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
+			var calls []string
+			var deleted bool
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				t.Error("an unpublished summary must not trigger a GitHub request")
-				w.WriteHeader(http.StatusInternalServerError)
+				calls = append(calls, r.Method+" "+r.URL.RequestURI())
+				w.Header().Set("Content-Type", "application/json")
+				switch r.Method {
+				case http.MethodPut:
+					var body map[string]string
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&body), "formal review update should decode")
+					require.Equal(t, map[string]string{"body": withCodeReviewOutputMarker(tt.body, "review-output")}, body, "formal review should retain the entire result and publication marker")
+					if tt.updateStatus != 0 {
+						w.WriteHeader(tt.updateStatus)
+					}
+					_, err := w.Write([]byte(`{"id":143,"html_url":"https://github.com/acme/repo/pull/42#pullrequestreview-143"}`))
+					require.NoError(t, err, "review update response should write")
+				case http.MethodGet:
+					if r.URL.Path == "/repos/acme/repo/pulls/42/reviews/143" {
+						outputKey := "review-output"
+						if tt.newerReview {
+							outputKey = "newer-output"
+						}
+						require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"id": 143, "body": withCodeReviewOutputMarker("Existing review", outputKey)}), "review readback should identify its exact publication")
+						return
+					}
+					if tt.listStatus != 0 {
+						w.WriteHeader(tt.listStatus)
+						_, err := w.Write([]byte(`{"message":"unavailable"}`))
+						require.NoError(t, err, "lookup failure should write")
+						return
+					}
+					comments := tt.comments
+					if deleted {
+						comments = `[]`
+					}
+					_, err := w.Write([]byte(comments))
+					require.NoError(t, err, "progress lookup response should write")
+				case http.MethodDelete:
+					status := tt.deleteStatus
+					if status == 0 {
+						status = http.StatusNoContent
+					}
+					deleted = status == http.StatusNoContent || status == http.StatusNotFound
+					w.WriteHeader(status)
+				default:
+					t.Errorf("finalization must not create another comment or review: %s", r.Method)
+				}
 			}))
 			defer server.Close()
 
-			submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token"}, WithGitHubSubmitterBaseURL(server.URL))
-			err := submitter.HideReviewSummary(context.Background(), HideReviewSummaryRequest{
-				InstallationID:  99,
-				Repository:      "acme/repo",
-				PullNumber:      42,
-				ReviewID:        143,
-				OutputKey:       "review-output",
-				StatusCommentID: tt.commentID,
-				Summary:         tt.summary,
+			submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token", appID: 143}, WithGitHubSubmitterBaseURL(server.URL))
+			request := SyncReviewSummaryRequest{
+				InstallationID: 99, Repository: "acme/repo", PullNumber: 42,
+				ReviewID: 143, OutputKey: "review-output", Body: tt.body,
+				RemoveProgressComment: !tt.keepProgress,
+			}
+			err := submitter.SyncReviewSummary(context.Background(), request)
+			if tt.expectedError != "" {
+				require.ErrorContains(t, err, tt.expectedError, "failed finalization should be retried without losing the visible result")
+			} else {
+				require.NoError(t, err, "finalization should leave the formal review as the only result")
+			}
+			if tt.repeat {
+				require.NoError(t, submitter.SyncReviewSummary(context.Background(), request), "a retry after cleanup must preserve the same review without recreating a comment")
+			}
+			require.Equal(t, tt.expectedCalls, calls, "finalization should confirm the review before deleting only its own progress comment")
+		})
+	}
+}
+
+func TestGitHubSubmitter_SyncReviewSummaryRequiresBodyAndAppIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		appID         int64
+		body          string
+		expectedError string
+	}{
+		{name: "missing body", appID: 143, expectedError: "review body is required"},
+		{name: "blank body", appID: 143, body: " \n\t ", expectedError: "review body is required"},
+		{name: "unknown app identity", body: "Review complete.", expectedError: "GitHub app identity is required to finalize the review summary"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("invalid finalization must not make a GitHub request")
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			submitter := NewGitHubSubmitter(&tokenStub{token: "ghs_token", appID: tt.appID}, WithGitHubSubmitterBaseURL(server.URL))
+			submitter.appID = tt.appID
+			err := submitter.SyncReviewSummary(context.Background(), SyncReviewSummaryRequest{
+				InstallationID: 99, Repository: "acme/repo", PullNumber: 42,
+				ReviewID: 143, OutputKey: "review-output", Body: tt.body,
 			})
-			require.EqualError(t, err, tt.expectedError, "formal review should retain its fallback until a published comment and visible verdict are available")
+			require.EqualError(t, err, tt.expectedError, "invalid finalization should preserve existing comments")
 		})
 	}
 }
@@ -396,7 +503,7 @@ func TestGitHubSubmitter_SubmitReview(t *testing.T) {
 	require.Equal(t, "/repos/acme/repo/pulls/42/reviews", gotPath, "SubmitReview should call pull review endpoint")
 	require.Equal(t, "APPROVE", gotPayload["event"], "approved decision should map to GitHub approval event")
 	require.Equal(t, "abc123", gotPayload["commit_id"], "SubmitReview should pin reviewed head SHA")
-	require.Equal(t, withCodeReviewOutputMarker("143 Code Reviewer approved this PR", "review-output"), gotPayload["body"], "formal review should retain the visible fallback until the rolling comment is published")
+	require.Equal(t, withCodeReviewOutputMarker("143 Code Reviewer approved this PR", "review-output"), gotPayload["body"], "formal review should retain the complete final result and publication marker")
 	comments, ok := gotPayload["comments"].([]any)
 	require.True(t, ok, "comments should be an array")
 	require.Len(t, comments, 1, "one inline comment should be submitted")
@@ -553,7 +660,7 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingAssessment(t *testing.T) {
 		"\n</details>\n" + codeReviewHistoryEndMarker
 	expectedVisibleBody = models.WithCodeReviewCommentFooter(expectedVisibleBody, footer)
 	require.Equal(t, expectedVisibleBody, result.Body, "updated assessment should return the visible review body with prior decision history")
-	require.Equal(t, withCodeReviewOutputMarker(expectedVisibleBody, "updated-output"), reviewUpdate["body"], "formal review update should retain the visible fallback until the rolling comment is published")
+	require.Equal(t, withCodeReviewOutputMarker(expectedVisibleBody, "updated-output"), reviewUpdate["body"], "formal review update should retain the complete final result and publication marker")
 	require.Equal(t, withCodeReviewFindingMarker("Updated finding.", "finding-key"), commentUpdate["body"], "matching prior inline finding should be updated in place with a stable reassessment marker")
 	require.Equal(t, []SubmitReviewPostedComment{{
 		ID: 456, Path: "src/auth/session.go", Line: 42,
@@ -678,7 +785,7 @@ func TestGitHubSubmitter_SubmitReviewPromotesUpdatedAssessmentWithFormalApproval
 
 	require.NoError(t, err, "passing reassessment should update the sticky assessment and submit a formal approval")
 	require.Equal(t, int64(143), result.ID, "sticky assessment should remain the persisted review reference")
-	require.Equal(t, withCodeReviewOutputMarker("143 Code Reviewer approved this PR.", "approved-output"), reviewUpdate["body"], "formal review update should retain the visible fallback until the rolling comment is published")
+	require.Equal(t, withCodeReviewOutputMarker("143 Code Reviewer approved this PR.", "approved-output"), reviewUpdate["body"], "formal review update should retain the complete final result and publication marker")
 	require.Equal(t, "APPROVE", approvalPost["event"], "passing reassessment should create a real GitHub approval")
 	require.Equal(t, "new-head", approvalPost["commit_id"], "formal approval should target the reassessed head")
 	require.Contains(t, approvalPost["body"], "143-code-review-output", "formal approval should carry a loop-suppression marker")
@@ -887,7 +994,7 @@ func TestGitHubSubmitter_SubmitReviewUpdatesExistingMarkedInlineComment(t *testi
 
 	require.NoError(t, err, "SubmitReview should update a matching marked inline comment")
 	require.Equal(t, int64(123), result.ID, "SubmitReview should still submit the formal GitHub review")
-	require.Equal(t, withCodeReviewOutputMarker("Review complete.", outputKey), postBody["body"], "formal review should retain the visible fallback until the rolling comment is published")
+	require.Equal(t, withCodeReviewOutputMarker("Review complete.", outputKey), postBody["body"], "formal review should retain the complete final result and publication marker")
 	require.Equal(t, withCodeReviewFindingMarker("New body.", codeReviewFindingMarkerKey(outputKey, "finding-key")), patchBody["body"], "SubmitReview should update the stale inline comment body")
 	require.NotContains(t, postBody, "comments", "SubmitReview should not post a duplicate inline comment when an existing marker was updated")
 	require.Equal(t, []SubmitReviewPostedComment{
@@ -958,7 +1065,7 @@ func TestGitHubSubmitter_SubmitReviewDoesNotReuseMarkedInlineCommentFromDifferen
 
 	require.NoError(t, err, "SubmitReview should post a fresh inline comment when only old-output markers exist")
 	require.False(t, patchCalled, "SubmitReview should not patch comments marked for a different review output")
-	require.Equal(t, withCodeReviewOutputMarker("Review complete.", outputKey), postBody["body"], "formal review should retain the visible fallback until the rolling comment is published")
+	require.Equal(t, withCodeReviewOutputMarker("Review complete.", outputKey), postBody["body"], "formal review should retain the complete final result and publication marker")
 	comments, ok := postBody["comments"].([]any)
 	require.True(t, ok, "new review payload should include inline comments")
 	require.Len(t, comments, 1, "new review payload should include the finding for the new output")

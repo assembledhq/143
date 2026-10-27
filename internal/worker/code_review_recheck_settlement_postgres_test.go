@@ -184,9 +184,9 @@ func (p *recheckSettlementPublisher) UpsertReviewStatusComment(context.Context, 
 	return 0, errors.New("synthetic completion must queue status synchronization rather than call GitHub")
 }
 
-func (p *recheckSettlementPublisher) HideReviewSummary(context.Context, codereviewsvc.HideReviewSummaryRequest) error {
-	p.statusCalls = append(p.statusCalls, "hide")
-	return errors.New("synthetic completion must not hide an external review")
+func (p *recheckSettlementPublisher) SyncReviewSummary(context.Context, codereviewsvc.SyncReviewSummaryRequest) error {
+	p.statusCalls = append(p.statusCalls, "finalize")
+	return errors.New("synthetic completion must not finalize an external review")
 }
 
 var errRecheckPublicationCommit = errors.New("synthetic recheck publication commit failure")

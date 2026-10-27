@@ -226,6 +226,23 @@ func (s *PullRequestStore) SetCodeReviewStatusCommentID(ctx context.Context, org
 	return nil
 }
 
+// ClearCodeReviewStatusCommentID forgets the temporary progress comment after
+// the formal review is confirmed and its progress comment is removed.
+func (s *PullRequestStore) ClearCodeReviewStatusCommentID(ctx context.Context, orgID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE pull_requests
+		SET code_review_status_comment_id = NULL
+		WHERE org_id = @org_id
+		  AND id = @id`, pgx.NamedArgs{
+		"org_id": orgID,
+		"id":     id,
+	})
+	if err != nil {
+		return fmt.Errorf("clear code review status comment id: %w", err)
+	}
+	return nil
+}
+
 func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error) {
 	return s.GetPrimaryBySessionID(ctx, orgID, sessionID)
 }

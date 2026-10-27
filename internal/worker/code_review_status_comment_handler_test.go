@@ -30,14 +30,16 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 		lockedReviewID            *int64
 		previousFinalBody         *string
 		previousHeadSHA           string
+		previousPublishedReview   bool
 		storedCommentID           any
 		expectedExistingCommentID *int64
 		expectedBody              string
-		expectedSummary           string
 		expectedAdditionalBody    string
+		expectedHiddenBody        string
 		expectReassessmentHistory bool
 		expectedCalls             []string
-		hideErr                   error
+		finalizeErr               error
+		clearErr                  error
 		expectErr                 bool
 	}{
 		{
@@ -88,6 +90,18 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			expectedCalls:             []string{"upsert"},
 		},
 		{
+			name:                    "links to the prior formal review without repeating its verdict",
+			initialStatus:           models.CodeReviewSessionStatusRunning,
+			lockedStatus:            models.CodeReviewSessionStatusRunning,
+			previousFinalBody:       statusCommentStringPtr("❌ **143 Code Reviewer needs human review**\n\n**Why:** Prior sensitive workflow change."),
+			previousHeadSHA:         "previous-head-sha",
+			previousPublishedReview: true,
+			expectedBody:            "143 Code Reviewer has started reviewing this pull request",
+			expectedAdditionalBody:  "[View previous review](https://github.com/acme/repo/pull/42#pullrequestreview-123)",
+			expectedHiddenBody:      "Prior sensitive workflow change.",
+			expectedCalls:           []string{"finalize", "upsert"},
+		},
+		{
 			name:                      "refreshes state under lock before publishing completed result",
 			initialStatus:             models.CodeReviewSessionStatusRunning,
 			lockedStatus:              models.CodeReviewSessionStatusCompleted,
@@ -95,12 +109,11 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			lockedReviewID:            statusCommentInt64Ptr(143),
 			storedCommentID:           int64(7331),
 			expectedExistingCommentID: statusCommentInt64Ptr(7331),
-			expectedBody:              "143 Code Reviewer approved this PR.",
-			expectedSummary:           "143 Code Reviewer approved this PR.",
-			expectedCalls:             []string{"upsert", "hide"},
+			expectedBody:              "143 Code Reviewer approved this PR.\n\nWhy: The change met policy.",
+			expectedCalls:             []string{"finalize"},
 		},
 		{
-			name:                      "retries when hiding fallback summary fails after publishing completed result",
+			name:                      "preserves progress when finalization fails",
 			initialStatus:             models.CodeReviewSessionStatusRunning,
 			lockedStatus:              models.CodeReviewSessionStatusCompleted,
 			lockedFinalBody:           statusCommentStringPtr("143 Code Reviewer did not approve this PR."),
@@ -108,13 +121,12 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			storedCommentID:           int64(7331),
 			expectedExistingCommentID: statusCommentInt64Ptr(7331),
 			expectedBody:              "143 Code Reviewer did not approve this PR.",
-			expectedSummary:           "143 Code Reviewer did not approve this PR.",
-			expectedCalls:             []string{"upsert", "hide"},
-			hideErr:                   errors.New("github unavailable"),
+			expectedCalls:             []string{"finalize"},
+			finalizeErr:               errors.New("github unavailable"),
 			expectErr:                 true,
 		},
 		{
-			name:                      "hides a published fallback when the review later fails",
+			name:                      "replaces a stale recommendation with the failure before removing progress",
 			initialStatus:             models.CodeReviewSessionStatusRunning,
 			lockedStatus:              models.CodeReviewSessionStatusFailed,
 			lockedFinalBody:           statusCommentStringPtr("Stale visible recommendation."),
@@ -122,8 +134,26 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			storedCommentID:           int64(7331),
 			expectedExistingCommentID: statusCommentInt64Ptr(7331),
 			expectedBody:              "143 Code Reviewer could not complete this review.",
-			expectedSummary:           "143 Code Reviewer could not complete this review.",
-			expectedCalls:             []string{"upsert", "hide"},
+			expectedCalls:             []string{"finalize"},
+		},
+		{
+			name:            "keeps the result visible when no formal review was published",
+			initialStatus:   models.CodeReviewSessionStatusRunning,
+			lockedStatus:    models.CodeReviewSessionStatusCompleted,
+			lockedFinalBody: statusCommentStringPtr("❌ **143 Code Reviewer needs human review**\n\n**Why:** Publication is unavailable."),
+			expectedBody:    "❌ **143 Code Reviewer needs human review**\n\n**Why:** Publication is unavailable.",
+			expectedCalls:   []string{"upsert"},
+		},
+		{
+			name:            "retries if clearing the deleted progress identity fails",
+			initialStatus:   models.CodeReviewSessionStatusRunning,
+			lockedStatus:    models.CodeReviewSessionStatusCompleted,
+			lockedFinalBody: statusCommentStringPtr("143 Code Reviewer completed its review."),
+			lockedReviewID:  statusCommentInt64Ptr(143),
+			expectedBody:    "143 Code Reviewer completed its review.",
+			expectedCalls:   []string{"finalize"},
+			clearErr:        errors.New("database unavailable"),
+			expectErr:       true,
 		},
 		{
 			name:          "explains that a changed commit receives a fresh approvable assessment",
@@ -195,30 +225,48 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 				previousRows := newCodeReviewMetadataRows()
 				if tt.previousFinalBody != nil {
 					previousDecision := models.CodeReviewDecisionNeedsHumanReview
+					var previousReviewID *int64
+					var previousReviewURL *string
+					if tt.previousPublishedReview {
+						previousReviewID = statusCommentInt64Ptr(123)
+						previousReviewURL = statusCommentStringPtr("https://github.com/acme/repo/pull/42#pullrequestreview-123")
+					}
 					previousRows.AddRow(
 						uuid.New(), orgID, uuid.New(), repositoryID, pullRequestID, policyID,
 						"base", tt.previousHeadSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
 						models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &previousDecision, nil, false, nil,
-						"previous-output-key", nil, nil, nil, tt.previousFinalBody, nil, &now, now.Add(-time.Minute),
+						"previous-output-key", nil, previousReviewID, previousReviewURL, tt.previousFinalBody, nil, &now, now.Add(-time.Minute),
 					)
 				}
 				mock.ExpectQuery("(?s)FROM code_review_session_metadata.*status = 'completed'.*decision IS NOT NULL").
 					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID}).
 					WillReturnRows(previousRows)
 			}
-			mock.ExpectQuery("SELECT code_review_status_comment_id").
-				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID}).
-				WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(tt.storedCommentID))
-			mock.ExpectQuery("(?s)UPDATE pull_requests.*code_review_status_comment_id = @comment_id").
-				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID, "comment_id": int64(7331)}).
-				WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(int64(7331)))
+			if codeReviewMetadataTerminal(tt.lockedStatus) && tt.lockedReviewID != nil {
+				if tt.finalizeErr == nil {
+					clear := mock.ExpectExec("(?s)UPDATE pull_requests.*code_review_status_comment_id = NULL.*org_id = @org_id.*id = @id").
+						WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID})
+					if tt.clearErr != nil {
+						clear.WillReturnError(tt.clearErr)
+					} else {
+						clear.WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+					}
+				}
+			} else {
+				mock.ExpectQuery("SELECT code_review_status_comment_id").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID}).
+					WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(tt.storedCommentID))
+				mock.ExpectQuery("(?s)UPDATE pull_requests.*code_review_status_comment_id = @comment_id").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID, "comment_id": int64(7331)}).
+					WillReturnRows(pgxmock.NewRows([]string{"code_review_status_comment_id"}).AddRow(int64(7331)))
+			}
 			if tt.expectErr {
 				mock.ExpectRollback()
 			} else {
 				mock.ExpectCommit()
 			}
 
-			submitter := &statusCommentSubmitterStub{commentID: 7331, hideErr: tt.hideErr}
+			submitter := &statusCommentSubmitterStub{commentID: 7331, finalizeErr: tt.finalizeErr}
 			payload, err := json.Marshal(codereviewsvc.SyncReviewStatusCommentJobPayload{
 				OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID, PullRequestID: pullRequestID,
 			})
@@ -235,43 +283,53 @@ func TestSyncCodeReviewStatusCommentHandlerRendersCurrentDurableState(t *testing
 			}, zerolog.Nop())(context.Background(), models.JobTypeSyncCodeReviewStatusComment, payload)
 
 			if tt.expectErr {
-				require.Error(t, err, "status comment handler should retry when fallback summary hiding fails")
+				require.Error(t, err, "failed finalization should retain the durable progress comment and retry")
 			} else {
 				require.NoError(t, err, "status comment handler should synchronize the current review state")
 			}
-			require.Equal(t, int64(99), submitter.request.InstallationID, "status comment should use the repository installation")
-			require.Equal(t, "acme/repo", submitter.request.Repository, "status comment should target the pull request repository")
-			require.Equal(t, 42, submitter.request.PullNumber, "status comment should target the pull request number")
-			require.Equal(t, tt.expectedExistingCommentID, submitter.request.ExistingCommentID, "status comment should use the durable GitHub comment id when available")
-			require.Contains(t, submitter.request.Body, tt.expectedBody, "status comment should render the current durable outcome")
+			var publishedBody string
+			if codeReviewMetadataTerminal(tt.lockedStatus) && tt.lockedReviewID != nil {
+				publishedBody = submitter.finalRequest.Body
+				require.Equal(t, codereviewsvc.SyncReviewSummaryRequest{
+					InstallationID: 99, Repository: "acme/repo", PullNumber: 42,
+					ReviewID: *tt.lockedReviewID, OutputKey: "output-key", Body: publishedBody,
+					RemoveProgressComment: true,
+				}, submitter.finalRequest, "terminal result should finalize the existing formal review")
+				require.Equal(t, codereviewsvc.UpsertReviewStatusCommentRequest{}, submitter.request, "published terminal result must not create or refresh a duplicate issue comment")
+			} else {
+				publishedBody = submitter.request.Body
+				require.Equal(t, int64(99), submitter.request.InstallationID, "status comment should use the repository installation")
+				require.Equal(t, "acme/repo", submitter.request.Repository, "status comment should target the pull request repository")
+				require.Equal(t, 42, submitter.request.PullNumber, "status comment should target the pull request number")
+				require.Equal(t, tt.expectedExistingCommentID, submitter.request.ExistingCommentID, "status comment should use the durable GitHub comment id when available")
+				if tt.previousPublishedReview {
+					require.Equal(t, int64(123), submitter.finalRequest.ReviewID, "reassessment should restore the previous formal review before replacing its issue summary")
+					require.Equal(t, "previous-output-key", submitter.finalRequest.OutputKey, "restoring the prior review must retain its publication identity")
+					require.Contains(t, submitter.finalRequest.Body, *tt.previousFinalBody, "previous review must recover its full persisted result")
+					require.False(t, submitter.finalRequest.RemoveProgressComment, "restoring prior output must preserve current progress")
+				}
+			}
+			require.Contains(t, publishedBody, tt.expectedBody, "status comment should render the current durable outcome")
 			if tt.expectedAdditionalBody != "" {
-				require.Contains(t, submitter.request.Body, tt.expectedAdditionalBody, "status comment should retain the complete previous verdict during reassessment")
+				require.Contains(t, publishedBody, tt.expectedAdditionalBody, "status comment should retain the complete previous verdict during reassessment")
+			}
+			if tt.expectedHiddenBody != "" {
+				require.NotContains(t, publishedBody, tt.expectedHiddenBody, "progress should link to the existing formal result rather than duplicate it")
 			}
 			if tt.expectReassessmentHistory {
 				expectedEntry := "- <relative-time datetime=\"2026-09-25T12:23:16Z\">Sep 25, 2026 at 8:23 AM EDT" +
 					"</relative-time> — **Reassessment started** for `head` — [Follow the review session](https://143.test/sessions/" + sessionID.String() + ")"
-				require.Contains(t, submitter.request.Body, expectedEntry, "reassessment history should identify when the active assessment started and link to its session")
-				require.NotContains(t, submitter.request.Body, "143 Code Reviewer is reassessing this pull request", "reassessment status should appear in history instead of a standalone paragraph")
-				require.NotContains(t, submitter.request.Body, "remains visible until the new review finishes", "reassessment history should replace the redundant visibility explanation")
+				require.Contains(t, publishedBody, expectedEntry, "reassessment history should identify when the active assessment started and link to its session")
+				require.NotContains(t, publishedBody, "143 Code Reviewer is reassessing this pull request", "reassessment status should appear in history instead of a standalone paragraph")
+				require.NotContains(t, publishedBody, "remains visible until the new review finishes", "reassessment history should replace the redundant visibility explanation")
 			}
-			require.Contains(t, submitter.request.Body, "https://143.test/sessions/"+sessionID.String(), "status comment should link to the review session")
+			require.Contains(t, publishedBody, "https://143.test/sessions/"+sessionID.String(), "status comment should link to the review session")
 			if tt.schedulingEnabled && codeReviewMetadataTerminal(tt.lockedStatus) && tt.lockedStatus != models.CodeReviewSessionStatusStale {
-				require.Contains(t, submitter.request.Body, "[Request review](https://143.test/code-reviews?review_now="+sessionID.String()+")", "enabled worker publishes a usable review action for a terminal unsuccessful review")
+				require.Contains(t, publishedBody, "[Request review](https://143.test/code-reviews?review_now="+sessionID.String()+")", "enabled worker publishes a usable review action for a terminal unsuccessful review")
 			} else {
-				require.NotContains(t, submitter.request.Body, "[Request review]", "unavailable scheduling or active review omits the action")
+				require.NotContains(t, publishedBody, "[Request review]", "unavailable scheduling or active review omits the action")
 			}
-			require.Equal(t, tt.expectedCalls, submitter.calls, "fallback summary should only be hidden after the rolling comment is published")
-			if tt.lockedReviewID != nil {
-				require.Equal(t, codereviewsvc.HideReviewSummaryRequest{
-					InstallationID:  99,
-					Repository:      "acme/repo",
-					PullNumber:      42,
-					ReviewID:        *tt.lockedReviewID,
-					OutputKey:       "output-key",
-					StatusCommentID: 7331,
-					Summary:         tt.expectedSummary,
-				}, submitter.hideRequest, "completed review should hide the persisted fallback summary")
-			}
+			require.Equal(t, tt.expectedCalls, submitter.calls, "completed reviews should finalize once while progress updates use only the issue comment")
 			require.NoError(t, mock.ExpectationsWereMet(), "status comment handler should use org-scoped review, repository, and pull request reads")
 		})
 	}
@@ -324,12 +382,12 @@ func TestSyncCodeReviewStatusCommentHandlerSkipsSupersededSession(t *testing.T) 
 }
 
 type statusCommentSubmitterStub struct {
-	request     codereviewsvc.UpsertReviewStatusCommentRequest
-	hideRequest codereviewsvc.HideReviewSummaryRequest
-	commentID   int64
-	err         error
-	hideErr     error
-	calls       []string
+	request      codereviewsvc.UpsertReviewStatusCommentRequest
+	finalRequest codereviewsvc.SyncReviewSummaryRequest
+	commentID    int64
+	err          error
+	finalizeErr  error
+	calls        []string
 }
 
 func (s *statusCommentSubmitterStub) SubmitReview(context.Context, codereviewsvc.SubmitReviewRequest) (codereviewsvc.SubmitReviewResult, error) {
@@ -342,10 +400,10 @@ func (s *statusCommentSubmitterStub) UpsertReviewStatusComment(_ context.Context
 	return s.commentID, s.err
 }
 
-func (s *statusCommentSubmitterStub) HideReviewSummary(_ context.Context, request codereviewsvc.HideReviewSummaryRequest) error {
-	s.hideRequest = request
-	s.calls = append(s.calls, "hide")
-	return s.hideErr
+func (s *statusCommentSubmitterStub) SyncReviewSummary(_ context.Context, request codereviewsvc.SyncReviewSummaryRequest) error {
+	s.finalRequest = request
+	s.calls = append(s.calls, "finalize")
+	return s.finalizeErr
 }
 
 func statusCommentStringPtr(value string) *string {
