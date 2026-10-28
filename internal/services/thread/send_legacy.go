@@ -39,17 +39,18 @@ type sendGuardError struct{ cause error }
 
 func (e *sendGuardError) Error() string { return e.cause.Error() }
 func (e *sendGuardError) Unwrap() error { return e.cause }
-func sendMustStop(err error) bool {
-	var guard *sendGuardError
-	return errors.Is(err, ErrCommandOutcomeUnknown) || errors.As(err, &guard)
+
+// legacySendDomainError retains a handler-facing sentinel while preserving
+// the cause's original error shape for the transaction runner. A synthetic
+// two-error unwrap would hide a plain retryable SQLSTATE behind a join.
+type legacySendDomainError struct {
+	domain error
+	cause  error
 }
-func sendClaimMustStop(err error) bool {
-	if sendMustStop(err) {
-		return true
-	}
-	_, confirmed := err.(*db.LifecycleContentionError)
-	return confirmed
-}
+
+func (e *legacySendDomainError) Error() string        { return e.domain.Error() + ": " + e.cause.Error() }
+func (e *legacySendDomainError) Is(target error) bool { return target == e.domain }
+func (e *legacySendDomainError) Unwrap() error        { return e.cause }
 
 type sendIngressContextKey struct{}
 type sendDiagnosticContextKey struct{}
@@ -91,94 +92,33 @@ func (s *Service) runSendUnit(ctx context.Context, work func(context.Context, pg
 	}
 	ingress, _ := ctx.Value(sendIngressContextKey{}).(db.LifecycleIngress)
 	diagnostic, _ := ctx.Value(sendDiagnosticContextKey{}).(sendDiagnostic)
+	s.logger.Warn().Err(err).
+		Str("diagnostic_id", diagnostic.id.String()).
+		Str("ingress_kind", ingress.Kind()).
+		Msg("thread message command outcome unknown")
 	return &CommandOutcomeUnknownError{Ingress: ingress, DiagnosticID: diagnostic.id, ClientMessageID: diagnostic.clientKey, Cause: err}
 }
 
-func (s *Service) runLegacySendUnit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, work func(context.Context, pgx.Tx) error) error {
-	return s.runSendUnit(ctx, func(unitCtx context.Context, tx pgx.Tx) error {
+// runLegacySendUnit owns the entire legacy send. Every retry clears all staged
+// values before acquiring fresh mode, parent and ordered-lane guards.
+func (s *Service) runLegacySendUnit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, work func(context.Context, pgx.Tx) (legacySendAttempt, error)) (legacySendAttempt, error) {
+	var staged legacySendAttempt
+	err := s.runSendUnit(ctx, func(unitCtx context.Context, tx pgx.Tx) error {
+		staged = legacySendAttempt{}
 		if err := db.RequireLegacyThreadSendScopeInTx(unitCtx, tx, orgID, sessionID, threadID); err != nil {
 			return &sendGuardError{cause: err}
 		}
-		return work(unitCtx, tx)
-	})
-}
-
-func (s *Service) claimLegacyThread(ctx context.Context, input SendMessageInput, resume bool) (models.SessionThread, error) {
-	var row models.SessionThread
-	var effects db.ThreadClaimPersistenceEffects
-	var miss bool
-	err := s.runLegacySendUnit(ctx, input.OrgID, input.SessionID, input.ThreadID, func(unitCtx context.Context, tx pgx.Tx) error {
-		row, effects, miss = models.SessionThread{}, db.ThreadClaimPersistenceEffects{}, false
-		var err error
-		if resume {
-			row, effects, err = s.send.Legacy.ClaimResumeThreadInTx(unitCtx, tx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
-		} else {
-			row, effects, err = s.send.Legacy.ClaimIdleThreadInTx(unitCtx, tx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
+		attempt, err := work(unitCtx, tx)
+		if err != nil {
+			return err
 		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			miss = true
-			return nil
-		}
-		return err
+		staged = attempt
+		return nil
 	})
 	if err != nil {
-		return models.SessionThread{}, err
+		return legacySendAttempt{}, err
 	}
-	if !miss {
-		s.send.Effects.PublishThreadClaim(ctx, input.OrgID, effects)
-		return row, nil
-	}
-	// The diagnostic deliberately runs after the original mutation unit closes.
-	var limited bool
-	if resume {
-		limited, err = s.send.Legacy.IsAtResumeClaimLimit(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
-	} else {
-		limited, err = s.send.Legacy.IsAtIdleClaimLimit(ctx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
-	}
-	if err != nil {
-		s.logger.Warn().Err(err).Str("thread_id", input.ThreadID.String()).Msg("failed to diagnose legacy thread claim limit")
-	} else if limited {
-		return models.SessionThread{}, db.ErrThreadRunningLimitReached
-	}
-	return models.SessionThread{}, pgx.ErrNoRows
-}
-
-func (s *Service) claimLegacySession(ctx context.Context, orgID, sessionID, threadID uuid.UUID, resume bool) (models.Session, error) {
-	var row models.Session
-	var miss bool
-	err := s.runLegacySendUnit(ctx, orgID, sessionID, threadID, func(unitCtx context.Context, tx pgx.Tx) error {
-		row, miss = models.Session{}, false
-		var err error
-		if resume {
-			row, err = s.send.Legacy.ClaimResumeSessionInTx(unitCtx, tx, orgID, sessionID)
-		} else {
-			row, err = s.send.Legacy.ClaimIdleSessionInTx(unitCtx, tx, orgID, sessionID)
-		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			miss = true
-			return nil
-		}
-		return err
-	})
-	if err != nil {
-		return models.Session{}, err
-	}
-	if miss {
-		return models.Session{}, pgx.ErrNoRows
-	}
-	return row, nil // Parent claims had no legacy notification.
-}
-
-func (s *Service) createLegacyMessage(ctx context.Context, input SendMessageInput, message *models.SessionMessage) error {
-	original := *message
-	err := s.runLegacySendUnit(ctx, input.OrgID, input.SessionID, input.ThreadID, func(unitCtx context.Context, tx pgx.Tx) error {
-		*message = original // The established store API returns ID/time through this pointer.
-		return s.send.Legacy.CreateMessageInTx(unitCtx, tx, input.OrgID, message)
-	})
-	if err != nil {
-		*message = original
-	}
-	return err
+	return staged, nil
 }
 
 func (s *Service) appendLegacyInboxInTx(ctx context.Context, tx pgx.Tx, input SendMessageInput, message *models.SessionMessage) (models.ThreadInboxEntry, error) {
@@ -187,80 +127,4 @@ func (s *Service) appendLegacyInboxInTx(ctx context.Context, tx pgx.Tx, input Se
 		return models.ThreadInboxEntry{}, err
 	}
 	return s.send.Legacy.AppendInboxInTx(ctx, tx, input.OrgID, params)
-}
-
-func (s *Service) incrementLegacyPending(ctx context.Context, input SendMessageInput) error {
-	var effects db.ThreadPendingMessagePersistenceEffects
-	err := s.runLegacySendUnit(ctx, input.OrgID, input.SessionID, input.ThreadID, func(unitCtx context.Context, tx pgx.Tx) error {
-		effects = db.ThreadPendingMessagePersistenceEffects{}
-		var err error
-		effects, err = s.send.Legacy.IncrementPendingMessagesInTx(unitCtx, tx, input.OrgID, input.ThreadID)
-		return err
-	})
-	if err == nil {
-		s.send.Effects.PublishThreadPending(ctx, input.OrgID, effects)
-	}
-	return err
-}
-
-func (s *Service) enqueueLegacySend(ctx context.Context, input SendMessageInput, opts db.EnqueueOpts) error {
-	var jobID uuid.UUID
-	err := s.runLegacySendUnit(ctx, input.OrgID, input.SessionID, input.ThreadID, func(unitCtx context.Context, tx pgx.Tx) error {
-		jobID = uuid.Nil
-		var err error
-		jobID, err = s.send.Legacy.EnqueueInTx(unitCtx, tx, input.OrgID, opts)
-		return err
-	})
-	if err == nil {
-		s.send.Effects.NotifyJob(ctx, jobID)
-	}
-	return err
-}
-
-func (s *Service) updateLegacyThreadStatus(ctx context.Context, orgID, sessionID, threadID uuid.UUID, status models.ThreadStatus) error {
-	var effects db.ThreadPersistenceEffects
-	err := s.runLegacySendUnit(ctx, orgID, sessionID, threadID, func(unitCtx context.Context, tx pgx.Tx) error {
-		effects = db.ThreadPersistenceEffects{}
-		var err error
-		effects, err = s.send.Legacy.UpdateThreadStatusInTx(unitCtx, tx, orgID, threadID, status)
-		return err
-	})
-	if err == nil {
-		s.send.Effects.PublishThreadStatus(ctx, orgID, effects)
-	}
-	return err
-}
-
-func (s *Service) updateLegacySessionStatus(ctx context.Context, orgID, sessionID, threadID uuid.UUID, status models.SessionStatus) error {
-	var row models.Session
-	err := s.runLegacySendUnit(ctx, orgID, sessionID, threadID, func(unitCtx context.Context, tx pgx.Tx) error {
-		row = models.Session{}
-		var err error
-		row, err = s.send.Legacy.UpdateSessionStatusInTx(unitCtx, tx, orgID, sessionID, status)
-		return err
-	})
-	if err == nil {
-		s.send.Effects.PublishSessionStatus(ctx, orgID, row)
-	}
-	return err
-}
-
-func (s *Service) enqueueLegacyLiveThreadInboxDelivery(ctx context.Context, input SendMessageInput) error {
-	if s.inboxStore == nil {
-		return nil
-	}
-	key := deliverThreadInboxJobType + ":" + input.ThreadID.String()
-	var target *string
-	if s.runtimeOwnerStore != nil {
-		runtime, err := s.runtimeOwnerStore.GetActiveByThread(ctx, input.OrgID, input.ThreadID)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("get live thread runtime owner: %w", err)
-		}
-		if err == nil && runtime.OwnerNodeID != "" {
-			target = &runtime.OwnerNodeID
-		}
-	}
-	return s.enqueueLegacySend(ctx, input, db.EnqueueOpts{Queue: deliverThreadInboxQueue, JobType: deliverThreadInboxJobType,
-		Payload:  map[string]string{"session_id": input.SessionID.String(), "thread_id": input.ThreadID.String(), "org_id": input.OrgID.String()},
-		Priority: 7, DedupeKey: &key, TargetNodeID: target})
 }

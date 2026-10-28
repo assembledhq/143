@@ -14,11 +14,18 @@ import (
 
 var ErrSendNormalizing = errors.New("THREAD_SEND_NORMALIZING")
 
+// ErrCallerCommandRequiresLegacy refuses caller correlation that has no active
+// admission contract. It must precede active replay as well as new admission.
+var ErrCallerCommandRequiresLegacy = errors.New("caller command requires legacy thread send")
+
 // SendMessage observes the branch once, then uses only fixed-branch guards.
 // Entry observation may retry DB-only work, but no captured fence escapes an
 // aborted attempt. The active mutation runner never captures a new expectation.
 func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*SendMessageResult, error) {
 	input = cloneSendMessageInput(input)
+	if err := ValidateCallerSendCommandProof(input); err != nil {
+		return nil, err
+	}
 	// Correlation only, including legacy shapes that cannot form a valid v1
 	// command. This UUID is never persisted or used as admission authority.
 	ctx = context.WithValue(ctx, sendDiagnosticContextKey{}, sendDiagnostic{id: uuid.New(), clientKey: input.ClientMessageID})
@@ -43,6 +50,9 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (*Sen
 		case db.ThreadSendModeNormalizing:
 			return ErrSendNormalizing
 		case db.ThreadSendModeActive:
+			if input.CallerCommand != nil {
+				return ErrCallerCommandRequiresLegacy
+			}
 			if preparationErr != nil {
 				return preparationErr
 			}
@@ -194,6 +204,10 @@ func cloneSendMessageInput(input SendMessageInput) SendMessageInput {
 	if input.ContinuationDedupeKeyOverride != nil {
 		key := *input.ContinuationDedupeKeyOverride
 		input.ContinuationDedupeKeyOverride = &key
+	}
+	if input.CallerCommand != nil {
+		proof := *input.CallerCommand
+		input.CallerCommand = &proof
 	}
 	return input
 }

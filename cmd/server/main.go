@@ -240,7 +240,14 @@ func main() {
 	// changes here as it runs reviews; the API subscribes for the live code
 	// reviews list. nil-safe when redisClient is nil (publish becomes a no-op).
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
-	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewTransactions, err := db.NewThreadSendTransactions(pool)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to construct worker code review terminal transactions")
+	}
+	codeReviewStore, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, codeReviewTransactions)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to construct worker code review terminal store")
+	}
 	codeReviewStore.SetStreams(codeReviewStreams)
 	codeReviewStore.SetLogger(logger)
 
@@ -496,7 +503,10 @@ func main() {
 
 		issueStore := db.NewIssueStore(pool)
 		sessionStore := db.NewSessionStore(pool)
-		jobStore = db.NewJobStore(pool)
+		jobStore, err = db.NewJobStoreWithCodeReviewTerminalTransactions(pool, codeReviewTransactions)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("failed to construct worker code review retirement store")
+		}
 		codeReviewStore.SetJobStore(jobStore)
 		codeReviewRecheckStore := db.NewCodeReviewRecheckStore(pool)
 		codeReviewRecheckStore.SetJobStore(jobStore)
@@ -833,6 +843,7 @@ func main() {
 			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 			cfg.SandboxHostID(),
 			reviewAdmissionEvidence,
+			worker.WithCodeReviewTerminalStore(jobStore),
 			worker.WithLeaseRenewer(db.NewJobStore(controlPlaneDB)),
 		)
 		if workerPreviewStore != nil && cfg.NodeID != "" {
@@ -913,6 +924,7 @@ func main() {
 			cluster.NewAutomationTargetSweepLock(pool),
 		)
 		scheduler.SetCodeReviewScheduleReconciler(db.NewCodeReviewScheduleStore(pool))
+		scheduler.SetCallerSendWakeReconciler(db.NewCallerSendWakeStore(pool))
 		scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
 		scheduler.SetSessionStore(sessionStore)
 		scheduler.SetDomainRecheck(
@@ -1788,6 +1800,7 @@ func buildServices(
 			Sessions: sessionStore,
 			Threads:  threadSvc,
 		},
+		reviewloopservice.WithStartTransactions(threadSendDependencies.Transactions),
 	)
 
 	logger.Info().
@@ -1902,7 +1915,10 @@ func buildServices(
 		}
 	}
 
-	codeReviewLifecycleStore := db.NewCodeReviewStore(pool)
+	codeReviewLifecycleStore, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, threadSendDependencies.Transactions)
+	if err != nil {
+		return nil, fmt.Errorf("construct worker-services code review terminal store: %w", err)
+	}
 	codeReviewLifecycleStore.SetJobStore(jobStore)
 	codeReviewLifecycleStore.SetStreams(cache.NewCodeReviewStreams(redisClient, logger))
 	codeReviewLifecycleStore.SetLogger(logger)

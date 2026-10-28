@@ -56,7 +56,6 @@ type messageAdmissionSemanticCommand struct {
 	PostSuccessAction             MessagePostSuccessAction      `json:"post_success_action"`
 	PostSuccessAuthorMode         MessagePostSuccessAuthorMode  `json:"post_success_author_mode"`
 	ContinuationDedupeKeyOverride *string                       `json:"continuation_dedupe_key_override"`
-	MaxAttempts                   int                           `json:"max_attempts"`
 }
 
 type messageAdmissionDispatchRow struct {
@@ -108,7 +107,7 @@ func decodeMessageAdmissionEnvelope(row messageAdmissionDispatchRow, orgID, sess
 		return messageAdmissionEnvelope{}, MessageAdmission{}, ErrLifecycleConsumerReconciliation
 	}
 	var semantic messageAdmissionSemanticCommand
-	if json.Unmarshal([]byte(envelope.SemanticPayload), &semantic) != nil || semantic.Version != 1 || semantic.OrgID != orgID || semantic.SessionID != sessionID || semantic.ThreadID != laneID || semantic.MaxAttempts != envelope.MaxAttempts {
+	if json.Unmarshal([]byte(envelope.SemanticPayload), &semantic) != nil || semantic.Version != 1 || semantic.OrgID != orgID || semantic.SessionID != sessionID || semantic.ThreadID != laneID {
 		return messageAdmissionEnvelope{}, MessageAdmission{}, ErrLifecycleConsumerReconciliation
 	}
 	if envelope.Disposition != MessageAdmissionNewJob && len(semantic.ResolveReviewCommentIDs) > 0 {
@@ -292,14 +291,29 @@ func FindMessageAdmissionReplayInTx(ctx context.Context, tx pgx.Tx, orgID, sessi
 			return Admission{}, false, err
 		}
 		var exact bool
+		var currentPayload []byte
 		// Current scheduling/target/lease may legitimately change after this
 		// acceptance. They cannot destroy an immutable accepted receipt; return
 		// its original concrete options instead of adopting current ones.
-		err = tx.QueryRow(ctx, `SELECT queue='agent' AND job_type='continue_session' AND payload::text=($3::jsonb)::text FROM jobs WHERE org_id=$1 AND id=$2`, orgID, a.jobID, payload).Scan(&exact)
+		// Existing attempt/retry writers add only the six pinned progress keys.
+		// All A1-written keys (including queued message, lane and complete binding)
+		// and every other key remain exact. Bound returned bytes in this same-row
+		// read; filtering an oversized row away would falsely report a missing job.
+		err = tx.QueryRow(ctx, `SELECT queue='agent' AND job_type='continue_session' AND max_attempts=$4
+ AND (payload-$5::text[])::text=($3::jsonb)::text,
+ CASE WHEN octet_length(payload::text)<=$6 THEN payload ELSE NULL END
+ FROM jobs WHERE org_id=$1 AND id=$2`, orgID, a.jobID, payload, a.options.MaxAttempts, messageAdmissionReplayProgressKeys[:], defaultLifecycleConsumerLimits().payloadBytes).Scan(&exact, &currentPayload)
 		if err != nil {
 			return Admission{}, false, fmt.Errorf("read retained admission job: %w", err)
 		}
-		if !exact {
+		if err := ctx.Err(); err != nil {
+			return Admission{}, false, err
+		}
+		validProgress := exact && validMessageAdmissionReplayProgress(currentPayload, a.message.ID)
+		if err := ctx.Err(); err != nil {
+			return Admission{}, false, err
+		}
+		if !exact || !validProgress {
 			return Admission{}, false, ErrLifecycleConsumerReconciliation
 		}
 	}

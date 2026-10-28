@@ -12,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
+	threadsvc "github.com/assembledhq/143/internal/services/thread"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -56,7 +57,10 @@ func seedStrandedReview(t *testing.T, pool *pgxpool.Pool, parent string) strande
 		_, err := pool.Exec(ctx, row.sql, row.args...)
 		require.NoError(t, err, "seed stranded controller state")
 	}
-	return strandedReviewFixture{job: job, assessment: assessment, jobID: jobID, token: token, manifest: manifest, stores: &Stores{CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(pool), CodeReviews: db.NewCodeReviewStore(pool), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool), Sessions: db.NewSessionStore(pool), Repositories: db.NewRepositoryStore(pool), PullRequests: db.NewPullRequestStore(pool), Jobs: db.NewJobStore(pool), SessionThreads: db.NewSessionThreadStore(pool), SessionMessages: db.NewSessionMessageStore(pool), SessionLogs: db.NewSessionLogStore(pool), ThreadSendTx: pool}}
+	stores := &Stores{CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(pool), CodeReviews: db.NewCodeReviewStore(pool), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool), Sessions: db.NewSessionStore(pool), Repositories: db.NewRepositoryStore(pool), PullRequests: db.NewPullRequestStore(pool), Jobs: db.NewJobStore(pool), SessionThreads: db.NewSessionThreadStore(pool), SessionMessages: db.NewSessionMessageStore(pool), SessionLogs: db.NewSessionLogStore(pool), ThreadSendTx: pool}
+	stores.ThreadSendDependencies, err = threadsvc.NewSendDependencies(pool, stores.Sessions, stores.SessionThreads, stores.Jobs)
+	require.NoError(t, err, "wire real-pool thread-send dependencies for recovery and retired-controller replay")
+	return strandedReviewFixture{job: job, assessment: assessment, jobID: jobID, token: token, manifest: manifest, stores: stores}
 }
 
 func (f strandedReviewFixture) ctx() context.Context {
@@ -215,7 +219,7 @@ func TestEndedFullReviewRecoveryPostgres(t *testing.T) {
 			policy, err := f.stores.CodeReviews.GetPolicyByID(ctx, f.job.OrgID, f.job.PolicyID)
 			require.NoError(t, err, "load original policy")
 			in := db.EndedFullReviewParams{RepositoryID: f.job.RepositoryID, PullRequestID: f.job.PullRequestID, SessionID: f.job.SessionID, MetadataID: f.job.MetadataID, PolicyID: f.job.PolicyID, JobID: f.jobID, JobLockToken: f.token, HeadSHA: f.job.HeadSHA, OutputKey: f.job.OutputKey, SessionStatus: models.SessionStatus(tt.parent), SessionTurn: 0}
-			resumed, err := db.NewCodeReviewScheduleStore(pool).ReconcileEndedFullReview(ctx, f.job.OrgID, in, func(results []models.CodeReviewAgentResult) bool {
+			resumed, err := db.NewCodeReviewScheduleStore(pool).ReconcileEndedFullReview(ctx, f.job.OrgID, f.stores.ThreadSendDependencies.Transactions, in, func(results []models.CodeReviewAgentResult) bool {
 				return codeReviewSavedResultsComplete(policy.Config(), results)
 			})
 			if tt.wantErr {

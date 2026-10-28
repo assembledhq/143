@@ -14,10 +14,10 @@ const threadSendVisibleLaneKeysQuery = `SELECT id FROM session_threads
 	WHERE org_id = $1 AND session_id = $2 AND (archived_at IS NULL OR id = $3)
 	ORDER BY id LIMIT $4`
 
-// RequireLegacyThreadSendScopeInTx is the fixed legacy guard for ONE original
-// send mutation unit, not the entire multi-unit send choreography. The owner
-// must invoke it afresh in every supplied, configured transaction and discard
-// the whole unit on any error. A previous entry-mode observation is not enough.
+// RequireLegacyThreadSendScopeInTx is the fixed legacy guard for one complete
+// atomic thread-send mutation. The owner invokes it afresh for every attempted
+// supplied, configured transaction and discards the whole unit on any error.
+// A previous entry-mode observation is not enough.
 //
 // It acquires the shared cutover interlock, parent, then all visible lanes and
 // the explicitly requested lane in stable order. This lets the unchanged legacy

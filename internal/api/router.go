@@ -406,7 +406,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	threadRuntimeStore := db.NewThreadRuntimeStore(pool)
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
-	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewTransactions, err := db.NewThreadSendTransactions(pool)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("construct API code review terminal transactions: %w", err)
+	}
+	codeReviewStore, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, codeReviewTransactions)
+	if err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("construct API code review terminal store: %w", err)
+	}
 	codeReviewStore.SetJobStore(jobStore)
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
 	codeReviewStore.SetStreams(codeReviewStreams)
@@ -660,7 +667,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	reviewLoopSvc := reviewloopservice.NewService(reviewLoopStore, reviewloopservice.RuntimeAdapter{
 		Sessions: sessionStore,
 		Threads:  threadSvc,
-	})
+	}, reviewloopservice.WithStartTransactions(threadSendDependencies.Transactions))
 	reviewLoopHandler := handlers.NewReviewLoopHandler(reviewLoopSvc, reviewLoopStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
@@ -1646,6 +1653,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/fork", sessionThreadHandler.ForkThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/revert", sessionThreadHandler.RevertThread)
 				r.Post("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.Start)
+				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/recover", reviewLoopHandler.Recover)
 				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/cancel", reviewLoopHandler.Cancel)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/previews", branchPreviewHandler.Create)

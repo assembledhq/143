@@ -397,12 +397,9 @@ func recoverEndedCodeReviewParent(ctx context.Context, stores *Stores, job runCo
 	} else if err != nil {
 		return false, false, err
 	}
-	if stores.ThreadSendTx == nil {
-		return false, false, fmt.Errorf("ended full review recovery requires transaction support")
-	}
 	jobID, _ := jobctx.JobIDFromContext(ctx)
 	token, _ := jobctx.LockTokenFromContext(ctx)
-	resumed, err := db.NewCodeReviewScheduleStore(stores.ThreadSendTx).ReconcileEndedFullReview(ctx, job.OrgID, db.EndedFullReviewParams{
+	resumed, err := db.NewCodeReviewScheduleStore(stores.ThreadSendTx).ReconcileEndedFullReview(ctx, job.OrgID, stores.ThreadSendDependencies.Transactions, db.EndedFullReviewParams{
 		RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, MetadataID: job.MetadataID, PolicyID: job.PolicyID,
 		JobID: jobID, JobLockToken: token, HeadSHA: job.HeadSHA, OutputKey: job.OutputKey, SessionStatus: session.Status, SessionTurn: session.CurrentTurn, TriggeringDisputeID: job.TriggeringDisputeID,
 	}, func(results []models.CodeReviewAgentResult) bool {

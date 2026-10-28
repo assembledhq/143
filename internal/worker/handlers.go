@@ -11658,17 +11658,25 @@ func newReconcileSessionReviewLoopHandler(services *Services, logger zerolog.Log
 		if services == nil || services.ReviewLoops == nil {
 			return errors.New("review loop recovery service is unavailable")
 		}
+		var retainedErr error
+		if retained, ok := services.ReviewLoops.(interface {
+			ReconcileRetainedStarts(context.Context, uuid.UUID, int) (int, error)
+		}); ok {
+			if _, err := retained.ReconcileRetainedStarts(ctx, orgID, input.Limit); err != nil {
+				retainedErr = fmt.Errorf("reconcile retained review startup: %w", err)
+			}
+		}
 		restarted, err := services.ReviewLoops.ReconcileStrandedPublicationLoops(
 			ctx, orgID, time.Now().UTC().Add(-reviewLoopRecoveryInactiveFor), input.Limit,
 		)
 		if err != nil {
-			return fmt.Errorf("reconcile stranded publication reviews: %w", err)
+			err = fmt.Errorf("reconcile stranded publication reviews: %w", err)
 		}
 		if restarted > 0 {
 			logger.Warn().Str("org_id", orgID.String()).Int("restarted", restarted).
 				Msg("restarted stranded publication review loops")
 		}
-		return nil
+		return errors.Join(retainedErr, err)
 	}
 }
 
@@ -12818,6 +12826,9 @@ func ensurePublicationPrePRReview(
 	if publication == nil {
 		return ensureAutomationPrePRReview(ctx, stores, services, logger, run, changesetID)
 	}
+	if handled, err := recoverPublicationReviewStart(ctx, stores, services, run, publication); handled || err != nil {
+		return false, err
+	}
 	if publication.ReviewMaxPasses == nil && run.AutomationRunID != nil && stores != nil && stores.AutomationRuns != nil {
 		automationRun, err := stores.AutomationRuns.GetByRunID(ctx, run.OrgID, *run.AutomationRunID)
 		if err != nil {
@@ -12860,7 +12871,18 @@ func ensurePublicationPrePRReview(
 			*publication.ReviewDesiredHeadSHA == currentHeadSHA {
 			return true, nil
 		}
-		if err := stores.SessionPublications.InvalidateReviewEvidence(ctx, run.OrgID, run.ID, *changesetID, currentHeadSHA); err != nil {
+		if publication.ReviewStartID != nil {
+			changed, err := stores.SessionPublications.InvalidateRetainedReviewEvidence(ctx, run.OrgID, db.RetainedReviewGateScope{
+				SessionID: run.ID, ChangesetID: *changesetID, StartID: *publication.ReviewStartID,
+				Source: models.ReviewLoopSourcePublication,
+			}, currentHeadSHA)
+			if err != nil {
+				return false, err
+			}
+			if !changed {
+				return false, nil
+			}
+		} else if err := stores.SessionPublications.InvalidateReviewEvidence(ctx, run.OrgID, run.ID, *changesetID, currentHeadSHA); err != nil {
 			return false, err
 		}
 		metrics.RecordPrePRReviewStale(ctx)
@@ -13109,6 +13131,19 @@ func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *
 	if err != nil {
 		return false, fmt.Errorf("fetch automation run for pre-pr review: %w", err)
 	}
+	if automationRun.ReviewStartID != nil {
+		retained, err := recoverRetainedCallerReview(ctx, services, run.OrgID, run.ID, *automationRun.ReviewStartID)
+		if errors.Is(err, reviewloopsvc.ErrReviewLoopStartRefused) {
+			return finishRetainedAutomationReview(ctx, stores, logger, run, changesetID, *automationRun.ReviewStartID, models.ReviewLoopStatusFailed)
+		}
+		if err != nil {
+			return false, err
+		}
+		if retained.Source != models.ReviewLoopSourceAutomation || retained.AutomationRunID == nil || *retained.AutomationRunID != *run.AutomationRunID {
+			return false, errors.New("retained automation review caller mismatch")
+		}
+		return finishRetainedAutomationReview(ctx, stores, logger, run, changesetID, *automationRun.ReviewStartID, retained.Status)
+	}
 	passCount, err := automationPrePRReviewPasses(automationRun.ConfigSnapshot)
 	if err != nil {
 		return false, err
@@ -13152,20 +13187,14 @@ func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *
 			}
 			return false, nil
 		default:
-			if err := setPublicationReviewGate(ctx, stores, run, changesetID, models.SessionPublicationReviewGateFailed); err != nil {
-				return false, err
-			}
-			if stateErr := updateChangesetPRCreationState(ctx, stores, run.OrgID, run.ID, nil, models.PRCreationStateFailed, "Pre-PR review did not complete cleanly."); stateErr != nil {
-				logger.Error().Err(stateErr).Str("session_id", run.ID.String()).Msg("failed to mark PR creation blocked by review loop")
-			}
-			return false, nil
+			return failAutomationPrePRReview(ctx, stores, logger, run, changesetID)
 		}
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("fetch pre-pr review loop: %w", err)
 	}
 
-	_, err = services.ReviewLoops.Start(ctx, run.OrgID, run.ID, reviewloopsvc.StartReviewLoopRequest{
+	startedLoop, err := services.ReviewLoops.Start(ctx, run.OrgID, run.ID, reviewloopsvc.StartReviewLoopRequest{
 		AgentType:       run.AgentType,
 		Model:           stringValue(run.ModelOverride),
 		MaxPasses:       passCount,
@@ -13177,6 +13206,10 @@ func ensureAutomationPrePRReview(ctx context.Context, stores *Stores, services *
 	})
 	if err != nil {
 		return false, fmt.Errorf("start pre-pr review loop: %w", err)
+	}
+	// Retained startup may settle before this job releases its dedupe key.
+	if startedLoop != nil && startedLoop.AdmissionState != nil {
+		return finishRetainedAutomationReview(ctx, stores, logger, run, changesetID, startedLoop.ID, startedLoop.Status)
 	}
 	if err := setPublicationReviewGate(ctx, stores, run, changesetID, models.SessionPublicationReviewGatePending); err != nil {
 		return false, err

@@ -16,10 +16,20 @@ type ThreadSendTransactions struct {
 }
 
 func NewThreadSendTransactions(pool *pgxpool.Pool) (*ThreadSendTransactions, error) {
-	if pool == nil {
-		return nil, errors.New("thread send transactions: pool is required")
+	runner := &ThreadSendTransactions{pool: pool}
+	if err := runner.Validate(); err != nil {
+		return nil, err
 	}
-	return &ThreadSendTransactions{pool: pool}, nil
+	return runner, nil
+}
+
+// Validate checks the owned dependency without acquiring a connection. It is a
+// construction check, not database-health evidence or lifecycle authority.
+func (s *ThreadSendTransactions) Validate() error {
+	if s == nil || s.pool == nil {
+		return errors.New("thread send transactions: pool is required")
+	}
+	return nil
 }
 
 // Run delegates the entire unit, including its budget, setup, settlement and
@@ -28,8 +38,8 @@ func NewThreadSendTransactions(pool *pgxpool.Pool) (*ThreadSendTransactions, err
 // and discard all results/effects on failure or uncertain commit. This wrapper
 // adds no transaction settings, retry policy or lifecycle/admission authority.
 func (s *ThreadSendTransactions) Run(ctx context.Context, work func(context.Context, pgx.Tx) error) error {
-	if s == nil || s.pool == nil {
-		return errors.New("thread send transactions: pool is required")
+	if err := s.Validate(); err != nil {
+		return err
 	}
 	return RunLifecycleTransaction(ctx, s.pool, work)
 }

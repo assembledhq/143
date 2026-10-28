@@ -47,7 +47,7 @@ func TestFullAssessmentSettlementUsesSuppliedTransaction(t *testing.T) {
 			}
 			// This is deliberately a source-wiring assertion. Full-schema DB and
 			// existing worker integration tests separately prove runtime behavior.
-			require.Equal(t, []string{"db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(ctx, assessment.OrgID, tx, assessment.ID)"}, calls, "each actual worker owner must compose settlement through exactly its supplied transaction")
+			require.Equal(t, []string{"db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(unitCtx, assessment.OrgID, tx, assessment.ID)"}, calls, "each actual worker owner must compose settlement through exactly its supplied transaction and bounded unit context")
 			require.Empty(t, forbidden, "existing nil-streams temporary stores must not enter a nested wrapper or gain new notification wiring")
 		})
 	}

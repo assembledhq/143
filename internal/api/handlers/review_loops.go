@@ -12,12 +12,14 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/assembledhq/143/internal/api/middleware"
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
 	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
 
 type ReviewLoopService interface {
+	RecoverStart(ctx context.Context, orgID, sessionID, startID uuid.UUID) (*models.SessionReviewLoop, error)
 	Start(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error)
 }
 
@@ -73,9 +75,23 @@ func (h *ReviewLoopHandler) Start(w http.ResponseWriter, r *http.Request) {
 		StartedByUserID: userID,
 	})
 	if err != nil {
+		var pending *reviewloopsvc.StartPendingError
 		switch {
+		case errors.As(err, &pending):
+			writeErrorWithDetails(w, r, http.StatusServiceUnavailable, "REVIEW_LOOP_START_PENDING_CONFIRMATION",
+				"review loop creation is awaiting confirmation", map[string]any{"loop_id": pending.LoopID.String()})
+		case errors.Is(err, reviewloopsvc.ErrReviewLoopStartRefused):
+			writeError(w, r, http.StatusConflict, "REVIEW_LOOP_START_REFUSED", "the retained review loop start was refused")
 		case writeCodeReviewOwnedError(w, r, err):
 		case writeAutomationOwnedError(w, r, err):
+		case errors.Is(err, db.ErrThreadLimitReached):
+			writeError(w, r, http.StatusConflict, "THREAD_LIMIT", "maximum of 4 threads per session")
+		case errors.Is(err, threadsvc.ErrSessionTerminal):
+			writeError(w, r, http.StatusConflict, "SESSION_TERMINAL", "cannot add threads to a completed session")
+		case errors.Is(err, threadsvc.ErrInvalidAgentType):
+			writeError(w, r, http.StatusBadRequest, "INVALID_AGENT_TYPE", err.Error())
+		case errors.Is(err, threadsvc.ErrInvalidModel):
+			writeError(w, r, http.StatusBadRequest, "INVALID_MODEL", err.Error())
 		case errors.Is(err, pgx.ErrNoRows), errors.Is(err, threadsvc.ErrSessionNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		case errors.Is(err, reviewloopsvc.ErrInvalidPassCount):
@@ -94,6 +110,41 @@ func (h *ReviewLoopHandler) Start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, models.SingleResponse[models.SessionReviewLoop]{Data: *loop})
+}
+
+// Recover advances only the original retained identity. A separate write route
+// keeps GET read-only and never re-runs Start or changes its frozen inputs.
+func (h *ReviewLoopHandler) Recover(w http.ResponseWriter, r *http.Request) {
+	orgID := middleware.OrgIDFromContext(r.Context())
+	sessionID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid session ID")
+		return
+	}
+	loopID, err := uuid.Parse(chi.URLParam(r, "loop_id"))
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid review loop ID")
+		return
+	}
+	loop, err := h.svc.RecoverStart(r.Context(), orgID, sessionID, loopID)
+	if err != nil {
+		var pending *reviewloopsvc.StartPendingError
+		switch {
+		case errors.As(err, &pending):
+			writeErrorWithDetails(w, r, http.StatusServiceUnavailable, "REVIEW_LOOP_START_PENDING_CONFIRMATION",
+				"review loop creation is awaiting confirmation", map[string]any{"loop_id": loopID.String()})
+		case errors.Is(err, reviewloopsvc.ErrReviewLoopStartRefused):
+			writeError(w, r, http.StatusConflict, "REVIEW_LOOP_START_REFUSED", "the retained review loop start was refused")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "RECOVER_REVIEW_LOOP_FAILED", "failed to recover review loop", err)
+		}
+		return
+	}
+	if loop == nil || loop.OrgID != orgID || loop.SessionID != sessionID || loop.ID != loopID {
+		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "review loop not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, models.SingleResponse[models.SessionReviewLoop]{Data: *loop})
 }
 
 func (h *ReviewLoopHandler) List(w http.ResponseWriter, r *http.Request) {

@@ -1800,7 +1800,10 @@ export type ReviewLoopPassStatus =
   | "failed";
 export type ReviewLoopDecision = "REVIEW_CLEAN" | "NEEDS_FIX_PASS";
 
+export type ReviewLoopAdmissionState = "pending" | "attempting" | "unknown" | "attention" | "accepted" | "refused" | "cancelled";
+
 export interface SessionReviewLoop {
+  admission_state?: ReviewLoopAdmissionState | null;
   id: string;
   org_id: string;
   session_id: string;

@@ -103,8 +103,8 @@ func expectWorkerThreadSendSQLEntry(mock pgxmock.PgxPoolIface, orgID, sessionID 
 	mock.ExpectCommit()
 }
 
-// The caller adds the original mutation and explicit completion after these
-// expectations. Pool-backed claim diagnostics remain between completed units.
+// The caller adds all transaction-scoped deciding reads and send writes after
+// these guards, followed by the whole send's single explicit completion.
 func expectWorkerThreadSendSQLMutation(mock pgxmock.PgxPoolIface, orgID, sessionID, threadID uuid.UUID, parentStatus models.SessionStatus, laneStatus models.ThreadStatus) {
 	expectWorkerThreadSendSQLStart(mock, orgID, sessionID)
 	expectWorkerThreadSendSQLPolicy(mock)

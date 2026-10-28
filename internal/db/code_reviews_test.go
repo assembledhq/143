@@ -784,15 +784,6 @@ func codeReviewMetadataRowsForTest() *pgxmock.Rows {
 	})
 }
 
-func codeReviewStaleMetadataRowForTest(orgID, pullRequestID, sessionID uuid.UUID, headSHA string, now time.Time) []any {
-	return []any{
-		uuid.New(), orgID, sessionID, uuid.New(), pullRequestID, uuid.New(),
-		"base", headSHA, false, models.CodeReviewTriggerSourceAppReviewer,
-		models.CodeReviewSessionStatusStale, nil, nil, nil, nil, nil, false,
-		nil, nil, true, nil, "output-" + sessionID.String(), nil, nil, nil, nil, nil, &now, now,
-	}
-}
-
 // TestCodeReviewStore_CompleteReviewPublishesUpdate verifies the store fans a
 // lifecycle event out to the org-scoped SSE stream after a status transition,
 // so the live code reviews list refreshes. miniredis-backed, mirroring the
@@ -805,9 +796,7 @@ func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
 	metadataID := uuid.New()
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock should initialize")
-	defer mock.Close()
+	mock := newCodeReviewMetadataMock(t)
 
 	decisionApproved := models.CodeReviewDecisionApproved
 	acceptableTrue := true
@@ -822,43 +811,47 @@ func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
 	require.NoError(t, err, "subscribe should succeed against miniredis")
 	defer sub.Close()
 
-	mock.ExpectQuery(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
-			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
-		}).AddRow(
-			metadataID, orgID, sessionID, uuid.New(), uuid.New(), uuid.New(),
-			"base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &decisionApproved, &acceptableTrue, false,
-			nil, "pr:head:policy", nil, nil, nil, &finalBody, nil, &completedAt, now,
-		))
+	store := newCodeReviewTerminalCPUStore(t, mock, func() {
+		requireCodeReviewTerminalCPUNoEvent(t, sub.C)
+	})
+	expected := models.CodeReviewSessionMetadata{
+		ID: metadataID, OrgID: orgID, SessionID: sessionID, RepositoryID: uuid.New(), PullRequestID: uuid.New(), PolicyID: uuid.New(),
+		BaseSHA: "base", HeadSHA: "head", TriggerSource: models.CodeReviewTriggerSourceAppReviewer,
+		Status: models.CodeReviewSessionStatusCompleted, Decision: &decisionApproved, Acceptable: &acceptableTrue,
+		ReviewOutputKey: "pr:head:policy", FinalReviewBody: &finalBody, CompletedAt: &completedAt, CreatedAt: now,
+	}
+	expectCodeReviewTerminalCPUOwners(mock, codeReviewTerminalCPUSessionLocks,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "active_only": false}, []uuid.UUID{metadataID})
+	mock.ExpectQuery(codeReviewTerminalCPUComplete).WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "decision": decisionApproved, "acceptable": true,
+		"github_review_id": (*int64)(nil), "github_review_url": (*string)(nil), "final_review_body": finalBody,
+		"additions": (*int)(nil), "deletions": (*int)(nil), "risk_reason_details": []byte(`[]`), "terminal_metadata_ids": []uuid.UUID{metadataID},
+	}).WillReturnRows(codeReviewTerminalCPUMetadataRows(expected)).RowsWillBeClosed()
+	mock.ExpectExec(codeReviewTerminalCPUCancelPending).WithArgs(orgID, []uuid.UUID{metadataID}, []uuid.UUID{sessionID}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
 
-	store := NewCodeReviewStore(mock)
 	store.SetStreams(streams)
 	store.SetLogger(zerolog.Nop())
 
-	_, err = store.CompleteReview(context.Background(), orgID, CompleteCodeReviewParams{
+	metadata, err := store.CompleteReview(context.Background(), orgID, CompleteCodeReviewParams{
 		SessionID:       sessionID,
 		Decision:        models.CodeReviewDecisionApproved,
 		Acceptable:      true,
 		FinalReviewBody: "final review body",
 	})
 	require.NoError(t, err, "CompleteReview should persist the completed transition")
+	require.Equal(t, expected, metadata, "CompleteReview should return the exact committed metadata and review evidence")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 
 	require.Eventually(t, func() bool {
 		select {
 		case event := <-sub.C:
-			return event.SessionID != nil && *event.SessionID == sessionID && event.Status == models.CodeReviewSessionStatusCompleted
+			return event.OrgID == orgID && event.SessionID != nil && *event.SessionID == sessionID && event.Status == models.CodeReviewSessionStatusCompleted && event.Decision != nil && *event.Decision == decisionApproved
 		default:
 			return false
 		}
 	}, 2*time.Second, 20*time.Millisecond, "CompleteReview should publish a code review update event to subscribers")
+	requireCodeReviewTerminalCPUNoEvent(t, sub.C)
 }
 
 func TestCodeReviewStore_FirstReviewerThreadStartedAt(t *testing.T) {
@@ -986,9 +979,7 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadPublishesUpdate(t *tes
 	orgID := uuid.New()
 	pullRequestID := uuid.New()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock should initialize")
-	defer mock.Close()
+	mock := newCodeReviewMetadataMock(t)
 
 	mr := miniredis.RunT(t)
 	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
@@ -1001,19 +992,30 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadPublishesUpdate(t *tes
 	now := time.Now().UTC()
 	firstSessionID := uuid.New()
 	secondSessionID := uuid.New()
-	mock.ExpectQuery(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(codeReviewMetadataRowsForTest().
-			AddRow(codeReviewStaleMetadataRowForTest(orgID, pullRequestID, firstSessionID, "old-head-1", now)...).
-			AddRow(codeReviewStaleMetadataRowForTest(orgID, pullRequestID, secondSessionID, "old-head-2", now)...))
+	expected := []models.CodeReviewSessionMetadata{
+		codeReviewTerminalCPUStaleMetadata(orgID, pullRequestID, firstSessionID, "old-head-1", now),
+		codeReviewTerminalCPUStaleMetadata(orgID, pullRequestID, secondSessionID, "old-head-2", now),
+	}
+	terminalIDs := codeReviewTerminalCPUOrderedMetadataIDs(expected)
+	store := newCodeReviewTerminalCPUStore(t, mock, func() {
+		requireCodeReviewTerminalCPUNoEvent(t, sub.C)
+	})
+	expectCodeReviewTerminalCPUOwners(mock, codeReviewTerminalCPUBatchLocks,
+		pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "current_head_sha": "newhead"}, terminalIDs)
+	mock.ExpectQuery(codeReviewTerminalCPUStale).WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "pull_request_id": pullRequestID, "current_head_sha": "newhead",
+		"superseded_by_session_id": (*uuid.UUID)(nil), "terminal_metadata_ids": terminalIDs,
+	}).WillReturnRows(codeReviewTerminalCPUMetadataRows(expected...)).RowsWillBeClosed()
+	mock.ExpectExec(codeReviewTerminalCPUCancelPending).
+		WithArgs(orgID, []uuid.UUID{expected[0].ID, expected[1].ID}, []uuid.UUID{firstSessionID, secondSessionID}).WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectCommit()
 
-	store := NewCodeReviewStore(mock)
 	store.SetStreams(streams)
 	store.SetLogger(zerolog.Nop())
 
 	stale, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
 	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should run the batch update")
-	require.Equal(t, []uuid.UUID{firstSessionID, secondSessionID}, []uuid.UUID{stale[0].SessionID, stale[1].SessionID}, "stale transition should return each superseded review session")
+	require.Equal(t, expected, stale, "stale transition should return every exact superseded review metadata row")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 
 	require.Eventually(t, func() bool {
@@ -1024,6 +1026,7 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadPublishesUpdate(t *tes
 			return false
 		}
 	}, 2*time.Second, 20*time.Millisecond, "batch stale transition should publish one org-scoped event with no session id")
+	requireCodeReviewTerminalCPUNoEvent(t, sub.C)
 }
 
 func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadSkipsPublishWhenNoRows(t *testing.T) {
@@ -1032,9 +1035,7 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadSkipsPublishWhenNoRows
 	orgID := uuid.New()
 	pullRequestID := uuid.New()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock should initialize")
-	defer mock.Close()
+	mock := newCodeReviewMetadataMock(t)
 
 	mr := miniredis.RunT(t)
 	client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + mr.Addr()}, zerolog.Nop(), nil)
@@ -1044,17 +1045,24 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHeadSkipsPublishWhenNoRows
 	require.NoError(t, err, "subscribe should succeed against miniredis")
 	defer sub.Close()
 
-	mock.ExpectQuery(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(codeReviewMetadataRowsForTest())
+	store := newCodeReviewTerminalCPUStore(t, mock, func() {
+		requireCodeReviewTerminalCPUNoEvent(t, sub.C)
+	})
+	expectCodeReviewTerminalCPUOwners(mock, codeReviewTerminalCPUBatchLocks,
+		pgx.NamedArgs{"org_id": orgID, "pull_request_id": pullRequestID, "current_head_sha": "newhead"}, nil)
+	mock.ExpectQuery(codeReviewTerminalCPUStale).WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "pull_request_id": pullRequestID, "current_head_sha": "newhead",
+		"superseded_by_session_id": (*uuid.UUID)(nil), "terminal_metadata_ids": []uuid.UUID{},
+	}).WillReturnRows(codeReviewMetadataRowsForTest()).RowsWillBeClosed()
+	// No child cancellation is expected when UPDATE/RETURNING changes no rows.
+	mock.ExpectCommit()
 
-	store := NewCodeReviewStore(mock)
 	store.SetStreams(streams)
 	store.SetLogger(zerolog.Nop())
 
 	stale, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, pullRequestID, "newhead", nil)
 	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should run the batch update")
-	require.Empty(t, stale, "no review sessions should become stale")
+	require.Equal(t, []models.CodeReviewSessionMetadata{}, stale, "no review sessions should become stale")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 
 	require.Never(t, func() bool {
@@ -1233,24 +1241,35 @@ func TestCodeReviewStore_MarkStaleForPullRequestExceptHead(t *testing.T) {
 	orgID := uuid.New()
 	prID := uuid.New()
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock should initialize")
-	defer mock.Close()
+	mock := newCodeReviewMetadataMock(t)
 
 	supersededBy := uuid.New()
 	now := time.Now().UTC()
 	firstSessionID := uuid.New()
 	secondSessionID := uuid.New()
-	mock.ExpectQuery("UPDATE code_review_session_metadata").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
-		WillReturnRows(codeReviewMetadataRowsForTest().
-			AddRow(codeReviewStaleMetadataRowForTest(orgID, prID, firstSessionID, "head-old-1", now)...).
-			AddRow(codeReviewStaleMetadataRowForTest(orgID, prID, secondSessionID, "head-old-2", now)...))
+	expected := []models.CodeReviewSessionMetadata{
+		codeReviewTerminalCPUStaleMetadata(orgID, prID, firstSessionID, "head-old-1", now),
+		codeReviewTerminalCPUStaleMetadata(orgID, prID, secondSessionID, "head-old-2", now),
+	}
+	for i := range expected {
+		expected[i].SupersededBySessionID = &supersededBy
+	}
+	terminalIDs := codeReviewTerminalCPUOrderedMetadataIDs(expected)
+	store := newCodeReviewTerminalCPUStore(t, mock, nil)
+	expectCodeReviewTerminalCPUOwners(mock, codeReviewTerminalCPUBatchLocks,
+		pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "current_head_sha": "head-new"}, terminalIDs)
+	mock.ExpectQuery(codeReviewTerminalCPUStale).WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "pull_request_id": prID, "current_head_sha": "head-new",
+		"superseded_by_session_id": &supersededBy, "terminal_metadata_ids": terminalIDs,
+	}).WillReturnRows(codeReviewTerminalCPUMetadataRows(expected...)).RowsWillBeClosed()
+	mock.ExpectExec(codeReviewTerminalCPUCancelPending).
+		WithArgs(orgID, []uuid.UUID{expected[0].ID, expected[1].ID}, []uuid.UUID{firstSessionID, secondSessionID}).WillReturnResult(pgxmock.NewResult("UPDATE", 2))
+	mock.ExpectCommit()
 
-	stale, err := NewCodeReviewStore(mock).MarkStaleForPullRequestExceptHead(context.Background(), orgID, prID, "head-new", &supersededBy)
+	stale, err := store.MarkStaleForPullRequestExceptHead(context.Background(), orgID, prID, "head-new", &supersededBy)
 
 	require.NoError(t, err, "MarkStaleForPullRequestExceptHead should stale older queued/running reviews")
-	require.Equal(t, []uuid.UUID{firstSessionID, secondSessionID}, []uuid.UUID{stale[0].SessionID, stale[1].SessionID}, "MarkStaleForPullRequestExceptHead should return affected review sessions")
+	require.Equal(t, expected, stale, "MarkStaleForPullRequestExceptHead should return the exact affected metadata and supersession evidence")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
@@ -1270,25 +1289,27 @@ func TestCodeReviewStore_CompleteReviewStoresGitHubReviewEvidence(t *testing.T) 
 	acceptable := true
 	now := time.Date(2026, 6, 26, 12, 0, 0, 0, time.UTC)
 
-	mock, err := pgxmock.NewPool()
-	require.NoError(t, err, "pgxmock should initialize")
-	defer mock.Close()
-
-	mock.ExpectQuery("UPDATE code_review_session_metadata").
-		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(),
-		).
-		WillReturnRows(pgxmock.NewRows([]string{
-			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
-			"base_sha", "head_sha", "from_fork", "trigger_source", "status", "phase", "status_code", "status_message", "retry_at", "last_error_at", "retryable_failure", "decision", "acceptable", "stale",
-			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
-		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &decision, &acceptable, false, nil, "key", nil, &reviewID, &reviewURL, &body, nil, &now, now))
-
+	mock := newCodeReviewMetadataMock(t)
+	store := newCodeReviewTerminalCPUStore(t, mock, nil)
 	additions := 125
 	deletions := 55
-	metadata, err := NewCodeReviewStore(mock).CompleteReview(context.Background(), orgID, CompleteCodeReviewParams{
+	expected := models.CodeReviewSessionMetadata{
+		ID: metadataID, OrgID: orgID, SessionID: sessionID, RepositoryID: repoID, PullRequestID: prID, PolicyID: policyID,
+		BaseSHA: "base", HeadSHA: "head", TriggerSource: models.CodeReviewTriggerSourceAppReviewer,
+		Status: models.CodeReviewSessionStatusCompleted, Decision: &decision, Acceptable: &acceptable, ReviewOutputKey: "key",
+		GitHubReviewID: &reviewID, GitHubReviewURL: &reviewURL, FinalReviewBody: &body, CompletedAt: &now, CreatedAt: now,
+	}
+	expectCodeReviewTerminalCPUOwners(mock, codeReviewTerminalCPUSessionLocks,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "active_only": false}, []uuid.UUID{metadataID})
+	mock.ExpectQuery(codeReviewTerminalCPUComplete).WithArgs(pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "decision": decision, "acceptable": acceptable,
+		"github_review_id": &reviewID, "github_review_url": &reviewURL, "final_review_body": body,
+		"additions": &additions, "deletions": &deletions, "risk_reason_details": []byte(`[]`), "terminal_metadata_ids": []uuid.UUID{metadataID},
+	}).WillReturnRows(codeReviewTerminalCPUMetadataRows(expected)).RowsWillBeClosed()
+	mock.ExpectExec(codeReviewTerminalCPUCancelPending).WithArgs(orgID, []uuid.UUID{metadataID}, []uuid.UUID{sessionID}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectCommit()
+
+	metadata, err := store.CompleteReview(context.Background(), orgID, CompleteCodeReviewParams{
 		SessionID:         sessionID,
 		Decision:          models.CodeReviewDecisionApproved,
 		Acceptable:        true,
@@ -1304,6 +1325,7 @@ func TestCodeReviewStore_CompleteReviewStoresGitHubReviewEvidence(t *testing.T) 
 	require.Equal(t, models.CodeReviewSessionStatusCompleted, metadata.Status, "CompleteReview should mark review complete")
 	require.Equal(t, &reviewURL, metadata.GitHubReviewURL, "CompleteReview should scan GitHub review URL")
 	require.Equal(t, &body, metadata.FinalReviewBody, "CompleteReview should scan final review body")
+	require.Equal(t, expected, metadata, "CompleteReview should retain every exact metadata and GitHub evidence field")
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 

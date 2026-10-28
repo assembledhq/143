@@ -27,20 +27,25 @@ type SendChangesetReader interface {
 	GetByID(ctx context.Context, orgID, sessionID, changesetID uuid.UUID) (models.SessionChangeset, error)
 }
 
-// LegacySendPersistence supplies the original send mutations, not lifecycle
-// authority. The service must acquire fresh mode and canonical scope guards in
-// the supplied transaction before each mutation. No method owns transaction
-// settlement, retries, settings or effects. Claim-limit diagnostics use the
-// pool-backed reader only after the claim unit has completed successfully.
+// LegacySendPersistence composes legacy send reads and writes in the owner's
+// supplied transaction. The owner first acquires fresh mode, parent and ordered
+// lane guards for the entire send. No method owns transaction settlement,
+// retries, settings or effects. Atomic send classification uses the explicit
+// supplied-transaction row and active-count readers.
 type LegacySendPersistence interface {
+	RejectIfOwnedInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) error
+	GetSessionInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (models.Session, error)
+	GetThreadInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (models.SessionThread, error)
+	CountActiveThreadsInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (int, error)
+	GetInboxByClientMessageIDInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID, clientMessageID string) (models.ThreadInboxEntry, error)
+	GetMessageByIDInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, id int64) (models.SessionMessage, error)
+	CountPendingInboxByThreadInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (int, error)
+	CountPendingInboxBySessionInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (int, error)
+	GetActiveThreadRuntimeInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (models.ThreadRuntime, error)
 	ClaimIdleThreadInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error)
 	ClaimResumeThreadInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error)
-	IsAtIdleClaimLimit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error)
-	IsAtResumeClaimLimit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error)
 	ClaimIdleSessionInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (models.Session, error)
 	ClaimResumeSessionInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (models.Session, error)
-	UpdateThreadStatusInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID, status models.ThreadStatus) (db.ThreadPersistenceEffects, error)
-	UpdateSessionStatusInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID, status models.SessionStatus) (models.Session, error)
 	IncrementPendingMessagesInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (db.ThreadPendingMessagePersistenceEffects, error)
 	CreateMessageInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, message *models.SessionMessage) error
 	AppendInboxInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, params db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error)
@@ -55,8 +60,6 @@ type SendEffects interface {
 	PublishLifecycle(context.Context, uuid.UUID, []db.LifecycleEffect)
 	PublishThreadClaim(context.Context, uuid.UUID, db.ThreadClaimPersistenceEffects)
 	PublishThreadPending(context.Context, uuid.UUID, db.ThreadPendingMessagePersistenceEffects)
-	PublishThreadStatus(context.Context, uuid.UUID, db.ThreadPersistenceEffects)
-	PublishSessionStatus(context.Context, uuid.UUID, models.Session)
 	NotifyJob(context.Context, uuid.UUID)
 }
 
@@ -84,6 +87,11 @@ func (d SendDependencies) Validate() error {
 	} {
 		if nilSendDependency(dependency.value) {
 			return fmt.Errorf("thread send: %s is required", dependency.name)
+		}
+	}
+	if validator, ok := d.Transactions.(interface{ Validate() error }); ok {
+		if err := validator.Validate(); err != nil {
+			return fmt.Errorf("thread send: invalid transactions: %w", err)
 		}
 	}
 	return nil
@@ -146,6 +154,73 @@ func (p *sqlLegacySendPersistence) validateTx(ctx context.Context, tx pgx.Tx, or
 	return nil
 }
 
+func (p *sqlLegacySendPersistence) RejectIfOwnedInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) error {
+	if err := p.validateTx(ctx, tx, orgID, sessionID); err != nil {
+		return err
+	}
+	store := db.NewSessionStore(tx)
+	if err := store.RejectIfCodeReviewOwned(ctx, orgID, sessionID); err != nil {
+		return err
+	}
+	return store.RejectIfAutomationOwned(ctx, orgID, sessionID)
+}
+
+func (p *sqlLegacySendPersistence) GetSessionInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (models.Session, error) {
+	if err := p.validateTx(ctx, tx, orgID, sessionID); err != nil {
+		return models.Session{}, err
+	}
+	return p.sessions.GetByIDInTx(ctx, tx, orgID, sessionID)
+}
+
+func (p *sqlLegacySendPersistence) GetThreadInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (models.SessionThread, error) {
+	if err := p.validateTx(ctx, tx, orgID, threadID); err != nil {
+		return models.SessionThread{}, err
+	}
+	return db.NewSessionThreadStore(tx).GetByID(ctx, orgID, threadID)
+}
+
+func (p *sqlLegacySendPersistence) CountActiveThreadsInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (int, error) {
+	if err := p.validateTx(ctx, tx, orgID, sessionID); err != nil {
+		return 0, err
+	}
+	return db.NewSessionThreadStore(tx).CountActive(ctx, orgID, sessionID)
+}
+
+func (p *sqlLegacySendPersistence) GetInboxByClientMessageIDInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID, clientMessageID string) (models.ThreadInboxEntry, error) {
+	if err := p.validateTx(ctx, tx, orgID, threadID); err != nil {
+		return models.ThreadInboxEntry{}, err
+	}
+	return db.NewThreadInboxStore(tx).GetByClientMessageID(ctx, orgID, threadID, clientMessageID)
+}
+
+func (p *sqlLegacySendPersistence) GetMessageByIDInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, id int64) (models.SessionMessage, error) {
+	if err := p.validateTx(ctx, tx, orgID); err != nil {
+		return models.SessionMessage{}, err
+	}
+	return db.NewSessionMessageStore(tx).GetByID(ctx, orgID, id)
+}
+
+func (p *sqlLegacySendPersistence) CountPendingInboxByThreadInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (int, error) {
+	if err := p.validateTx(ctx, tx, orgID, threadID); err != nil {
+		return 0, err
+	}
+	return db.NewThreadInboxStore(tx).CountPendingByThread(ctx, orgID, threadID)
+}
+
+func (p *sqlLegacySendPersistence) CountPendingInboxBySessionInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (int, error) {
+	if err := p.validateTx(ctx, tx, orgID, sessionID); err != nil {
+		return 0, err
+	}
+	return db.NewThreadInboxStore(tx).CountPendingBySession(ctx, orgID, sessionID)
+}
+
+func (p *sqlLegacySendPersistence) GetActiveThreadRuntimeInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (models.ThreadRuntime, error) {
+	if err := p.validateTx(ctx, tx, orgID, threadID); err != nil {
+		return models.ThreadRuntime{}, err
+	}
+	return db.NewThreadRuntimeStore(tx).GetActiveByThread(ctx, orgID, threadID)
+}
+
 func (p *sqlLegacySendPersistence) ClaimIdleThreadInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
 	if err := p.validateTx(ctx, tx, orgID, sessionID, threadID); err != nil {
 		return models.SessionThread{}, db.ThreadClaimPersistenceEffects{}, err
@@ -160,20 +235,6 @@ func (p *sqlLegacySendPersistence) ClaimResumeThreadInTx(ctx context.Context, tx
 	return p.threads.ClaimForResumeInSessionInTx(ctx, orgID, tx, sessionID, threadID, maxRunning)
 }
 
-func (p *sqlLegacySendPersistence) IsAtIdleClaimLimit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error) {
-	if err := p.validate(ctx, orgID, sessionID, threadID); err != nil {
-		return false, err
-	}
-	return p.threads.IsAtRunningLimitForIdleClaim(ctx, orgID, sessionID, threadID, maxRunning)
-}
-
-func (p *sqlLegacySendPersistence) IsAtResumeClaimLimit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error) {
-	if err := p.validate(ctx, orgID, sessionID, threadID); err != nil {
-		return false, err
-	}
-	return p.threads.IsAtRunningLimitForResumeClaim(ctx, orgID, sessionID, threadID, maxRunning)
-}
-
 func (p *sqlLegacySendPersistence) ClaimIdleSessionInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (models.Session, error) {
 	if err := p.validateTx(ctx, tx, orgID, sessionID); err != nil {
 		return models.Session{}, err
@@ -186,20 +247,6 @@ func (p *sqlLegacySendPersistence) ClaimResumeSessionInTx(ctx context.Context, t
 		return models.Session{}, err
 	}
 	return p.sessions.ClaimForResumeInTx(ctx, orgID, tx, sessionID)
-}
-
-func (p *sqlLegacySendPersistence) UpdateThreadStatusInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID, status models.ThreadStatus) (db.ThreadPersistenceEffects, error) {
-	if err := p.validateTx(ctx, tx, orgID, threadID); err != nil {
-		return db.ThreadPersistenceEffects{}, err
-	}
-	return p.threads.UpdateStatusInTx(ctx, orgID, tx, threadID, status)
-}
-
-func (p *sqlLegacySendPersistence) UpdateSessionStatusInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID, status models.SessionStatus) (models.Session, error) {
-	if err := p.validateTx(ctx, tx, orgID, sessionID); err != nil {
-		return models.Session{}, err
-	}
-	return p.sessions.UpdateStatusInTx(ctx, orgID, tx, sessionID, status)
 }
 
 func (p *sqlLegacySendPersistence) IncrementPendingMessagesInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (db.ThreadPendingMessagePersistenceEffects, error) {
@@ -277,14 +324,6 @@ func (e *sqlSendEffects) PublishThreadClaim(ctx context.Context, orgID uuid.UUID
 
 func (e *sqlSendEffects) PublishThreadPending(ctx context.Context, orgID uuid.UUID, effects db.ThreadPendingMessagePersistenceEffects) {
 	e.threads.PublishCommittedThreadPendingMessageEffects(ctx, orgID, effects)
-}
-
-func (e *sqlSendEffects) PublishThreadStatus(ctx context.Context, orgID uuid.UUID, effects db.ThreadPersistenceEffects) {
-	e.threads.PublishCommittedThreadPersistenceEffects(ctx, orgID, effects)
-}
-
-func (e *sqlSendEffects) PublishSessionStatus(ctx context.Context, orgID uuid.UUID, session models.Session) {
-	e.sessions.PublishCommittedSessionStatus(ctx, orgID, session)
 }
 
 func (e *sqlSendEffects) NotifyJob(ctx context.Context, id uuid.UUID) {

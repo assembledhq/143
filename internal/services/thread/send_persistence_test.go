@@ -169,6 +169,76 @@ type sendPersistenceOperation struct {
 
 func sendPersistenceOperations() []sendPersistenceOperation {
 	return []sendPersistenceOperation{
+		{"ownership read", "SELECT", false,
+			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				return p.RejectIfOwnedInTx(ctx, tx, f.org, f.session)
+			}, func(ctx context.Context, _ *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				return db.NewSessionStore(tx).RejectIfCodeReviewOwned(ctx, f.org, f.session)
+			}},
+		{"session read", "SELECT", false,
+			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := p.GetSessionInTx(ctx, tx, f.org, f.session)
+				return err
+			}, func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := p.sessions.GetByIDInTx(ctx, tx, f.org, f.session)
+				return err
+			}},
+		{"thread read", "SELECT", false,
+			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := p.GetThreadInTx(ctx, tx, f.org, f.thread)
+				return err
+			}, func(ctx context.Context, _ *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := db.NewSessionThreadStore(tx).GetByID(ctx, f.org, f.thread)
+				return err
+			}},
+		{"active thread count", "SELECT", false,
+			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := p.CountActiveThreadsInTx(ctx, tx, f.org, f.session)
+				return err
+			}, func(ctx context.Context, _ *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := db.NewSessionThreadStore(tx).CountActive(ctx, f.org, f.session)
+				return err
+			}},
+		{"inbox key read", "SELECT", false,
+			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := p.GetInboxByClientMessageIDInTx(ctx, tx, f.org, f.thread, "synthetic-key")
+				return err
+			}, func(ctx context.Context, _ *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := db.NewThreadInboxStore(tx).GetByClientMessageID(ctx, f.org, f.thread, "synthetic-key")
+				return err
+			}},
+		{"message read", "SELECT", false,
+			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := p.GetMessageByIDInTx(ctx, tx, f.org, 42)
+				return err
+			}, func(ctx context.Context, _ *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := db.NewSessionMessageStore(tx).GetByID(ctx, f.org, 42)
+				return err
+			}},
+		{"pending thread count", "SELECT", false,
+			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := p.CountPendingInboxByThreadInTx(ctx, tx, f.org, f.thread)
+				return err
+			}, func(ctx context.Context, _ *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := db.NewThreadInboxStore(tx).CountPendingByThread(ctx, f.org, f.thread)
+				return err
+			}},
+		{"pending session count", "SELECT", false,
+			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := p.CountPendingInboxBySessionInTx(ctx, tx, f.org, f.session)
+				return err
+			}, func(ctx context.Context, _ *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := db.NewThreadInboxStore(tx).CountPendingBySession(ctx, f.org, f.session)
+				return err
+			}},
+		{"runtime read", "SELECT", false,
+			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := p.GetActiveThreadRuntimeInTx(ctx, tx, f.org, f.thread)
+				return err
+			}, func(ctx context.Context, _ *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
+				_, err := db.NewThreadRuntimeStore(tx).GetActiveByThread(ctx, f.org, f.thread)
+				return err
+			}},
 		{"idle thread", "WITH locked_threads", false,
 			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
 				_, _, err := p.ClaimIdleThreadInTx(ctx, tx, f.org, f.session, f.thread, 2)
@@ -199,22 +269,6 @@ func sendPersistenceOperations() []sendPersistenceOperation {
 				return err
 			}, func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
 				_, err := p.sessions.ClaimForResumeInTx(ctx, f.org, tx, f.session)
-				return err
-			}},
-		{"thread status", "UPDATE session_threads", true,
-			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
-				_, err := p.UpdateThreadStatusInTx(ctx, tx, f.org, f.thread, models.ThreadStatusIdle)
-				return err
-			}, func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
-				_, err := p.threads.UpdateStatusInTx(ctx, f.org, tx, f.thread, models.ThreadStatusIdle)
-				return err
-			}},
-		{"session status", "UPDATE sessions", false,
-			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
-				_, err := p.UpdateSessionStatusInTx(ctx, tx, f.org, f.session, models.SessionStatusIdle)
-				return err
-			}, func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
-				_, err := p.sessions.UpdateStatusInTx(ctx, f.org, tx, f.session, models.SessionStatusIdle)
 				return err
 			}},
 		{"pending", "UPDATE session_threads", true,
@@ -280,7 +334,7 @@ func TestLegacySendPersistenceDelegatesExactSuppliedTransaction(t *testing.T) {
 			t.Cleanup(mock.Close)
 			p := newSQLSendPersistence(nil)
 			actualTx, expectedTx := &sendPersistenceTx{reader: mock}, &sendPersistenceTx{reader: mock}
-			argCount := map[string]int{"idle thread": 5, "resume thread": 5, "idle session": 2, "resume session": 3, "thread status": 3, "session status": 3, "pending": 2, "message": 11, "sourced message": 12, "inbox": 7, "enqueue": 7}[tt.name]
+			argCount := map[string]int{"ownership read": 2, "session read": 2, "thread read": 2, "active thread count": 2, "inbox key read": 3, "message read": 2, "pending thread count": 2, "pending session count": 2, "runtime read": 2, "idle thread": 5, "resume thread": 5, "idle session": 2, "resume session": 3, "pending": 2, "message": 11, "sourced message": 12, "inbox": 7, "enqueue": 7}[tt.name]
 			for range 2 {
 				if tt.exec {
 					mock.ExpectExec(tt.query).WithArgs(sendPersistenceAnyArgs(argCount)...).WillReturnError(failure)
@@ -340,6 +394,30 @@ func TestLegacySendPersistenceRejectsInvalidBoundaryBeforeSQL(t *testing.T) {
 	}
 }
 
+func TestLegacySendPersistenceOwnershipReadsShareSuppliedTransaction(t *testing.T) {
+	t.Parallel()
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err, "create an isolated transaction reader for both ownership guards")
+	t.Cleanup(mock.Close)
+	fixture := newSendPersistenceFixture()
+	failure := errors.New("synthetic automation ownership read failure")
+	mock.ExpectQuery("SELECT code_review_owner_pr_id").
+		WithArgs(fixture.org, fixture.session).
+		WillReturnRows(pgxmock.NewRows([]string{"code_review_owner_pr_id"}).AddRow((*uuid.UUID)(nil)))
+	mock.ExpectQuery("SELECT").
+		WithArgs(sendPersistenceAnyArgs(2)...).
+		WillReturnError(failure)
+	tx := &sendPersistenceTx{reader: mock}
+	ctx := context.Background()
+	err = newSQLSendPersistence(nil).RejectIfOwnedInTx(ctx, tx, fixture.org, fixture.session)
+	require.ErrorIs(t, err, failure, "the second ownership read must preserve its original database error")
+	require.Equal(t, []context.Context{ctx, ctx}, tx.contexts, "both ownership checks must use the same callback context and supplied transaction")
+	require.Equal(t, []any{fixture.org, fixture.session}, tx.statements[0].Args, "code-review ownership must retain exact tenant and parent scope")
+	require.Equal(t, []any{pgx.NamedArgs{"org_id": fixture.org, "session_id": fixture.session}}, tx.statements[1].Args, "automation ownership must retain the same tenant and parent scope")
+	require.Empty(t, tx.settled, "ownership classification must not acquire or settle another transaction")
+	require.NoError(t, mock.ExpectationsWereMet(), "ownership classification must not fall back to a pool-backed reader")
+}
+
 func TestLegacySendPersistenceRejectsMalformedMessage(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ name string }{{"nil"}, {"foreign organization"}, {"zero session"}, {"zero pointed thread"}}
@@ -368,8 +446,8 @@ func TestLegacySendPersistenceRejectsMalformedMessage(t *testing.T) {
 func TestLegacySendPersistenceRejectsZeroScopeBeforeSQL(t *testing.T) {
 	t.Parallel()
 	for _, operation := range sendPersistenceOperations() {
-		if operation.name == "enqueue" {
-			continue // The job's immutable payload, not this shape adapter, owns its scope.
+		if operation.name == "enqueue" || operation.name == "message read" {
+			continue // These ports have no explicit session or thread scope argument.
 		}
 		t.Run(operation.name, func(t *testing.T) {
 			t.Parallel()
@@ -377,43 +455,6 @@ func TestLegacySendPersistenceRejectsZeroScopeBeforeSQL(t *testing.T) {
 			fixture.session, fixture.thread = uuid.Nil, uuid.Nil
 			err := operation.call(context.Background(), newSQLSendPersistence(nil), &sendPersistenceTx{}, fixture)
 			require.Error(t, err, "zero explicit mutation scope must reject before transaction access")
-		})
-	}
-}
-
-func TestLegacySendPersistenceClaimDiagnostics(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, status string
-		resume, want bool
-	}{
-		{"idle at limit", "idle", false, true}, {"idle below limit", "idle", false, false},
-		{"resume at limit", "completed", true, true}, {"resume wrong status", "running", true, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			mock, err := pgxmock.NewPool()
-			require.NoError(t, err, "create isolated post-unit diagnostic reader")
-			t.Cleanup(mock.Close)
-			fixture := newSendPersistenceFixture()
-			count := 2
-			if tt.name == "idle below limit" {
-				count = 1
-			}
-			mock.ExpectQuery(`SELECT[\s\S]*COALESCE[\s\S]*org_id = @org_id[\s\S]*sibling_active`).
-				WithArgs(sendPersistenceAnyArgs(3)...).
-				WillReturnRows(pgxmock.NewRows([]string{"target_status", "sibling_active"}).AddRow(tt.status, count))
-			p := newSQLSendPersistence(mock)
-			var actual bool
-			if tt.resume {
-				actual, err = p.IsAtResumeClaimLimit(context.Background(), fixture.org, fixture.session, fixture.thread, 2)
-			} else {
-				actual, err = p.IsAtIdleClaimLimit(context.Background(), fixture.org, fixture.session, fixture.thread, 2)
-			}
-			require.NoError(t, err, "diagnostics must use only the configured pool-backed reader")
-			require.Equal(t, tt.want, actual, "diagnostic status and cap policy must match the original fixed claim kind")
-			require.NoError(t, mock.ExpectationsWereMet(), "diagnostics must not acquire a transaction or invoke a mutation")
 		})
 	}
 }
@@ -458,10 +499,6 @@ func TestLegacySendPersistenceOpaqueEffectsAndOwnerPublication(t *testing.T) {
 			pendingEffects, err := p.IncrementPendingMessagesInTx(context.Background(), tx, fixture.org, fixture.thread)
 			require.NoError(t, err, "pending write must return its own opaque reload token")
 			require.NotEqual(t, db.ThreadPendingMessagePersistenceEffects{}, pendingEffects, "pending effects must come from the actual persistence helper")
-			mock.ExpectExec("UPDATE session_threads").WithArgs(sendPersistenceAnyArgs(3)...).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-			statusEffects, err := p.UpdateThreadStatusInTx(context.Background(), tx, fixture.org, fixture.thread, models.ThreadStatusIdle)
-			require.NoError(t, err, "status write must return its own opaque reload token")
-			require.NotEqual(t, db.ThreadPersistenceEffects{}, statusEffects, "status effects must come from the actual persistence helper")
 			require.Empty(t, tx.settled, "adapters must leave all transaction ownership with the caller")
 			require.Empty(t, redis.Keys(), "no configured publisher may run before explicit owner publication")
 			if tt.outcome != "commit" {
@@ -481,17 +518,10 @@ func TestLegacySendPersistenceOpaqueEffectsAndOwnerPublication(t *testing.T) {
 			}
 			require.NoError(t, tx.Commit(context.Background()), "only the transaction owner confirms commit")
 			effects.PublishThreadClaim(context.Background(), fixture.org, claimEffects)
-			for _, publish := range []func(){
-				func() { effects.PublishThreadPending(context.Background(), fixture.org, pendingEffects) },
-				func() { effects.PublishThreadStatus(context.Background(), fixture.org, statusEffects) },
-			} {
-				mock.ExpectQuery("SELECT").WithArgs(fixture.thread, fixture.org).WillReturnRows(sendPersistenceThreadRows(fixture, at, 7))
-				publish()
-			}
-			parent := models.Session{ID: fixture.session, OrgID: fixture.org, Status: models.SessionStatusRunning}
-			effects.PublishSessionStatus(context.Background(), fixture.org, parent)
+			mock.ExpectQuery("SELECT").WithArgs(fixture.thread, fixture.org).WillReturnRows(sendPersistenceThreadRows(fixture, at, 7))
+			effects.PublishThreadPending(context.Background(), fixture.org, pendingEffects)
 			entries, err := redis.Stream("143:stream:{ses:" + fixture.session.String() + "}:events")
-			require.NoError(t, err, "explicit publication must produce the three established thread events")
+			require.NoError(t, err, "explicit publication must produce the established claim and pending events")
 			var actual []models.SessionStreamEvent
 			for _, entry := range entries {
 				var event models.SessionStreamEvent
@@ -500,8 +530,8 @@ func TestLegacySendPersistenceOpaqueEffectsAndOwnerPublication(t *testing.T) {
 			}
 			later := claimed
 			later.PendingMessageCount = 7
-			wantData := []any{models.NewThreadRuntimeEvent(claimed), models.NewThreadInboxEvent(later), models.NewThreadRuntimeEvent(later)}
-			wantTypes := []models.SessionStreamEventType{models.SessionStreamEventThreadRuntimeUpdated, models.SessionStreamEventThreadInboxQueued, models.SessionStreamEventThreadRuntimeUpdated}
+			wantData := []any{models.NewThreadRuntimeEvent(claimed), models.NewThreadInboxEvent(later)}
+			wantTypes := []models.SessionStreamEventType{models.SessionStreamEventThreadRuntimeUpdated, models.SessionStreamEventThreadInboxQueued}
 			var expected []models.SessionStreamEvent
 			for i, data := range wantData {
 				encoded, marshalErr := json.Marshal(models.SessionStreamEvent{Type: wantTypes[i], SessionID: fixture.session, OrgID: fixture.org, Data: data})
@@ -510,14 +540,9 @@ func TestLegacySendPersistenceOpaqueEffectsAndOwnerPublication(t *testing.T) {
 				require.NoError(t, json.Unmarshal(encoded, &event), "normalize expected generic event data identically")
 				expected = append(expected, event)
 			}
-			require.Equal(t, expected, actual, "opaque tokens must retain claim snapshots but reload current pending/status state")
-			parentEntries, err := redis.Stream("143:stream:{ses:" + fixture.session.String() + "}:status")
-			require.NoError(t, err, "parent publication must use the original status stream")
-			var parentPayload models.Session
-			require.NoError(t, json.Unmarshal([]byte(parentEntries[0].Values[1]), &parentPayload), "decode the exact published parent snapshot")
-			require.Equal(t, parent, parentPayload, "parent publisher must forward the supplied snapshot without a by-ID reload")
+			require.Equal(t, expected, actual, "opaque tokens must retain claim snapshots but reload current pending state")
 			require.Equal(t, []string{"commit"}, tx.settled, "effects must not settle the transaction again")
-			require.NoError(t, mock.ExpectationsWereMet(), "only pending/status effects may perform postcommit pool reloads")
+			require.NoError(t, mock.ExpectationsWereMet(), "only pending effects may perform postcommit pool reloads")
 		})
 	}
 }

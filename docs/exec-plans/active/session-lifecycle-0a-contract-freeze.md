@@ -240,10 +240,12 @@ exists, these down migrations refuse removal rather than reopening legacy mode.
 H must bound the distinct scope locks held by each bulk statement and measure
 shared lock-table pressure and forward progress. Row-level advisory acquisition
 does not provide an unbounded bulk-operation guarantee. H must also measure the
-rollback availability window: the first index-removal preflight (380 down)
-can scan both sessions and retained jobs while holding exclusive locks on six
-evidence tables. Its combined parked/resource-job predicate is not covered by
-the admission lookup's partial index. Later retained-evidence checks can scan
+rollback availability window: A.1's highest admission-index preflight (383 down)
+can scan both sessions and retained jobs while holding exclusive locks on nine
+evidence tables. The later consumer floor (380 down) repeats the core preflight
+under exclusive locks on six of those tables. Their combined parked/resource-job
+predicate is not covered by the admission lookup's partial index. Later
+retained-evidence checks can scan
 sessions, and migration 356's resource-job-kind absence check can scan retained
 jobs under exclusive relation locks too. Migration 352 restores the legacy
 status check without validation; 351 down validates it in a separate weaker-lock
@@ -288,7 +290,8 @@ invariants after validating durable release/normalization/provider evidence.
 - A.2 core: prove scoped FKs, retention exclusion, cross-key consumer discovery,
   coupled parked status/index/lookups and no runnable/terminal reinterpretation.
 - A.1: prove the actual ordinary non-answer `SendMessage` call-through for both
-  versions, compatible legacy ordering/boundaries, atomic new admission,
+  versions, compatible legacy ordering, the bounded atomic legacy send below,
+  atomic new admission,
   replay/conflict/rollback, sibling independence and capacity/wait outcomes.
   Sibling admission checks lane scope, nonterminal session-wide/legacy consumers
   and exclusive reservations; any recovery slot or unresolved whole-session
@@ -304,6 +307,75 @@ invariants after validating durable release/normalization/provider evidence.
   association alone cannot reserve the session, and stale live work still blocks
   dispatch independently of current reservation/head. Durable repair scope and
   owning-job/runtime proof belong to A.5, not an inferred lane-local exception.
+
+### Bounded atomic legacy thread send
+
+`thread.Service.SendMessage` is the sole pre-floor exception to retaining the
+old version-0 transaction boundaries. Its locked entry observation selects one
+branch; a later mode change refuses the legacy mutation rather than rerouting it.
+One canonical guarded legacy transaction owns claims, message/comment/question/
+free-text-answer writes, inbox/pending state and database enqueue. Read ports use
+that same supplied transaction; pool-backed postcommit diagnostics are not
+transaction authority. Do not nest a transaction owner or copy a fence.
+
+Every database failure, including live-delivery enqueue, aborts the entire send.
+Known rollback leaves the original graph unchanged; no send compensation engine
+remains. Retry is whole-unit only under the unchanged confirmed-rollback policy,
+with the existing two-second total budget and per-attempt result/effect reset.
+Legacy enqueue dedupe with a nil job UUID remains success. The existing idle,
+resume, mid-turn and capacity policies, three-slot cap, turn arithmetic, input
+attribution, comment/answer restrictions and concrete dispatch options remain
+unchanged. A queued branch can commit without creating a job.
+
+Publish only after the outer commit is known successful. External notification
+remains best effort after commit; database enqueue is not best effort. An ambiguous
+commit yields the existing typed uncertainty and correlation, with no automatic
+retry, effect, compensation or invented canonical receipt. Owner-loss recovery
+for committed queued input stays outside the send unit under its separate existing
+five-second bound, and cannot run after rollback or unknown settlement.
+
+Require real full-schema proof of late-enqueue rollback, full committed versus
+aborted ambiguous settlements, whole-unit contention retries, replay/dedupe,
+one-connection-pool composition, postcommit visibility and adjacent old-writer
+coexistence. Exercise running-sibling inserts and status writers while the send
+holds its parent/lane locks, including FK-free log inserts as a negative control.
+Record bounded progress, lock waits, contention retries/refusals and deadlocks;
+an idle-only send test is not this proof. This exception establishes neither the
+compatibility floor nor version-1 authority, and does not extend to other send or
+caller families.
+
+### Canonical admission receipts
+
+Exact ingress replay repeats historical admission facts: the original outcome,
+reason, scope, concrete dispatch options and thread-status projection. Inbox
+delivery and applied fields are a current read-only observation from the inbox,
+not a historical snapshot or another delivery transition. Replay produces no new
+job, logical claim or postcommit effects. Server-selected retry defaults and
+timestamps are excluded from client semantic identity; replay retains the
+original concrete values, and private enqueue still compares exact options.
+
+The retained job's queue, type, retry budget and complete original payload remain
+exact except for six execution-progress fields: `continuation_runtime_id`,
+`continuation_message_id`, `continuation_task_message_ids`, `execution_purpose`,
+`recovery_runtime_id` and `recovery_message_ids`. Each continuation/recovery
+triple is either absent or complete. Runtime IDs are canonical nonzero UUIDs;
+the continuation message is the exact original queued-message string. Both input
+arrays contain only positive integer identities and include that original
+message. Recovery purpose is exactly `checkpoint_recovery`. Duplicate input IDs
+and different continuation/recovery runtime IDs are allowed by the existing
+writers. Queued-message/lane identity, every binding field and unknown keys remain
+exact. Replay returns none of the progress values and gains no runtime, lease,
+enqueue or start authority from them. The same-row payload projection stays
+within the existing 8 MiB limit; an oversized row requires reconciliation rather
+than appearing absent. SQL/Scan and context errors precede semantic refusal.
+The source-derived writer pin covers recognized literal/constant/concatenated
+DB updates; dynamic SQL, external writers and control flow still require review.
+
+Admission writes its bounded envelope before enqueue/binding, then records the
+resolved outcome in the same transaction. Both writes commit or roll back
+together; they are not separate accepted receipts. The dispatch retains a copy
+of accepted input. Payload limits do not establish production WAL, retention or
+throughput capacity; H must measure that cost before activation.
 
 Ordinary admission's active-reservation and pending legacy-question probes use
 concurrent partial indexes on the exact eligible tenant/session expressions.

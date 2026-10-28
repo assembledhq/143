@@ -11,6 +11,36 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestThreadSendTransactionsValidate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		kind string
+	}{
+		{name: "nil receiver", kind: "nil"},
+		{name: "zero receiver", kind: "zero"},
+		{name: "owned pool dependency", kind: "configured"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var runner *ThreadSendTransactions
+			switch tt.kind {
+			case "zero":
+				runner = &ThreadSendTransactions{}
+			case "configured":
+				runner = &ThreadSendTransactions{pool: &pgxpool.Pool{}}
+			}
+			err := runner.Validate()
+			if tt.kind == "configured" {
+				require.NoError(t, err, "structural dependency validation must not query an owned pool or infer database health")
+				return
+			}
+			require.EqualError(t, err, "thread send transactions: pool is required", "missing owned pool dependency must fail without running a transaction")
+		})
+	}
+}
+
 func TestNewThreadSendTransactions(t *testing.T) {
 	t.Parallel()
 	// These exact signatures cannot admit an already-owned connection or a

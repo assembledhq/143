@@ -17,10 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This CPU fixture executes the REAL resolver and scope guards against pinned
-// SQL responses for a synthetic version-zero database. The lazy forwarding of
-// grouped business SQL preserves older pgxmock assertions; it does NOT prove
-// PostgreSQL same-connection locking, settlement or contention behavior.
+// This CPU fixture executes the real resolver and scope guards against pinned
+// SQL responses for a synthetic version-zero database. Business hooks and SQL
+// forwarding prove call order and supplied-transaction use only; PostgreSQL
+// integration tests own locking, atomic rollback and settlement evidence.
 const sendFixturePolicySQL = `SELECT
 		current_setting('transaction_isolation'),
 		COALESCE(current_setting('lifecycle143.writer_version', true), ''),
@@ -57,21 +57,17 @@ type legacyGuardFixtureTx struct {
 	service            *Service
 	stage              int
 	org, session, lane uuid.UUID
-	business           pgx.Tx
+	business           db.DBTX
 	normalizing        bool
 }
 
 func (f *legacyGuardFixtureTx) requireScope() {
 	f.t.Helper()
-	require.Equal(f.t, 7, f.stage, "every mutation must follow fresh policy, shared cutover, mode, parent and stable lane acquisition in its own unit")
+	require.Equal(f.t, 7, f.stage, "every atomic mutation and classification read must follow fresh policy, mode and canonical scope acquisition")
 }
-func (f *legacyGuardFixtureTx) businessTx(ctx context.Context) pgx.Tx {
+func (f *legacyGuardFixtureTx) businessReader() db.DBTX {
 	f.requireScope()
-	if f.business == nil {
-		var err error
-		f.business, err = f.service.txStarter.Begin(ctx)
-		require.NoError(f.t, err, "fixture forwards the original grouped business transaction only after guard SQL")
-	}
+	require.NotNil(f.t, f.business, "grouped CPU SQL must use the mock transaction already acquired by the outer fixture runner")
 	return f.business
 }
 
@@ -101,7 +97,7 @@ func (f *legacyGuardFixtureTx) QueryRow(ctx context.Context, query string, args 
 		f.stage++
 		rows = pgxmock.NewRows([]string{"id", "org", "status", "deleted", "archived", "epoch", "end", "protocol"}).AddRow(f.session, f.org, models.SessionStatusIdle, nil, nil, int64(0), nil, int16(0))
 	default:
-		return f.businessTx(ctx).QueryRow(ctx, query, args...)
+		return f.businessReader().QueryRow(ctx, query, args...)
 	}
 	f.guard.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(args...).WillReturnRows(rows)
 	return f.guard.QueryRow(ctx, query, args...)
@@ -122,13 +118,13 @@ func (f *legacyGuardFixtureTx) Query(ctx context.Context, query string, args ...
 		f.stage++
 		rows = pgxmock.NewRows([]string{"id", "org", "session", "status", "archived", "epoch", "end", "protocol"}).AddRow(f.lane, f.org, f.session, models.ThreadStatusIdle, nil, int64(0), nil, int16(0))
 	default:
-		return f.businessTx(ctx).Query(ctx, query, args...)
+		return f.businessReader().Query(ctx, query, args...)
 	}
 	f.guard.ExpectQuery(regexp.QuoteMeta(query)).WithArgs(args...).WillReturnRows(rows)
 	return f.guard.Query(ctx, query, args...)
 }
 func (f *legacyGuardFixtureTx) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
-	return f.businessTx(ctx).Exec(ctx, query, args...)
+	return f.businessReader().Exec(ctx, query, args...)
 }
 
 type legacyGuardFixtureRunner struct {
@@ -140,60 +136,154 @@ type legacyGuardFixtureRunner struct {
 	failCommitAt  int
 	normalizingAt int
 	contentionAt  int
+	retryAt       int
+	rejectRetry   bool
+	activeTx      *legacyGuardFixtureTx
+	activeCtx     context.Context
+	jobIDs        []uuid.UUID
 }
 
 func (r *legacyGuardFixtureRunner) Run(ctx context.Context, work func(context.Context, pgx.Tx) error) error {
 	r.t.Helper()
 	r.units++
-	r.events = append(r.events, "begin")
-	r.settled = false
-	guard, err := pgxmock.NewPool()
-	require.NoError(r.t, err, "create isolated per-unit guard SQL fixture")
-	defer guard.Close()
-	tx := &legacyGuardFixtureTx{t: r.t, guard: guard, service: r.service, normalizing: r.normalizingAt == r.units}
-	unitCtx, cancel := context.WithTimeout(ctx, db.LifecycleTransactionTimeout)
-	defer cancel()
-	err = work(unitCtx, tx)
-	require.Contains(r.t, []int{3, 7}, tx.stage, "a completed legacy fixture unit must execute entry observation or full mutation guards")
-	require.NoError(r.t, guard.ExpectationsWereMet(), "every real guard query must consume its pinned response")
-	if tx.business != nil {
-		if err != nil {
-			if rollbackErr := tx.business.Rollback(unitCtx); rollbackErr != nil {
-				return errors.Join(err, rollbackErr)
-			}
-		} else {
-			err = tx.business.Commit(unitCtx)
+	unit := r.units
+	for attempt := 0; ; attempt++ {
+		r.events = append(r.events, "begin")
+		r.settled = false
+		guard, err := pgxmock.NewPool()
+		require.NoError(r.t, err, "create isolated per-attempt guard SQL fixture")
+		tx := &legacyGuardFixtureTx{t: r.t, guard: guard, service: r.service, normalizing: r.normalizingAt == unit || (attempt > 0 && r.rejectRetry)}
+		unitCtx, cancel := context.WithTimeout(ctx, db.LifecycleTransactionTimeout)
+		var business pgx.Tx
+		if unit > 1 && r.service.txStarter != nil {
+			business, err = r.service.txStarter.Begin(unitCtx)
+			require.NoError(r.t, err, "the outer fixture runner must acquire the single grouped business transaction before the callback")
+			tx.business = business
 		}
-	}
-	if err != nil && r.contentionAt == r.units {
+		r.activeTx, r.activeCtx = tx, unitCtx
+		err = work(unitCtx, tx)
+		require.Contains(r.t, []int{3, 7}, tx.stage, "a completed fixture attempt must execute entry observation or full atomic scope guards")
+		require.NoError(r.t, guard.ExpectationsWereMet(), "every real guard query must consume its pinned response")
+		if business != nil {
+			if err != nil {
+				if rollbackErr := business.Rollback(unitCtx); rollbackErr != nil {
+					err = errors.Join(err, rollbackErr)
+				}
+			} else {
+				err = business.Commit(unitCtx)
+			}
+		}
+		cancel()
+		guard.Close()
+		if attempt == 0 && r.retryAt == unit {
+			// Model a known rollback from callback failure or retryable commit rejection.
+			r.events = append(r.events, "rollback")
+			continue
+		}
+		if err != nil && r.contentionAt == unit {
+			r.settled = true
+			r.events = append(r.events, "rollback")
+			return &db.LifecycleContentionError{Attempts: 3, Cause: err}
+		}
+		if err == nil && r.failCommitAt == unit {
+			r.events = append(r.events, "unknown")
+			return errors.New("synthetic commit acknowledgement lost")
+		}
 		r.settled = true
-		r.events = append(r.events, "rollback")
-		return &db.LifecycleContentionError{Attempts: 3, Cause: err}
+		if err == nil {
+			r.events = append(r.events, "commit")
+		} else {
+			r.events = append(r.events, "rollback")
+		}
+		return err
 	}
-	if err == nil && r.failCommitAt == r.units {
-		r.events = append(r.events, "unknown")
-		return errors.New("synthetic commit acknowledgement lost")
-	}
-	r.settled = true
-	if err == nil {
-		r.events = append(r.events, "commit")
-	} else {
-		r.events = append(r.events, "rollback")
-	}
-	return err
 }
 
 type legacyHookPersistence struct {
 	service                    *Service
 	idleLimited, resumeLimited bool
+	claimCap                   int
+	targetStatus               models.ThreadStatus
+	sqlEnqueue                 bool
+	enqueues                   []db.EnqueueOpts
 }
 
 func (p *legacyHookPersistence) record(operation string) {
 	p.service.send.Transactions.(*legacyGuardFixtureRunner).events = append(p.service.send.Transactions.(*legacyGuardFixtureRunner).events, operation)
 }
 
-func (p *legacyHookPersistence) claim(ctx context.Context, tx pgx.Tx, org, session, lane uuid.UUID, max int, resume bool) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
+func (p *legacyHookPersistence) scope(ctx context.Context, tx pgx.Tx) {
+	runner := p.service.send.Transactions.(*legacyGuardFixtureRunner)
+	runner.t.Helper()
+	require.Same(runner.t, runner.activeTx, tx, "every legacy port must use the exact supplied atomic transaction")
+	require.Equal(runner.t, runner.activeCtx, ctx, "every legacy port must use its supplied atomic callback context")
+	require.False(runner.t, runner.settled, "business ports must not run after their transaction settles")
 	tx.(*legacyGuardFixtureTx).requireScope()
+}
+
+func (p *legacyHookPersistence) RejectIfOwnedInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) error {
+	p.scope(ctx, tx)
+	if err := p.service.rejectIfCodeReviewOwned(ctx, org, session); err != nil {
+		return err
+	}
+	return p.service.sessionStore.RejectIfAutomationOwned(ctx, org, session)
+}
+
+func (p *legacyHookPersistence) GetSessionInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (models.Session, error) {
+	p.scope(ctx, tx)
+	return p.service.sessionStore.GetByID(ctx, org, session)
+}
+
+func (p *legacyHookPersistence) GetThreadInTx(ctx context.Context, tx pgx.Tx, org, thread uuid.UUID) (models.SessionThread, error) {
+	p.scope(ctx, tx)
+	row, err := p.service.threadStore.GetByID(ctx, org, thread)
+	p.targetStatus = row.Status
+	return row, err
+}
+
+func (p *legacyHookPersistence) CountActiveThreadsInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (int, error) {
+	p.scope(ctx, tx)
+	if store, ok := p.service.threadStore.(*mockThreadStore); ok && store.activeCountFn != nil {
+		return store.activeCountFn(ctx, org, session)
+	}
+	if p.idleLimited || p.resumeLimited {
+		count := p.claimCap
+		if p.targetStatus == models.ThreadStatusPending || p.targetStatus == models.ThreadStatusRunning || p.targetStatus == models.ThreadStatusAwaitingInput {
+			count++
+		}
+		return count, nil
+	}
+	return 0, nil
+}
+
+func (p *legacyHookPersistence) GetInboxByClientMessageIDInTx(ctx context.Context, tx pgx.Tx, org, thread uuid.UUID, key string) (models.ThreadInboxEntry, error) {
+	p.scope(ctx, tx)
+	return p.service.inboxStore.GetByClientMessageID(ctx, org, thread, key)
+}
+
+func (p *legacyHookPersistence) GetMessageByIDInTx(ctx context.Context, tx pgx.Tx, org uuid.UUID, id int64) (models.SessionMessage, error) {
+	p.scope(ctx, tx)
+	return p.service.messageStore.GetByID(ctx, org, id)
+}
+
+func (p *legacyHookPersistence) CountPendingInboxByThreadInTx(ctx context.Context, tx pgx.Tx, org, thread uuid.UUID) (int, error) {
+	p.scope(ctx, tx)
+	return p.service.inboxStore.CountPendingByThread(ctx, org, thread)
+}
+
+func (p *legacyHookPersistence) CountPendingInboxBySessionInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (int, error) {
+	p.scope(ctx, tx)
+	return p.service.inboxStore.CountPendingBySession(ctx, org, session)
+}
+
+func (p *legacyHookPersistence) GetActiveThreadRuntimeInTx(ctx context.Context, tx pgx.Tx, org, thread uuid.UUID) (models.ThreadRuntime, error) {
+	p.scope(ctx, tx)
+	return p.service.runtimeOwnerStore.GetActiveByThread(ctx, org, thread)
+}
+
+func (p *legacyHookPersistence) claim(ctx context.Context, tx pgx.Tx, org, session, lane uuid.UUID, max int, resume bool) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
+	p.scope(ctx, tx)
+	p.claimCap = max
 	p.record(fmt.Sprintf("claim-thread-%t", resume))
 	var row models.SessionThread
 	var err error
@@ -215,40 +305,18 @@ func (p *legacyHookPersistence) ClaimIdleThreadInTx(ctx context.Context, tx pgx.
 func (p *legacyHookPersistence) ClaimResumeThreadInTx(ctx context.Context, tx pgx.Tx, o, s, l uuid.UUID, m int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
 	return p.claim(ctx, tx, o, s, l, m, true)
 }
-func (p *legacyHookPersistence) IsAtIdleClaimLimit(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int) (bool, error) {
-	runner := p.service.send.Transactions.(*legacyGuardFixtureRunner)
-	require.True(runner.t, runner.settled, "claim-limit diagnostic must occur after known completion releases the original unit")
-	p.record("idle-limit")
-	return p.idleLimited, nil
-}
-func (p *legacyHookPersistence) IsAtResumeClaimLimit(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int) (bool, error) {
-	runner := p.service.send.Transactions.(*legacyGuardFixtureRunner)
-	require.True(runner.t, runner.settled, "resume-limit diagnostic must occur after known completion")
-	p.record("resume-limit")
-	return p.resumeLimited, nil
-}
 func (p *legacyHookPersistence) ClaimIdleSessionInTx(ctx context.Context, tx pgx.Tx, o, s uuid.UUID) (models.Session, error) {
-	tx.(*legacyGuardFixtureTx).requireScope()
+	p.scope(ctx, tx)
 	p.record("claim-session-idle")
 	return p.service.sessionStore.ClaimIdle(ctx, o, s)
 }
 func (p *legacyHookPersistence) ClaimResumeSessionInTx(ctx context.Context, tx pgx.Tx, o, s uuid.UUID) (models.Session, error) {
-	tx.(*legacyGuardFixtureTx).requireScope()
+	p.scope(ctx, tx)
 	p.record("claim-session-resume")
 	return p.service.sessionStore.ClaimForResume(ctx, o, s)
 }
-func (p *legacyHookPersistence) UpdateThreadStatusInTx(ctx context.Context, tx pgx.Tx, o, l uuid.UUID, status models.ThreadStatus) (db.ThreadPersistenceEffects, error) {
-	tx.(*legacyGuardFixtureTx).requireScope()
-	p.record("thread-status")
-	return db.ThreadPersistenceEffects{}, p.service.threadStore.UpdateStatus(ctx, o, l, status)
-}
-func (p *legacyHookPersistence) UpdateSessionStatusInTx(ctx context.Context, tx pgx.Tx, o, s uuid.UUID, status models.SessionStatus) (models.Session, error) {
-	tx.(*legacyGuardFixtureTx).requireScope()
-	p.record("session-status")
-	return models.Session{}, p.service.sessionStore.UpdateStatus(ctx, o, s, status)
-}
 func (p *legacyHookPersistence) CreateMessageInTx(ctx context.Context, tx pgx.Tx, o uuid.UUID, msg *models.SessionMessage) error {
-	tx.(*legacyGuardFixtureTx).requireScope()
+	p.scope(ctx, tx)
 	p.record("message")
 	if p.service.txStarter != nil {
 		return newSQLSendPersistence(nil).CreateMessageInTx(ctx, tx, o, msg)
@@ -256,7 +324,7 @@ func (p *legacyHookPersistence) CreateMessageInTx(ctx context.Context, tx pgx.Tx
 	return p.service.createMessage(ctx, p.service.messageStore, msg)
 }
 func (p *legacyHookPersistence) AppendInboxInTx(ctx context.Context, tx pgx.Tx, o uuid.UUID, params db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error) {
-	tx.(*legacyGuardFixtureTx).requireScope()
+	p.scope(ctx, tx)
 	p.record("inbox")
 	if p.service.txStarter != nil {
 		return db.NewThreadInboxStore(tx).AppendForMessage(ctx, o, params)
@@ -264,16 +332,20 @@ func (p *legacyHookPersistence) AppendInboxInTx(ctx context.Context, tx pgx.Tx, 
 	return p.service.inboxStore.AppendForMessage(ctx, o, params)
 }
 func (p *legacyHookPersistence) IncrementPendingMessagesInTx(ctx context.Context, tx pgx.Tx, o, l uuid.UUID) (db.ThreadPendingMessagePersistenceEffects, error) {
-	tx.(*legacyGuardFixtureTx).requireScope()
+	p.scope(ctx, tx)
 	p.record("pending")
-	if tx.(*legacyGuardFixtureTx).business != nil {
+	if p.service.txStarter != nil && p.service.inboxStore != nil {
 		return db.NewSessionThreadStore(tx).IncrementPendingMessagesInTx(ctx, o, tx, l)
 	}
 	return db.ThreadPendingMessagePersistenceEffects{}, p.service.threadStore.IncrementPendingMessages(ctx, o, l)
 }
 func (p *legacyHookPersistence) EnqueueInTx(ctx context.Context, tx pgx.Tx, o uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
-	tx.(*legacyGuardFixtureTx).requireScope()
+	p.scope(ctx, tx)
 	p.record("enqueue")
+	p.enqueues = append(p.enqueues, opts)
+	if p.sqlEnqueue {
+		return newSQLSendPersistence(nil).EnqueueInTx(ctx, tx, o, opts)
+	}
 	return p.service.jobStore.EnqueueWithOpts(ctx, o, opts)
 }
 
@@ -283,7 +355,7 @@ type legacyHookEffects struct{ runner *legacyGuardFixtureRunner }
 
 func (e *legacyHookEffects) owned() {
 	e.runner.t.Helper()
-	require.True(e.runner.t, e.runner.settled, "effects must execute only after their individual transaction owner confirms completion")
+	require.True(e.runner.t, e.runner.settled, "effects must execute only after the whole atomic transaction owner confirms completion")
 }
 func (e *legacyHookEffects) PublishLifecycle(context.Context, uuid.UUID, []db.LifecycleEffect) {
 	e.owned()
@@ -297,16 +369,9 @@ func (e *legacyHookEffects) PublishThreadPending(context.Context, uuid.UUID, db.
 	e.owned()
 	e.runner.events = append(e.runner.events, "pending-effect")
 }
-func (e *legacyHookEffects) PublishThreadStatus(context.Context, uuid.UUID, db.ThreadPersistenceEffects) {
+func (e *legacyHookEffects) NotifyJob(_ context.Context, id uuid.UUID) {
 	e.owned()
-	e.runner.events = append(e.runner.events, "thread-effect")
-}
-func (e *legacyHookEffects) PublishSessionStatus(context.Context, uuid.UUID, models.Session) {
-	e.owned()
-	e.runner.events = append(e.runner.events, "session-effect")
-}
-func (e *legacyHookEffects) NotifyJob(context.Context, uuid.UUID) {
-	e.owned()
+	e.runner.jobIDs = append(e.runner.jobIDs, id)
 	e.runner.events = append(e.runner.events, "job-effect")
 }
 

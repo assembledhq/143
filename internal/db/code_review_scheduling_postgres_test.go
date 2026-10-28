@@ -37,9 +37,12 @@ func newSchedulingPostgres(t *testing.T) (*pgxpool.Pool, uuid.UUID, uuid.UUID, u
 	cfg, err := pgxpool.ParseConfig(url)
 	require.NoError(t, err, "parse pool settings")
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	cfg.MaxConns = 8
+	// Reopen races hold two actor connections plus an independent activity
+	// observer. Additional request goroutines queue at this bounded pool.
+	cfg.MaxConns = 3
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "create concurrent pool")
+	require.Equal(t, int32(3), pool.Config().MaxConns, "scheduling fixtures must retain two actors and an independent observer with bounded pool capacity")
 	t.Cleanup(pool.Close)
 	_, err = pool.Exec(ctx, `CREATE TABLE organizations(id uuid PRIMARY KEY);CREATE TABLE repositories(id uuid PRIMARY KEY,org_id uuid,full_name text);CREATE TABLE pull_requests(id uuid PRIMARY KEY,org_id uuid,github_repo text,title text,github_pr_url text,github_pr_number integer);CREATE TABLE users(id uuid PRIMARY KEY);CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid,code_review_owner_pr_id uuid,status text,origin text,container_id text,turn_holding_container boolean);CREATE TABLE code_review_policies(id uuid PRIMARY KEY);
  CREATE TABLE code_review_session_metadata(org_id uuid,session_id uuid,pull_request_id uuid,status text,created_at timestamptz DEFAULT now(),review_output_key text,github_review_id bigint,id uuid DEFAULT gen_random_uuid());

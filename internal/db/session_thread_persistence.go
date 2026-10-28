@@ -40,7 +40,8 @@ type ThreadPendingMessagePersistenceEffects struct {
 // settling, retrying, configuring or publishing. The caller owns fresh mode,
 // parent and ordered-lane checks; this persistence split adds no lifecycle fence.
 // Only publish the returned effects after the entire unit's confirmed commit.
-// A no-match returns raw pgx.ErrNoRows without diagnosing cap occupancy in tx.
+// A no-match returns raw pgx.ErrNoRows without diagnosing cap occupancy here.
+// An atomic owner may use its guarded supplied-transaction deciding reads.
 func (s *SessionThreadStore) ClaimIdleForSessionInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, ThreadClaimPersistenceEffects, error) {
 	return s.claimForSessionInTx(ctx, tx, claimForSessionArgs{
 		orgID: orgID, sessionID: sessionID, threadID: threadID,
@@ -53,8 +54,9 @@ func (s *SessionThreadStore) ClaimIdleForSessionInTx(ctx context.Context, orgID 
 // cap policy in tx, without transaction ownership or publication. It is not a
 // lifecycle fence. The owner must discard both results on failure or rollback
 // and publish effects only after the entire unit's confirmed commit.
-// A no-match returns raw pgx.ErrNoRows; any best-effort cap diagnostic belongs
-// after the owner confirms commit and releases the mutation's row locks.
+// A no-match returns raw pgx.ErrNoRows. The atomic owner uses its guarded
+// supplied-transaction deciding reads; a standalone best-effort diagnostic must
+// wait for confirmed commit and cannot resolve an uncertain outcome.
 func (s *SessionThreadStore) ClaimForResumeInSessionInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, ThreadClaimPersistenceEffects, error) {
 	return s.claimForSessionInTx(ctx, tx, claimForSessionArgs{
 		orgID: orgID, sessionID: sessionID, threadID: threadID,

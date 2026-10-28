@@ -141,10 +141,14 @@ func TestSendThreadMessageAdmissionErrors(t *testing.T) {
 		{name: "current actor forbidden", cause: errors.Join(db.ErrMessageAdmissionNotAllowed, db.ErrMessageAdmissionActorForbidden), status: http.StatusForbidden, code: "FORBIDDEN", message: "message admission is not permitted"},
 		{name: "standalone actor forbidden", cause: db.ErrMessageAdmissionActorForbidden, status: http.StatusForbidden, code: "FORBIDDEN", message: "message admission is not permitted"},
 		{name: "unsupported ordinary source", cause: db.ErrMessageAdmissionNotAllowed, status: http.StatusForbidden, code: "FORBIDDEN", message: "message admission is not permitted"},
+		{name: "active parent status refusal", cause: db.ErrMessageAdmissionNotResumable, status: http.StatusConflict, code: "NOT_RESUMABLE", message: "session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message"},
+		{name: "active lane status refusal", cause: db.ErrMessageAdmissionNotIdle, status: http.StatusConflict, code: "NOT_IDLE", message: "thread must be idle to send a message"},
+		{name: "active association-only changeset missing", cause: errors.Join(db.ErrMessageAdmissionChangesetNotFound, pgx.ErrNoRows), status: http.StatusNotFound, code: "CHANGESET_NOT_FOUND", message: "pull request target not found"},
 		{name: "awaiting input refuses without answering", cause: db.ErrMessageAdmissionAwaitingInput, status: http.StatusConflict, code: "ANSWER_ADMISSION_REQUIRED", message: "use the input request answer action"},
 		{name: "absent hidden or foreign scope", cause: pgx.ErrNoRows, status: http.StatusNotFound, code: "NOT_FOUND", message: "thread not found"},
 		{name: "legacy resume refusal retains domain outcome over claim miss", cause: errors.Join(thread.ErrSessionNotResumable, pgx.ErrNoRows), status: http.StatusConflict, code: "NOT_RESUMABLE", message: "session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message"},
-		{name: "legacy enqueue failure retains domain outcome over no rows", cause: errors.Join(thread.ErrEnqueueFailed, pgx.ErrNoRows), status: http.StatusInternalServerError, code: "ENQUEUE_FAILED", message: "failed to enqueue continue_session job"},
+		{name: "legacy enqueue failure retains domain outcome over no rows", cause: errors.Join(thread.ErrEnqueueFailed, pgx.ErrNoRows), status: http.StatusInternalServerError, code: "ENQUEUE_FAILED", message: "failed to enqueue message processing"},
+		{name: "legacy live delivery enqueue failure uses job independent copy", cause: fmt.Errorf("deliver_thread_inbox: %w", thread.ErrEnqueueFailed), status: http.StatusInternalServerError, code: "ENQUEUE_FAILED", message: "failed to enqueue message processing"},
 		{name: "invalid retained provenance", cause: db.ErrLifecycleGuardProvenanceRequired, status: http.StatusServiceUnavailable, code: "LIFECYCLE_UNAVAILABLE", message: "message admission cannot be safely verified"},
 		{name: "consumer reconciliation required", cause: db.ErrLifecycleConsumerReconciliation, status: http.StatusServiceUnavailable, code: "LIFECYCLE_UNAVAILABLE", message: "message admission cannot be safely verified"},
 		{name: "consumer discovery incomplete", cause: db.ErrLifecycleConsumerDiscoveryIncomplete, status: http.StatusServiceUnavailable, code: "LIFECYCLE_UNAVAILABLE", message: "message admission cannot be safely verified"},
@@ -197,6 +201,9 @@ func TestSendThreadMessageUnknownPrecedesEveryDomainError(t *testing.T) {
 		{name: "idempotency conflict", err: db.ErrMessageAdmissionIdempotencyConflict},
 		{name: "epoch changed", err: db.ErrMessageAdmissionConflict},
 		{name: "actor forbidden", err: db.ErrMessageAdmissionNotAllowed},
+		{name: "active parent status refusal", err: db.ErrMessageAdmissionNotResumable},
+		{name: "active lane status refusal", err: db.ErrMessageAdmissionNotIdle},
+		{name: "active changeset association missing", err: db.ErrMessageAdmissionChangesetNotFound},
 		{name: "specialist control", err: db.ErrMessageAdmissionSpecialistControlRequired},
 		{name: "answer required", err: db.ErrMessageAdmissionAwaitingInput},
 		{name: "positive receipt observation missing", err: db.ErrMessageAdmissionReplayObservationNeeded},
@@ -514,7 +521,7 @@ func threadMessageReplayFixture(t *testing.T, original db.MessageAdmissionDispos
 	require.NoError(t, err, "encode exact inbox association")
 	mock.ExpectQuery(`SELECT .* FROM thread_inbox_entries WHERE org_id=\$1 AND session_id=\$2 AND thread_id=\$3 AND id=\$4 AND message_id=\$5`).WithArgs(orgID, sessionID, laneID, inboxID, int64(42)).WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "session_id", "thread_id", "sequence_no", "message_id", "client_message_id", "entry_type", "payload", "delivery_state", "delivery_attempts", "last_error", "owner_node_id", "runtime_id", "accepted_at", "delivered_at", "acked_at", "applied_at", "created_at", "updated_at"}).AddRow(inboxID, orgID, sessionID, laneID, int64(1), int64(42), "synthetic-key", models.ThreadInboxEntryTypeUserMessage, inboxPayload, models.ThreadInboxDeliveryStatePending, 0, nil, nil, nil, now, nil, nil, nil, now, now))
 	if jobID != uuid.Nil {
-		mock.ExpectQuery(`SELECT queue='agent' AND job_type='continue_session'`).WithArgs(orgID, jobID, pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"exact"}).AddRow(true))
+		mock.ExpectQuery(`SELECT queue='agent' AND job_type='continue_session'`).WithArgs(orgID, jobID, pgxmock.AnyArg(), 3, []string{"continuation_runtime_id", "continuation_message_id", "continuation_task_message_ids", "execution_purpose", "recovery_runtime_id", "recovery_message_ids"}, 8<<20).WillReturnRows(pgxmock.NewRows([]string{"exact", "payload"}).AddRow(true, []byte(`{}`)))
 	}
 	mock.ExpectCommit()
 	ctx, cancel := context.WithTimeout(context.Background(), db.LifecycleTransactionTimeout)

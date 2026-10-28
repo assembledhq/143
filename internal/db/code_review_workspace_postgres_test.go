@@ -43,9 +43,12 @@ func newReviewWorkspaceFixture(t *testing.T) reviewWorkspaceFixture {
 	cfg, err := pgxpool.ParseConfig(url)
 	require.NoError(t, err, "parse disposable PostgreSQL settings")
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	cfg.MaxConns = 12
+	// Keep real owner/contender concurrency without one connection per goroutine.
+	// Recovery fixtures hold at most one actor and one independent operation.
+	cfg.MaxConns = 2
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "open review workspace pool")
+	require.Equal(t, int32(2), pool.Config().MaxConns, "review workspace fixtures must retain two real database contenders with bounded pool capacity")
 	t.Cleanup(func() {
 		pool.Close()
 		_, dropErr := admin.Exec(context.Background(), `DROP SCHEMA `+schema+` CASCADE`)

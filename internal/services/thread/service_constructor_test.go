@@ -67,3 +67,41 @@ func TestNewServiceRequiresSendDependencies(t *testing.T) {
 		})
 	}
 }
+
+func TestSendDependenciesValidateOwnedRunner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, runner, expected string
+	}{
+		{name: "typed nil owned runner", runner: "nil", expected: "thread send: transactions is required"},
+		{name: "zero owned runner", runner: "zero", expected: "thread send: invalid transactions: thread send transactions: pool is required"},
+		{name: "configured owned runner", runner: "configured"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			deps := requiredTestSendDependencies(t)
+			var runner *db.ThreadSendTransactions
+			switch tt.runner {
+			case "zero":
+				runner = &db.ThreadSendTransactions{}
+			case "configured":
+				var err error
+				runner, err = db.NewThreadSendTransactions(&pgxpool.Pool{})
+				require.NoError(t, err, "construct an owned runner without opening a pool or querying the database")
+			}
+			deps.Transactions = runner
+			err := deps.Validate()
+			service, serviceErr := NewService(nil, nil, nil, nil, nil, deps, zerolog.Nop())
+			if tt.expected != "" {
+				require.EqualError(t, err, tt.expected, "invalid owned runners must fail dependency validation before routing or SQL")
+				require.EqualError(t, serviceErr, "construct thread service: "+tt.expected, "service construction must preserve the invalid runner diagnosis")
+				require.Nil(t, service, "an invalid owned runner must not escape in a partially configured service")
+				return
+			}
+			require.NoError(t, err, "an owned runner with its concrete pool dependency may validate without a connection")
+			require.NoError(t, serviceErr, "valid dependency construction must remain free of database work")
+			require.Equal(t, deps, service.send, "the service must preserve the exact validated runner instead of substituting a fallback")
+		})
+	}
+}

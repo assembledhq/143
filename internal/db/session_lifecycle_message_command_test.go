@@ -207,18 +207,27 @@ func TestMessageAdmissionSemanticDigestExcludedServerValues(t *testing.T) {
 		{name: "lane epoch", change: func(i *MessageAdmissionInput) { i.Fence.threadEpoch++ }},
 		{name: "server holder", change: func(i *MessageAdmissionInput) { *i.LeaseHolderID = uuid.UUID{15: 90} }},
 		{name: "server run time", change: func(i *MessageAdmissionInput) { i.Dispatch.RunAt = i.Dispatch.RunAt.Add(time.Hour) }},
+		{name: "server retry budget", change: func(i *MessageAdmissionInput) { i.Dispatch.MaxAttempts++ }},
+		{name: "server run time and retry budget", change: func(i *MessageAdmissionInput) {
+			i.Dispatch.RunAt = i.Dispatch.RunAt.Add(time.Hour)
+			i.Dispatch.MaxAttempts++
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			input := newMessageAdmissionCommandFixture(t)
+			original, err := NewMessageAdmission(input)
+			require.NoError(t, err, "original caller intent must construct before server-selected values change")
 			want := input.Ingress
 			tt.change(&input)
 			actual := prepareMessageAdmissionCommandFixture(t, input, "client-key")
-			require.Equal(t, want, actual, "fresh server epochs, holder or time must not conflict with the same client intent")
+			require.Equal(t, want, actual, "fresh server epochs, holder, schedule or retry budget must not conflict with the same client intent")
 			input.Ingress = want
-			_, err := NewMessageAdmission(input)
+			retained, err := NewMessageAdmission(input)
 			require.NoError(t, err, "the original semantic ingress must remain valid under changed excluded server metadata")
+			require.Equal(t, original.SemanticPayload(), retained.SemanticPayload(), "server-selected changes must preserve the exact canonical caller-intent bytes")
+			require.Equal(t, input.Dispatch, retained.Dispatch(), "exclusion from client intent must not discard concrete scheduling or retry options")
 		})
 	}
 }
@@ -263,7 +272,6 @@ func TestMessageAdmissionSemanticDigestIncludedValues(t *testing.T) {
 		{name: "post success author", change: func(i *MessageAdmissionInput) { i.PostSuccessAuthorMode = MessagePostSuccessAuthorApp }},
 		{name: "dedupe override", change: func(i *MessageAdmissionInput) { *i.ContinuationDedupeKeyOverride = "other-key" }},
 		{name: "omitted dedupe override", change: func(i *MessageAdmissionInput) { i.ContinuationDedupeKeyOverride = nil }},
-		{name: "max attempts", change: func(i *MessageAdmissionInput) { i.Dispatch.MaxAttempts++ }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -271,9 +279,11 @@ func TestMessageAdmissionSemanticDigestIncludedValues(t *testing.T) {
 			input := newMessageAdmissionCommandFixture(t)
 			previous := input.Ingress.Digest()
 			tt.change(&input)
+			_, err := NewMessageAdmission(input)
+			require.Error(t, err, "genuine caller-intent changes cannot reuse the original semantic ingress")
 			input.Ingress = prepareMessageAdmissionCommandFixture(t, input, "client-key")
 			require.NotEqual(t, previous, input.Ingress.Digest(), "every included semantic field must participate in conflicting-intent detection")
-			_, err := NewMessageAdmission(input)
+			_, err = NewMessageAdmission(input)
 			require.NoError(t, err, "the newly hashed changed command must remain structurally valid")
 		})
 	}
@@ -351,8 +361,8 @@ func TestMessageAdmissionSemanticPayloadEncoding(t *testing.T) {
 	input := newMessageAdmissionCommandFixture(t)
 	actual, err := NewMessageAdmission(input)
 	require.NoError(t, err, "the complete message command must construct before checking its canonical semantic representation")
-	want := `{"version":1,"org_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","thread_id":"00000000-0000-0000-0000-000000000003","actor_id":"00000000-0000-0000-0000-000000000004","source":"","message":"  exact message\n","images":["image-one","image-two"],"references":[{"kind":"file","token":"@main.go","path":"main.go","display":"main.go"}],"commands":[{"kind":"command","agent_type":"claude_code","name":"review","token":"/review","display":"/review","description":"Review the change","arguments":"--strict","source":"builtin"}],"changeset_id":"00000000-0000-0000-0000-000000000005","resolve_review_comment_ids":["00000000-0000-0000-0000-000000000007","00000000-0000-0000-0000-000000000008"],"plan_mode":true,"post_success_action":"push_pr_changes","post_success_author_mode":"user","continuation_dedupe_key_override":"followup-key","max_attempts":3}`
-	require.Equal(t, want, string(actual.SemanticPayload()), "canonical JSON must retain every semantic field and exclude all server fences, IDs and times")
+	want := `{"version":1,"org_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","thread_id":"00000000-0000-0000-0000-000000000003","actor_id":"00000000-0000-0000-0000-000000000004","source":"","message":"  exact message\n","images":["image-one","image-two"],"references":[{"kind":"file","token":"@main.go","path":"main.go","display":"main.go"}],"commands":[{"kind":"command","agent_type":"claude_code","name":"review","token":"/review","display":"/review","description":"Review the change","arguments":"--strict","source":"builtin"}],"changeset_id":"00000000-0000-0000-0000-000000000005","resolve_review_comment_ids":["00000000-0000-0000-0000-000000000007","00000000-0000-0000-0000-000000000008"],"plan_mode":true,"post_success_action":"push_pr_changes","post_success_author_mode":"user","continuation_dedupe_key_override":"followup-key"}`
+	require.Equal(t, want, string(actual.SemanticPayload()), "canonical JSON must retain every semantic field and exclude all server fences, IDs, times and retry budgets")
 	require.Equal(t, LifecycleDigest(sha256.Sum256([]byte(want))), actual.Ingress().Digest(), "the persisted input digest must hash the exact canonical semantic bytes")
 	require.Equal(t, input.OrgID, actual.OrgID(), "the immutable command must expose its exact organization")
 	require.Equal(t, input.Fence, actual.Fence(), "the immutable command must retain excluded epochs for durable validation")

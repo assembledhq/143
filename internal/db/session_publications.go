@@ -20,7 +20,7 @@ func NewSessionPublicationStore(db DBTX) *SessionPublicationStore {
 	return &SessionPublicationStore{db: db}
 }
 
-const sessionPublicationSelectColumns = `id, org_id, session_id, changeset_id, repository_id,
+const sessionPublicationSelectColumns = `review_start_id, id, org_id, session_id, changeset_id, repository_id,
 	state, source, trigger_kind, handoff_mode, initiated_by_user_id,
 	automatic_pr_policy_source, review_policy_source,
 	review_max_passes, review_loop_id, review_workspace_revision, review_desired_head_sha,
@@ -433,22 +433,55 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 	if requestPayload == "" {
 		return errors.New("publication review bypass payload is required")
 	}
-	rows, err := s.db.Query(ctx, `WITH publication_to_bypass AS (
-		SELECT review_loop_id
-		FROM session_publications
-		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
-		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
-		FOR UPDATE
-	), cancelled_review AS (
-		UPDATE session_review_loops AS loop
-		SET status = 'cancelled', review_required = false,
-			latest_summary = 'Review stopped because an explicit Create PR action superseded automatic review.',
-			bypass_reason = 'Explicit Create PR action',
-			completed_at = COALESCE(loop.completed_at, now())
-		FROM publication_to_bypass AS target
-		WHERE loop.org_id = @org_id AND loop.id = target.review_loop_id AND loop.status = 'running'
-		RETURNING loop.id
-	)
+	txStarter, ok := s.db.(TxStarter)
+	if !ok {
+		return errors.New("publication review bypass requires transaction support")
+	}
+	tx, err := txStarter.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin publication review bypass: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Each awaited statement gets a fresh snapshot after serialization. T1
+	// takes these same caller -> start locks before creating its loop.
+	var linkedID, startID *uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT review_loop_id,review_start_id FROM session_publications
+ WHERE org_id=$1 AND session_id=$2 AND changeset_id=$3
+ AND state NOT IN ('completed','completed_noop','terminal_failed') FOR UPDATE`,
+		orgID, publication.SessionID, publication.ChangesetID).Scan(&linkedID, &startID)
+	if err != nil {
+		return fmt.Errorf("lock publication review bypass: %w", err)
+	}
+	if startID != nil {
+		var locked uuid.UUID
+		err = tx.QueryRow(ctx, `SELECT id FROM review_loop_start_intents
+ WHERE org_id=$1 AND session_id=$2 AND id=$3 AND caller_kind='publication' AND publication_changeset_id=$4 FOR UPDATE`,
+			orgID, publication.SessionID, startID, publication.ChangesetID).Scan(&locked)
+		if err != nil {
+			return fmt.Errorf("lock publication retained start for bypass: %w", err)
+		}
+		_, err = tx.Exec(ctx, `UPDATE review_loop_start_intents SET cancel_requested_at=COALESCE(cancel_requested_at,statement_timestamp()),updated_at=statement_timestamp()
+ WHERE org_id=$1 AND session_id=$2 AND id=$3 AND state='prepared'`, orgID, publication.SessionID, startID)
+		if err != nil {
+			return fmt.Errorf("cancel prepared publication review: %w", err)
+		}
+	}
+	_, err = tx.Exec(ctx, `UPDATE session_review_loops AS loop
+ SET status='cancelled',review_required=false,
+ startup_send_state=CASE WHEN startup_send_state='pending' THEN 'cancelled' ELSE startup_send_state END,
+ startup_send_due_at=CASE WHEN startup_send_state='pending' THEN NULL ELSE startup_send_due_at END,
+ startup_send_resolution=CASE WHEN startup_send_state='pending' THEN 'owner_cancelled' ELSE startup_send_resolution END,
+ startup_send_writer_seq=CASE WHEN startup_send_version IS NOT NULL THEN startup_send_writer_seq+1 ELSE startup_send_writer_seq END,
+ startup_send_updated_at=CASE WHEN startup_send_version IS NOT NULL THEN statement_timestamp() ELSE startup_send_updated_at END,
+ latest_summary='Review stopped because an explicit Create PR action superseded automatic review.',
+ bypass_reason='Explicit Create PR action',completed_at=COALESCE(loop.completed_at,now())
+ WHERE loop.org_id=$1 AND loop.session_id=$2 AND loop.changeset_id=$3 AND loop.source='publication'
+ AND (loop.id=$4::uuid OR loop.id=$5::uuid) AND loop.status='running'`, orgID, publication.SessionID, publication.ChangesetID, linkedID, startID)
+	if err != nil {
+		return fmt.Errorf("cancel publication review loop: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
 	UPDATE session_publications
 		SET state = 'ready_to_publish', source = @source,
 			trigger_kind = 'explicit_action',
@@ -463,7 +496,6 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 			last_error_code = NULL, last_error_message = NULL, updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
 		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
-		  AND (SELECT count(*) FROM cancelled_review) >= 0
 		RETURNING `+sessionPublicationSelectColumns, pgx.NamedArgs{
 		"org_id": orgID, "session_id": publication.SessionID, "changeset_id": publication.ChangesetID,
 		"source": publication.Source, "automatic_policy_source": publication.AutomaticPolicySource,
@@ -476,6 +508,9 @@ func (s *SessionPublicationStore) ApplyReviewBypass(ctx context.Context, orgID u
 	stored, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.SessionPublication])
 	if err != nil {
 		return fmt.Errorf("collect bypassed session publication: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit publication review bypass: %w", err)
 	}
 	*publication = stored
 	return nil
@@ -638,6 +673,7 @@ func (s *SessionPublicationStore) LinkReviewLoop(
 			review_desired_head_sha = @desired_head_sha,
 			updated_at = now()
 		WHERE org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id
+		  AND review_gate_state = 'pending'
 		  AND state NOT IN ('completed', 'completed_noop', 'terminal_failed')
 		  AND (review_loop_id IS NULL OR review_loop_id = @loop_id)
 		  AND EXISTS (
@@ -645,6 +681,7 @@ func (s *SessionPublicationStore) LinkReviewLoop(
 			WHERE org_id = @org_id AND id = @loop_id AND session_id = @session_id
 			  AND changeset_id = @changeset_id AND workspace_revision = @workspace_revision
 			  AND desired_head_sha = @desired_head_sha AND source = 'publication' AND status = 'running'
+ AND (startup_send_version IS NULL AND session_publications.review_start_id IS NULL OR session_publications.review_start_id=@loop_id)
 		  )`, pgx.NamedArgs{
 		"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 		"loop_id": loopID, "max_passes": maxPasses,

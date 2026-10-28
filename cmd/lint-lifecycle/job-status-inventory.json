@@ -11,7 +11,8 @@
     "Unresolved string portions remain <dynamic>; available jobs/status facts are still review candidates. Raw/untyped Go status variables other than the explicit jobStatus spelling and helper-derived enum aliases require manual source audit.",
     "Source fingerprints retain full normalized SQL tokens including joins, negation and eligibility; comments/spacing outside SQL literals are ignored. A newly inserted source-ordered site can require downstream ordinal review; matching never establishes actual 0a predicates, locks, schema/index compatibility, or physical drain.",
     "Only lifecycle-owned request-consumer job types may gain awaiting_start_control in 0a. Unrelated domain jobs and physical runnable/running/terminal predicates are deliberately not widened. Re-audit all dynamic and newly introduced query forms before activation.",
-    "Every SupersedeUnlaunchedIntentInTx action below requires canonical SupersessionAuthority and positive fenced no-launch proof over every immutable allocation/continuation receipt for that binding. Unknown or possible acceptance routes to ReconcileSupersededIntent, never unsent closure; physical drain blockers remain independently retained. EndSession remains idle-only and exposes Abandon rather than broadening eligibility."
+    "Every SupersedeUnlaunchedIntentInTx action below requires canonical SupersessionAuthority and positive fenced no-launch proof over every immutable allocation/continuation receipt for that binding. Unknown or possible acceptance routes to ReconcileSupersededIntent, never unsent closure; physical drain blockers remain independently retained. EndSession remains idle-only and exposes Abandon rather than broadening eligibility.",
+    "Fixed global SQL constants in caller_send_wake_repair.go are manually reviewed notification-repair dependencies outside this scanner's current function-local SQL discovery. Their pending/running dedupe suppresses duplicate notifications only; it grants no runtime, delivery, drain or terminal-state authority."
   ],
   "entries": [
     {
@@ -41,7 +42,10 @@
       "classification": "nonterminal-consumer",
       "action_0a": "Require an actual nonterminal job for a bound dispatch. Pending, running and awaiting_start_control retain logical ownership; no terminal/expiry shortcut clears a malformed or uncertain binding.",
       "reason": "Scoped dispatch evidence is independent of runnable or execution-lease policy.",
-      "evidence": ["v.jobID == nil || !models.JobStatus(v.jobStatus).IsNonterminalInputConsumer()", "internal/db/session_lifecycle_consumers_postgres_test.go"]
+      "evidence": [
+        "v.jobID == nil || !models.JobStatus(v.jobStatus).IsNonterminalInputConsumer()",
+        "internal/db/session_lifecycle_consumers_postgres_test.go"
+      ]
     },
     {
       "id": "internal/db/session_lifecycle_consumers.go:hasCompetingInputConsumerInTx:sql:1",
@@ -49,7 +53,12 @@
       "classification": "nonterminal-consumer",
       "action_0a": "Discover scoped reverse references through disjoint stored-session and exact observed lane/runtime arms independently of payload routing, retaining pending/running/parked jobs and uncertain physical evidence. Keep local automation links when their same-tenant run is absent or contradicts the route, without reading foreign data. Concrete custom planning must not scan unrelated tenant history, and a LEFT JOIN must not turn an absent or foreign job into a clear result.",
       "reason": "Canonical cross-key ownership discovery observes jobs but does not claim or execute them.",
-      "evidence": ["j . status", "j . status in ( 'pending' , 'running' , 'awaiting_start_control' )", "internal/db/session_lifecycle_consumers_postgres_test.go", "internal/db/session_lifecycle_consumer_query_postgres_test.go"],
+      "evidence": [
+        "j . status",
+        "j . status in ( 'pending' , 'running' , 'awaiting_start_control' )",
+        "internal/db/session_lifecycle_consumers_postgres_test.go",
+        "internal/db/session_lifecycle_consumer_query_postgres_test.go"
+      ],
       "predicate_policies": [
         {
           "fact": "j . status",
@@ -69,7 +78,11 @@
       "classification": "nonterminal-consumer",
       "action_0a": "Probe each exact retained target/generation pair for reverse automation ownership, excluding source IDs already covered by stored-session and actual-lane arms. Preserve pending/running/parked job evidence; generation or result-budget overflow is discovery-incomplete, never a clear result.",
       "reason": "Finite exact scalar pairs keep indexed scope planning without inventing ownership from a Cartesian target/generation combination or silently dropping malformed reverse references.",
-      "evidence": ["j . status", "j . status in ( 'pending' , 'running' , 'awaiting_start_control' )", "internal/db/session_lifecycle_consumer_query_postgres_test.go"],
+      "evidence": [
+        "j . status",
+        "j . status in ( 'pending' , 'running' , 'awaiting_start_control' )",
+        "internal/db/session_lifecycle_consumer_query_postgres_test.go"
+      ],
       "predicate_policies": [
         {
           "fact": "j . status",
@@ -89,7 +102,10 @@
       "classification": "nonterminal-consumer",
       "action_0a": "A logical own exception requires complete actual immutable binding and a recognized agent input route. Status alone, matching dedupe key or controller job metadata cannot establish it.",
       "reason": "This is an identity exception for one already-bound consumer, not a generic job-ID exclusion or execution permit.",
-      "evidence": ["err != nil || !sameLifecycleJobBinding(actual, own.binding) || !models.JobStatus(status).IsNonterminalInputConsumer() || queue != \"agent\" || !slices.Contains([]string{\"run_agent\", \"continue_session\"}, jobType)", "internal/db/session_lifecycle_consumers_postgres_test.go"]
+      "evidence": [
+        "err != nil || !sameLifecycleJobBinding(actual, own.binding) || !models.JobStatus(status).IsNonterminalInputConsumer() || queue != \"agent\" || !slices.Contains([]string{\"run_agent\", \"continue_session\"}, jobType)",
+        "internal/db/session_lifecycle_consumers_postgres_test.go"
+      ]
     },
     {
       "id": "internal/db/session_lifecycle_start_control_reader.go:readLifecycleStartControlWithLimitsInTx:sql:1",
@@ -97,7 +113,10 @@
       "classification": "observation",
       "action_0a": "Read the actual joined job status with the bounded retained snapshot and exact payload text. The DTO matcher separately requires the parked/clear-lease state for awaiting_control; this projection never grants execution or expires durable ownership.",
       "reason": "Actual row observation is required for complete association matching, not a runnable or current-lease predicate.",
-      "evidence": ["j . status", "internal/db/session_lifecycle_start_control_reader_postgres_test.go"]
+      "evidence": [
+        "j . status",
+        "internal/db/session_lifecycle_start_control_reader_postgres_test.go"
+      ]
     },
     {
       "id": "internal/db/session_lifecycle_consumers.go:proveOwnLifecycleConsumerInTx:sql:1",
@@ -105,7 +124,10 @@
       "classification": "observation",
       "action_0a": "Read the actual tenant/job status and route with bounded immutable payload before interpreting the own-consumer exception. Separately require the exact running token and fresh database-statement live lease only for a current allocation.",
       "reason": "Raw status observation is not itself a runnable, lease or ownership predicate.",
-      "evidence": ["status", "internal/db/session_lifecycle_consumers_postgres_test.go"]
+      "evidence": [
+        "status",
+        "internal/db/session_lifecycle_consumers_postgres_test.go"
+      ]
     },
     {
       "id": "internal/db/session_lifecycle_consumers.go:readLegacyLifecycleConsumersInTx:sql:1",
@@ -113,7 +135,13 @@
       "classification": "nonterminal-consumer",
       "action_0a": "Select ordered capped IDs by the exact eligible-tenant CASE key for pending/running/parked input jobs, then probe those same-tenant IDs for payloads in one statement. Collect bounded owned raw bytes, close/check the stream before route decoding, and preserve SQL/context/drain failures. Preserve byte budgets, partial legacy anchors, actual lane membership and semantic discovery-incomplete outcomes; vacuum-lag/churn and large eligible cohorts remain H measurement obligations.",
       "reason": "Malformed route fields cannot erase independently scoped logical input ownership.",
-      "evidence": ["status in ( 'pending' , 'running' , 'awaiting_start_control' )", "internal/db/session_lifecycle_legacy_job_route_test.go", "internal/db/session_lifecycle_consumers_postgres_test.go", "internal/db/session_lifecycle_legacy_job_index_test.go", "internal/db/session_lifecycle_legacy_job_resource_postgres_test.go"]
+      "evidence": [
+        "status in ( 'pending' , 'running' , 'awaiting_start_control' )",
+        "internal/db/session_lifecycle_legacy_job_route_test.go",
+        "internal/db/session_lifecycle_consumers_postgres_test.go",
+        "internal/db/session_lifecycle_legacy_job_index_test.go",
+        "internal/db/session_lifecycle_legacy_job_resource_postgres_test.go"
+      ]
     },
     {
       "id": "internal/db/session_lifecycle_start_control.go:matchLifecycleStartControlFacts:go:1",
@@ -121,7 +149,10 @@
       "classification": "nonterminal-consumer",
       "action_0a": "Match awaiting_control only to the exact bound parked job with all six execution/completion slots clear, plus complete immutable payload/binding/control equality. Do not depend on an unexpired preparation or treat matching JSON as no-launch authority.",
       "reason": "Retained control is durable logical ownership, not runnable work or a current worker lease.",
-      "evidence": ["s.State == lifecycleStartControlAwaiting && (d.AdmissionState != \"bound\" || job.Status != models.JobStatusAwaitingStartControl || job.LockedByNodeID != nil || job.RunOwnerID != nil || job.LockToken != nil || job.LockedAt != nil || job.LeaseExpiresAt != nil || job.CompletedAt != nil)", "internal/db/session_lifecycle_start_control_test.go"]
+      "evidence": [
+        "s.State == lifecycleStartControlAwaiting && (d.AdmissionState != \"bound\" || job.Status != models.JobStatusAwaitingStartControl || job.LockedByNodeID != nil || job.RunOwnerID != nil || job.LockToken != nil || job.LockedAt != nil || job.LeaseExpiresAt != nil || job.CompletedAt != nil)",
+        "internal/db/session_lifecycle_start_control_test.go"
+      ]
     },
     {
       "id": "internal/db/automation_actions.go:resolveAutomationActionScope:sql:1",
@@ -508,13 +539,16 @@
       ]
     },
     {
-      "id": "internal/db/code_review_job_terminal.go:JobStore.DeadLetterCodeReviewWithLease:sql:1",
-      "source_sha256": "44af79d13c386a7d35bae4ddd34bdf97629e4d094132540f6337d78824557a99",
+      "id": "internal/db/code_review_job_terminal.go:DeadLetterCodeReviewInTx:sql:1",
+      "source_sha256": "0e5a56f784380d07c837057c642b84edea759483495d501fd05540c07ac5dea5",
       "classification": "lease-owned",
-      "action_0a": "Keep running-only source eligibility and exact lease/token CAS; keep the existing target status where successful. Exclude awaiting_start_control from generic execution reclaim, renewal, success, failure, retry and dead-letter; only lifecycle parked-control operations may change that state.",
-      "reason": "An execution lease operation must not reinterpret an intentionally lease-free parked intent as crashed or runnable.",
+      "action_0a": "Retain the exact org/job/running/lock-token/retained-job-type CAS to dead_letter and its lease/owner-pointer clearing inside the supplied whole-retirement transaction. Require exactly one affected row; any pre-commit unit error rolls back the whole unit. A failed or uncertain outer settlement releases no committed outcome or effects and is not itself rollback proof. Exclude pending, all already-terminal states and awaiting_start_control; parked lifecycle intents require their dedicated control operations. InTx outcomes stay provisional, with no hooks or publication until the existing outer Run confirms commit.",
+      "reason": "This SQL retires one currently running controller lease, not every nonterminal logical input consumer. dead_letter is the successful terminal destination of that exact transition, not eligibility to rewrite arbitrary terminal jobs. The exact token pointer and repeated type/status predicates prevent a reclaimed or changed source from authorizing retirement; no unexpired-lease or provider no-launch proof is inferred.",
       "evidence": [
-        "internal/db/code_review_job_terminal.go:16",
+        "internal/db/code_review_job_terminal.go:343-346 codeReviewTerminalJobUpdateQuery",
+        "internal/db/code_review_job_terminal.go:376-456 source/locked candidate comparison and exact jobs CAS",
+        "internal/db/code_review_job_terminal.go:117-142 explicit Run and known-commit seal",
+        "internal/worker/worker.go:675-723 exact worker token/type/outcome check before hooks",
         "status = 'dead_letter'",
         "status = 'running'"
       ],
@@ -522,12 +556,33 @@
         {
           "fact": "status = 'dead_letter'",
           "classification": "lease-owned",
-          "action_0a": "Keep running-only source eligibility and exact lease/token CAS; keep the existing target status where successful. Exclude awaiting_start_control from generic execution reclaim, renewal, success, failure, retry and dead-letter; only lifecycle parked-control operations may change that state."
+          "action_0a": "Keep dead_letter as the destination of the exact running/token/type retirement CAS, together with lease/owner-pointer clearing and same-transaction domain work. This assignment grants no eligibility over arbitrary terminal or parked rows and no target effects before known outer commit."
         },
         {
           "fact": "status = 'running'",
           "classification": "lease-owned",
-          "action_0a": "Keep running-only source eligibility and exact lease/token CAS; keep the existing target status where successful. Exclude awaiting_start_control from generic execution reclaim, renewal, success, failure, retry and dead-letter; only lifecycle parked-control operations may change that state."
+          "action_0a": "Keep running-only source eligibility plus exact org/job/lock-token/retained-type equality and one-row CAS. Do not widen to pending, any terminal status or awaiting_start_control, and do not reinterpret a lease-free parked consumer as crashed execution."
+        }
+      ]
+    },
+    {
+      "id": "internal/db/code_review_job_terminal.go:readCodeReviewTerminalCandidate:sql:1",
+      "source_sha256": "4b7eefa1b737edae7634f45a550fdc572fcfa0475d846952f3662c70efe4b005",
+      "classification": "lease-owned",
+      "action_0a": "Keep the bounded scalar source read restricted to exact org/job/status running/lock-token and the two supported code-review controller types. Preserve the initial nonlocking hint, later FOR UPDATE reread under the domain metadata locks, and complete retained-candidate equality before retirement. Missing or changed lease produces no ownership; query errors refuse rather than select job-only fallback. Exclude pending, terminal and awaiting_start_control states from both reads.",
+      "reason": "Although read-only, this query is the source execution-owner eligibility gate for retirement, not passive observation or a general nonterminal-consumer lookup. A parked lifecycle intent deliberately owns logical input without a running lease and must never qualify here. The query proves current running/token-pointer correlation only; it does not test expiry, grant provider/runtime authority or establish fresh shared lifecycle epochs.",
+      "evidence": [
+        "internal/db/code_review_job_terminal.go:148-160 codeReviewTerminalCandidateQuery",
+        "internal/db/code_review_job_terminal.go:168-185 reader and optional row lock",
+        "internal/db/code_review_job_terminal.go:386-417 initial read, locked reread and equality refusal",
+        "internal/models/job_enums.go:26-38 distinct runnable/lease/nonterminal-consumer/terminal policies",
+        "status = 'running'"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "status = 'running'",
+          "classification": "lease-owned",
+          "action_0a": "Retain running-only exact org/job/token/controller-type selection in both initial and locked reads. Preserve no-owner results on lease miss and error refusal on storage failure; never add pending, terminal or awaiting_start_control to this execution-lease gate."
         }
       ]
     },
@@ -1415,24 +1470,26 @@
     },
     {
       "id": "internal/db/review_loops.go:SessionReviewLoopStore.ListStrandedPublicationLoops:sql:1",
-      "source_sha256": "6a84db99e4277528325982ea52f1ac6ac2e2e40830b31e83c7966c8365d7b7ca",
+      "source_sha256": "220118546a52421bfa313d70200640f6bac4bb0faf730d5e6de9e5ccebe24b20",
       "classification": "nonterminal-consumer",
       "action_0a": "For each session/thread-scoped no-active-work or competing-input clause, use the shared nonterminal-consumer/parked-control test before treating work as absent, drained or failed. Keep exact terminal-job clauses terminal-only and execution-owner clauses running-only. Preserve domain PR/automation locks, job-type filters and identity; close stale parked controls through SupersedeUnlaunchedIntentInTx before releasing their logical lane.",
-      "reason": "Recovery, duplicate admission, workspace/container cleanup and parent settlement must not race a durable parked input; a terminal predecessor does not prove absence of a parked successor.",
+      "reason": "Recovery, duplicate admission, workspace/container cleanup and parent settlement must not race a durable parked input; a terminal predecessor does not prove absence of a parked successor. Retained creation and unresolved initial admission are independently excluded before stranded restart; the existing pending/running job predicate still has its separately tracked parked-control conversion obligation.",
       "evidence": [
         "internal/db/review_loops.go:50",
-        "jobs . status in ( 'pending' , 'running' )"
+        "jobs . status in ( 'pending' , 'running' )",
+        "internal/services/reviewloop/retained_start_cancel_postgres_test.go:TestRetainedPublicationWriterOrderingPostgres"
       ]
     },
     {
       "id": "internal/db/review_loops.go:SessionReviewLoopStore.RestartStrandedPublicationLoop:sql:1",
-      "source_sha256": "9e9190a523142452377be4498b65fcd76215a281620d5592c2b16d6178c78e6f",
+      "source_sha256": "9e4a3fc55bfee36bf85f06a8e9297769ef5ac35f412dab7753ee032f2d5a4ee2",
       "classification": "nonterminal-consumer",
       "action_0a": "For each session/thread-scoped no-active-work or competing-input clause, use the shared nonterminal-consumer/parked-control test before treating work as absent, drained or failed. Keep exact terminal-job clauses terminal-only and execution-owner clauses running-only. Preserve domain PR/automation locks, job-type filters and identity; close stale parked controls through SupersedeUnlaunchedIntentInTx before releasing their logical lane.",
-      "reason": "Recovery, duplicate admission, workspace/container cleanup and parent settlement must not race a durable parked input; a terminal predecessor does not prove absence of a parked successor.",
+      "reason": "Recovery, duplicate admission, workspace/container cleanup and parent settlement must not race a durable parked input; a terminal predecessor does not prove absence of a parked successor. Retained creation and unresolved initial admission are independently excluded before stranded restart; the existing pending/running job predicate still has its separately tracked parked-control conversion obligation.",
       "evidence": [
-        "internal/db/review_loops.go:102",
-        "jobs . status in ( 'pending' , 'running' )"
+        "internal/db/review_loops.go:110",
+        "jobs . status in ( 'pending' , 'running' )",
+        "internal/services/reviewloop/retained_start_cancel_postgres_test.go:TestRetainedPublicationWriterOrderingPostgres"
       ]
     },
     {

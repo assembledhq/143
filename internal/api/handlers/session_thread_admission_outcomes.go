@@ -89,6 +89,12 @@ func writeThreadMessageAdmissionError(w http.ResponseWriter, r *http.Request, er
 		writeError(w, r, http.StatusConflict, "STALE_ADMISSION", "the message admission scope has changed")
 	case errors.Is(err, db.ErrMessageAdmissionSpecialistControlRequired):
 		writeError(w, r, http.StatusConflict, "SPECIALIST_CONTROL_REQUIRED", "this session requires its specialist control action")
+	case errors.Is(err, db.ErrMessageAdmissionNotResumable):
+		writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message")
+	case errors.Is(err, db.ErrMessageAdmissionNotIdle):
+		writeError(w, r, http.StatusConflict, "NOT_IDLE", "thread must be idle to send a message")
+	case errors.Is(err, db.ErrMessageAdmissionChangesetNotFound):
+		writeError(w, r, http.StatusNotFound, "CHANGESET_NOT_FOUND", "pull request target not found")
 	case errors.Is(err, db.ErrMessageAdmissionNotAllowed), errors.Is(err, db.ErrMessageAdmissionActorForbidden):
 		writeError(w, r, http.StatusForbidden, "FORBIDDEN", "message admission is not permitted")
 	case errors.Is(err, db.ErrMessageAdmissionAwaitingInput):
