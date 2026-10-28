@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -785,6 +786,92 @@ func TestCodexAdapter_Execute(t *testing.T) {
 			require.NotContains(t, provider.ExecCalls[0], "\"$(cat '/home/sandbox/.143-prompt.md')\"", "codex should not pass the initial prompt as an argv argument")
 			require.NotContains(t, provider.ExecCalls[0], ".143-agent.pid", "codex adapter must not embed pidfile scaffolding (provider internal)")
 			require.NotContains(t, provider.ExecCalls[0], "& pid=$!", "codex adapter must not embed shell-shim wrapping (provider internal)")
+		})
+	}
+}
+
+func TestCodexAdapter_ExecuteAbnormalExitDiagnostics(t *testing.T) {
+	t.Parallel()
+	capacityError := "Selected model is at capacity. Please try a different model."
+	tests := []struct {
+		name                string
+		providerError       string
+		stderr              string
+		wantProviderSnippet string
+		wantCapacity        bool
+		wantTransport       bool
+	}{
+		{
+			name:                "model capacity remains visible beside MCP shutdown",
+			providerError:       capacityError,
+			stderr:              "ERROR rmcp::transport::worker: Transport channel closed, when AuthRequired",
+			wantProviderSnippet: capacityError,
+			wantCapacity:        true,
+		},
+		{
+			name:          "transport failure without parsed provider error",
+			stderr:        "stream disconnected before completion: error sending request for url",
+			wantTransport: true,
+		},
+		{
+			name:                "parsed provider error is bounded independently from stderr",
+			providerError:       capacityError + strings.Repeat("x", 700),
+			stderr:              "Transport channel closed",
+			wantProviderSnippet: (capacityError + strings.Repeat("x", 700))[:600],
+			wantCapacity:        true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var output bytes.Buffer
+			adapter := NewCodexAdapter(zerolog.New(&output))
+			provider := testutil.NewMockSandboxProvider()
+			codexExecutions := 0
+			provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+				if strings.Contains(cmd, "codex exec") {
+					codexExecutions++
+					if tt.providerError != "" {
+						event, err := json.Marshal(map[string]any{"type": "turn.failed", "error": map[string]string{"message": tt.providerError}})
+						if err != nil {
+							return 0, err
+						}
+						if _, err := stdout.Write(append(event, '\n')); err != nil {
+							return 0, err
+						}
+					}
+					if _, err := io.WriteString(stderr, tt.stderr); err != nil {
+						return 0, err
+					}
+					return 1, nil
+				}
+				if strings.HasPrefix(cmd, "git rev-parse") {
+					_, err := io.WriteString(stdout, "true\n")
+					return 0, err
+				}
+				return 0, nil
+			}
+			sandbox := &agent.Sandbox{ID: "test-sandbox", SessionID: "test-session", OrgID: "test-org", WorkDir: "/workspace", HomeDir: "/home/sandbox", Metadata: map[string]string{agent.SandboxMetadataBaseCommitSHA: "base-commit"}}
+			logs := make(chan agent.LogEntry, 100)
+			result, err := adapter.Execute(WithSandboxProvider(context.Background(), provider), sandbox, &agent.AgentPrompt{UserPrompt: "Inspect a synthetic change."}, logs)
+			require.NoError(t, err, "a completed CLI invocation should return its execution result")
+			require.NotNil(t, result, "a completed CLI invocation should preserve its execution result")
+			require.Equal(t, 1, codexExecutions, "diagnostic classification must not replay the model execution")
+			require.Equal(t, 1, result.ExitCode, "the failed reviewer execution should retain its actual exit status")
+			decoder := json.NewDecoder(&output)
+			var abnormal map[string]any
+			for decoder.More() {
+				var entry map[string]any
+				require.NoError(t, decoder.Decode(&entry), "structured diagnostic entries should remain valid JSON")
+				if entry["message"] == "codex CLI exited abnormally" {
+					abnormal = entry
+				}
+			}
+			require.NotNil(t, abnormal, "abnormal CLI exits should emit a structured diagnostic")
+			require.Equal(t, tt.wantProviderSnippet, abnormal["provider_error_snippet"], "the parsed provider failure should remain independently visible and bounded")
+			require.Equal(t, tt.wantCapacity, abnormal["model_capacity"], "the diagnostic should attribute explicit model capacity correctly")
+			require.Equal(t, tt.wantTransport, abnormal["transport_failure"], "incidental MCP shutdown must not replace the explicit model failure")
+			require.Equal(t, tt.stderr, abnormal["stderr_snippet"], "filtered stderr should remain available alongside the primary provider error")
 		})
 	}
 }
