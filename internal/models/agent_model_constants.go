@@ -64,6 +64,8 @@ const (
 	CodexModelGPT6Astra       = "gpt-6-astra"
 	CodexModelGPT61Sol        = "gpt-6.1-sol"
 	CodexModelGPT61SolFast    = "gpt-6.1-sol-fast"
+	CodexModelGPT61Terra      = "gpt-6.1-terra"
+	CodexModelGPT61TerraFast  = "gpt-6.1-terra-fast"
 	CodexModelGPT6Sol         = "gpt-6-sol"
 	CodexModelGPT6Luna        = "gpt-6-luna"
 	CodexModelGPT56Sol        = "gpt-5.6-sol"
@@ -93,6 +95,8 @@ var AvailableCodexModels = []string{
 	CodexModelGPT6Astra,
 	CodexModelGPT61Sol,
 	CodexModelGPT61SolFast,
+	CodexModelGPT61Terra,
+	CodexModelGPT61TerraFast,
 	CodexModelGPT6Sol,
 	CodexModelGPT6Luna,
 	CodexModelGPT56Sol,
@@ -220,6 +224,8 @@ func CodexRuntimeModel(model string) CodexRuntimeSpec {
 	switch model {
 	case CodexModelGPT61SolFast:
 		return CodexRuntimeSpec{Model: CodexModelGPT61Sol, PriorityTier: true}
+	case CodexModelGPT61TerraFast:
+		return CodexRuntimeSpec{Model: CodexModelGPT61Terra, PriorityTier: true}
 	case CodexModelGPT56SolFast:
 		return CodexRuntimeSpec{Model: CodexModelGPT56Sol, PriorityTier: true}
 	case CodexModelGPT56TerraFast:
