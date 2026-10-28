@@ -129,6 +129,22 @@ func TestCodexModelArgs(t *testing.T) {
 			expected: ` -m 'gpt-6.1-sol'`,
 		},
 		{
+			name:     "adds priority service tier for gpt 6.1 terra fast",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT61TerraFast},
+			expected: ` -m 'gpt-6.1-terra' -c 'service_tier="priority"'`,
+		},
+		{
+			name:           "uses gpt 6.1 terra fast from the effective model",
+			env:            map[string]string{},
+			effectiveModel: models.CodexModelGPT61TerraFast,
+			expected:       ` -m 'gpt-6.1-terra' -c 'service_tier="priority"'`,
+		},
+		{
+			name:     "passes regular gpt 6.1 terra without a service tier",
+			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT61Terra},
+			expected: ` -m 'gpt-6.1-terra'`,
+		},
+		{
 			name:     "adds priority service tier for gpt 5.6 sol fast",
 			env:      map[string]string{"OPENAI_MODEL": models.CodexModelGPT56SolFast},
 			expected: ` -m 'gpt-5.6-sol' -c 'service_tier="priority"'`,

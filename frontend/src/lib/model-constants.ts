@@ -34,6 +34,9 @@ export const CODEX_MODEL_GPT_6_ASTRA = "gpt-6-astra";
 export const CODEX_MODEL_GPT_6_1_SOL = "gpt-6.1-sol";
 // Local alias: the adapter sends gpt-6.1-sol with service_tier="priority".
 export const CODEX_MODEL_GPT_6_1_SOL_FAST = "gpt-6.1-sol-fast";
+export const CODEX_MODEL_GPT_6_1_TERRA = "gpt-6.1-terra";
+// Local alias: the adapter sends gpt-6.1-terra with service_tier="priority".
+export const CODEX_MODEL_GPT_6_1_TERRA_FAST = "gpt-6.1-terra-fast";
 export const CODEX_MODEL_GPT_6_SOL = "gpt-6-sol";
 export const CODEX_MODEL_GPT_6_LUNA = "gpt-6-luna";
 export const CODEX_MODEL_GPT_5_6_SOL = "gpt-5.6-sol";
@@ -60,6 +63,8 @@ export const AVAILABLE_CODEX_MODELS = [
   CODEX_MODEL_GPT_6_ASTRA,
   CODEX_MODEL_GPT_6_1_SOL,
   CODEX_MODEL_GPT_6_1_SOL_FAST,
+  CODEX_MODEL_GPT_6_1_TERRA,
+  CODEX_MODEL_GPT_6_1_TERRA_FAST,
   CODEX_MODEL_GPT_6_SOL,
   CODEX_MODEL_GPT_6_LUNA,
   CODEX_MODEL_GPT_5_6_SOL,

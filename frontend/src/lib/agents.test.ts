@@ -193,6 +193,8 @@ describe("agentTypeForModel", () => {
     expect(agentTypeForModel("gpt-6-astra")).toBe("codex");
     expect(agentTypeForModel("gpt-6.1-sol")).toBe("codex");
     expect(agentTypeForModel("gpt-6.1-sol-fast")).toBe("codex");
+    expect(agentTypeForModel("gpt-6.1-terra")).toBe("codex");
+    expect(agentTypeForModel("gpt-6.1-terra-fast")).toBe("codex");
     expect(agentTypeForModel("claude-sonnet-5-5")).toBe("claude_code");
     expect(agentTypeForModel("claude-haiku-5-5")).toBe("claude_code");
     expect(agentTypeForModel("claude-fable-5-1")).toBe("claude_code");
