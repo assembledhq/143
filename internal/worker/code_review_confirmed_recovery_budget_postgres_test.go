@@ -33,8 +33,7 @@ type confirmedBudgetPoll struct {
 // contexts, queue, full handler, retries, leases and retirement remain real.
 func newConfirmedBudgetPoll(t *testing.T, pool *pgxpool.Pool, f strandedReviewFixture, services *Services, node string, base db.CodeReviewMetadataTransactions) confirmedBudgetPoll {
 	t.Helper()
-	run := &postpublicationPRLockRun{base: base, entered: make(chan struct{}, 1), start: make(chan struct{}),
-		returnGate: make(chan struct{}), attempt: make(chan postpublicationPRLockAttempt, 3), returned: make(chan postpublicationPRLockRunResult, 1)}
+	run := newPostpublicationPRLockRun(base, pool, f)
 	f.stores.ThreadSendDependencies.Transactions = run
 	var err error
 	f.stores.CodeReviews, err = db.NewCodeReviewStoreWithTerminalTransactions(pool, run)

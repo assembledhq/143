@@ -29,7 +29,7 @@ import (
 type confirmedRetirementEffectsPublisher struct {
 	postpublicationPRLockPublisher
 	statusRequests []codereviewsvc.UpsertReviewStatusCommentRequest
-	hideRequests   []codereviewsvc.HideReviewSummaryRequest
+	hideRequests   []codereviewsvc.SyncReviewSummaryRequest
 	replyRequests  []ghservice.CodeReviewDisputeReplyRequest
 }
 
@@ -40,7 +40,7 @@ func (p *confirmedRetirementEffectsPublisher) UpsertReviewStatusComment(_ contex
 	return 9001, nil
 }
 
-func (p *confirmedRetirementEffectsPublisher) HideReviewSummary(_ context.Context, request codereviewsvc.HideReviewSummaryRequest) error {
+func (p *confirmedRetirementEffectsPublisher) SyncReviewSummary(_ context.Context, request codereviewsvc.SyncReviewSummaryRequest) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.hideRequests = append(p.hideRequests, request)
@@ -301,7 +301,7 @@ func TestConfirmedPublicationRetirementEffectsPostgres(t *testing.T) {
 			require.NoError(t, err, "record an actual synthetic provider lifecycle observation before outcome projection")
 			require.NoError(t, f.stores.CodeReviewInsights.RecordHumanReview(ctx, f.job.OrgID, f.job.PullRequestID, 8201, "synthetic-human", "User", "MEMBER", "synthetic-author", "approved", observedAt), "record a real independent human-review observation that projection must retain")
 			providerRows := confirmedRetirementProviderRows(t, ctx, pool, f.job.OrgID)
-			run := &postpublicationPRLockRun{base: f.stores.ThreadSendDependencies.Transactions, entered: make(chan struct{}, 1), start: make(chan struct{}), returnGate: make(chan struct{}), attempt: make(chan postpublicationPRLockAttempt, 3), returned: make(chan postpublicationPRLockRunResult, 1)}
+			run := newPostpublicationPRLockRun(f.stores.ThreadSendDependencies.Transactions, pool, f)
 			f.stores.ThreadSendDependencies.Transactions = run
 			f.stores.CodeReviews, err = db.NewCodeReviewStoreWithTerminalTransactions(pool, run)
 			require.NoError(t, err, "wire the actual metadata capability to the original bounded runner")
@@ -408,7 +408,7 @@ func TestConfirmedPublicationRetirementEffectsPostgres(t *testing.T) {
 			consume(statusID, models.JobTypeSyncCodeReviewStatusComment)
 			wantPendingStatus := codereviewsvc.UpsertReviewStatusCommentRequest{InstallationID: 1, Repository: "test/saved-review", PullNumber: 9, Body: codeReviewStatusCommentBody(metadata, nil, codeReviewSessionURL(services.FrontendURL, f.job.SessionID), "")}
 			require.Equal(t, []codereviewsvc.UpsertReviewStatusCommentRequest{wantPendingStatus}, publisher.statusRequests, "an independently queued real status reader must publish exact ongoing truth, not failure/fresh-review guidance")
-			require.Empty(t, publisher.hideRequests, "an independent status reader must not hide the confirmed formal result before actual local completion")
+			require.Empty(t, publisher.hideRequests, "an independent status reader must not finalize the formal result or remove progress before actual local completion")
 			require.Equal(t, beforeDispute, confirmedRetirementDisputeRow(t, ctx, pool, f.job.OrgID, disputeID), "independent active status reconciliation must not fail or otherwise rewrite the whole original dispute")
 			pendingBody := "I recorded the objection and started a reassessment of the latest pull request revision. [View the dispute](https://example.invalid/code-reviews?evidence=" + reviewedSession.String() + ")\n\n" + ghservice.PRFeedbackHiddenMarker("code-review-dispute:"+disputeID.String())
 			wantReply := ghservice.CodeReviewDisputeReplyRequest{OrgID: f.job.OrgID, InstallationID: 1, Repository: "test/saved-review", PullRequestNumber: 9, ThreadRootCommentID: new(int64(8100)), Body: pendingBody}
@@ -486,11 +486,13 @@ func TestConfirmedPublicationRetirementEffectsPostgres(t *testing.T) {
 			var finalStatusID uuid.UUID
 			require.NoError(t, pool.QueryRow(ctx, `SELECT id FROM jobs WHERE org_id=$1 AND job_type='sync_code_review_status_comment' AND status='pending' AND dedupe_key=$2`, f.job.OrgID, "code_review_status_comment:"+f.job.SessionID.String()+":terminal").Scan(&finalStatusID), "actual successful completion must enqueue normal terminal status sync")
 			consume(finalStatusID, models.JobTypeSyncCodeReviewStatusComment)
-			wantFinalStatus := wantPendingStatus
-			wantFinalStatus.Body = codeReviewStatusCommentBody(completedMetadata, nil, codeReviewSessionURL(services.FrontendURL, f.job.SessionID), "")
-			wantFinalStatus.ExistingCommentID = new(int64(9001))
-			require.Equal(t, []codereviewsvc.UpsertReviewStatusCommentRequest{wantPendingStatus, wantFinalStatus}, publisher.statusRequests, "normal terminal status must replace ongoing copy with the same original successful result")
-			require.Equal(t, []codereviewsvc.HideReviewSummaryRequest{{InstallationID: 1, Repository: "test/saved-review", PullNumber: 9, ReviewID: 77, OutputKey: f.job.OutputKey}}, publisher.hideRequests, "only after actual completion may normal terminal sync hide the redundant formal summary")
+			wantFinalSummary := codereviewsvc.SyncReviewSummaryRequest{InstallationID: 1, Repository: "test/saved-review", PullNumber: 9,
+				ReviewID: 77, OutputKey: f.job.OutputKey,
+				Body:                  codeReviewStatusCommentBody(completedMetadata, nil, codeReviewSessionURL(services.FrontendURL, f.job.SessionID), ""),
+				RemoveProgressComment: true}
+			require.Equal(t, []codereviewsvc.UpsertReviewStatusCommentRequest{wantPendingStatus}, publisher.statusRequests, "terminal sync must finalize the formal review without publishing a second issue-comment summary")
+			require.Equal(t, []codereviewsvc.SyncReviewSummaryRequest{wantFinalSummary}, publisher.hideRequests, "only after actual completion may normal terminal sync preserve the full original formal result and remove temporary progress")
+			require.Contains(t, publisher.hideRequests[0].Body, body, "formal summary synchronization must retain the complete original published review body")
 			var outcomeID uuid.UUID
 			require.NoError(t, pool.QueryRow(ctx, `SELECT id FROM jobs WHERE org_id=$1 AND job_type=$3 AND status='pending' AND dedupe_key=$2`, f.job.OrgID, "code_review_outcome:"+f.job.SessionID.String(), models.JobTypeReconcileCodeReviewOutcomes).Scan(&outcomeID), "actual completion must enqueue normal outcome projection")
 			consume(outcomeID, models.JobTypeReconcileCodeReviewOutcomes)
