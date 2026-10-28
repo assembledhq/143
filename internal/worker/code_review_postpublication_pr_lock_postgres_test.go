@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,13 +62,15 @@ type postpublicationPRLockRunResult struct {
 	attempts []postpublicationPRLockAttempt
 }
 
-// The first Run is the full completion unit in this staged usable-output
-// route. Entry/return gates surround the supplied real runner; they never
-// answer SQL, substitute errors, alter its context or settle a transaction.
+// Gate the completion phase only after entry reconciliation has finished and
+// the original assessment has a real confirmed receipt. Earlier units retain
+// the supplied runner unchanged, including on already-confirmed repaired polls.
 type postpublicationPRLockRun struct {
 	base       db.CodeReviewMetadataTransactions
 	mu         sync.Mutex
-	calls      int
+	ready      func(context.Context) (bool, error)
+	gated      bool
+	calls      int // Counts only the selected completion gate.
 	entered    chan struct{}
 	start      chan struct{}
 	returnGate chan struct{}
@@ -75,14 +78,87 @@ type postpublicationPRLockRun struct {
 	returned   chan postpublicationPRLockRunResult
 }
 
+// Observe the exact real GetBySessionID read used by recoverStagedFullAssessment.
+// Future selector drift fails closed: no matching successful read means no gate.
+const postpublicationAssessmentEntryQuery = "SELECT * FROM code_review_revision_assessments WHERE org_id=$1 AND session_id=$2 AND review_scope='full' ORDER BY created_at DESC,id DESC LIMIT 1"
+
+type postpublicationAssessmentEntryDB struct {
+	db.DBTX
+	orgID, sessionID uuid.UUID
+	ready            *atomic.Bool
+}
+
+func (d postpublicationAssessmentEntryDB) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
+	rows, err := d.DBTX.Query(ctx, query, args...)
+	if err != nil || query != postpublicationAssessmentEntryQuery || len(args) != 2 {
+		return rows, err
+	}
+	orgID, orgOK := args[0].(uuid.UUID)
+	sessionID, sessionOK := args[1].(uuid.UUID)
+	if !orgOK || !sessionOK || orgID != d.orgID || sessionID != d.sessionID {
+		return rows, nil
+	}
+	return &postpublicationAssessmentEntryRows{Rows: rows, ready: d.ready}, nil
+}
+
+type postpublicationAssessmentEntryRows struct {
+	pgx.Rows
+	ready               *atomic.Bool
+	scanned, scanFailed bool
+}
+
+func (rows *postpublicationAssessmentEntryRows) Scan(dest ...any) error {
+	err := rows.Rows.Scan(dest...)
+	if err != nil {
+		rows.scanFailed = true
+	} else {
+		rows.scanned = true
+	}
+	return err
+}
+
+func (rows *postpublicationAssessmentEntryRows) Close() {
+	rows.Rows.Close()
+	if rows.scanned && !rows.scanFailed && rows.Rows.Err() == nil {
+		rows.ready.Store(true)
+	}
+}
+
+func newPostpublicationPRLockRun(base db.CodeReviewMetadataTransactions, pool *pgxpool.Pool, f strandedReviewFixture) *postpublicationPRLockRun {
+	stageReady := new(atomic.Bool)
+	f.stores.CodeReviewAssessments = db.NewCodeReviewAssessmentStore(postpublicationAssessmentEntryDB{
+		DBTX: pool, orgID: f.job.OrgID, sessionID: f.job.SessionID, ready: stageReady,
+	})
+	return &postpublicationPRLockRun{base: base, ready: func(ctx context.Context) (bool, error) {
+		if !stageReady.Load() {
+			return false, nil
+		}
+		var confirmed bool
+		err := pool.QueryRow(ctx, `SELECT publication_state='confirmed' AND publication_receipt IS NOT NULL
+ FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.assessment).Scan(&confirmed)
+		return confirmed, err
+	}, entered: make(chan struct{}, 1), start: make(chan struct{}), returnGate: make(chan struct{}),
+		attempt: make(chan postpublicationPRLockAttempt, 3), returned: make(chan postpublicationPRLockRunResult, 1)}
+}
+
 func (r *postpublicationPRLockRun) Run(ctx context.Context, work func(context.Context, pgx.Tx) error) error {
 	r.mu.Lock()
-	r.calls++
-	first := r.calls == 1
-	r.mu.Unlock()
-	if !first {
+	if r.gated {
+		r.mu.Unlock()
 		return r.base.Run(ctx, work)
 	}
+	ready, err := r.ready(ctx)
+	if err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	if !ready {
+		r.mu.Unlock()
+		return r.base.Run(ctx, work)
+	}
+	r.gated = true
+	r.calls++
+	r.mu.Unlock()
 	select {
 	case r.entered <- struct{}{}:
 	case <-ctx.Done():
@@ -94,7 +170,7 @@ func (r *postpublicationPRLockRun) Run(ctx context.Context, work func(context.Co
 		return ctx.Err()
 	}
 	var attempts []postpublicationPRLockAttempt
-	err := r.base.Run(ctx, func(unitCtx context.Context, tx pgx.Tx) error {
+	err = r.base.Run(ctx, func(unitCtx context.Context, tx pgx.Tx) error {
 		observation := postpublicationPRLockAttempt{pid: tx.Conn().PgConn().PID()}
 		observation.deadline, _ = unitCtx.Deadline()
 		observation.remaining = time.Until(observation.deadline)
@@ -223,9 +299,7 @@ func TestPostpublicationFullHandlerPRLockRecoveryPostgres(t *testing.T) {
 			require.Equal(t, models.CodeReviewPublicationNotStarted, staged.PublicationState, "fixture must perform its own real publication writes")
 			require.Nil(t, staged.PublicationReceipt, "fixture must not preseed the positive publication receipt")
 			require.Equal(t, &body, staged.RenderedBody, "fixture explicitly chooses usable staged output")
-			run := &postpublicationPRLockRun{base: f.stores.ThreadSendDependencies.Transactions,
-				entered: make(chan struct{}, 1), start: make(chan struct{}), returnGate: make(chan struct{}),
-				attempt: make(chan postpublicationPRLockAttempt, 3), returned: make(chan postpublicationPRLockRunResult, 1)}
+			run := newPostpublicationPRLockRun(f.stores.ThreadSendDependencies.Transactions, pool, f)
 			f.stores.ThreadSendDependencies.Transactions = run
 			f.stores.CodeReviews, err = db.NewCodeReviewStoreWithTerminalTransactions(pool, run)
 			require.NoError(t, err, "wire aware metadata to the actual supplied bounded runner")
