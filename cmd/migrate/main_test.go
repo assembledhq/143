@@ -314,6 +314,12 @@ func TestMigrationsRestrictConcurrentIndexes(t *testing.T) {
 		"000381_admission_active_repair_lookup.down.sql":         "DROP INDEX CONCURRENTLY idx_admission_active_repair_lookup",
 		"000382_admission_pending_question_lookup.up.sql":        "CREATE INDEX CONCURRENTLY idx_admission_pending_question_lookup",
 		"000382_admission_pending_question_lookup.down.sql":      "DROP INDEX CONCURRENTLY idx_admission_pending_question_lookup",
+		"000385_code_review_dispatch_due.up.sql":                 "CREATE INDEX CONCURRENTLY idx_cr_agent_results_dispatch_due",
+		"000385_code_review_dispatch_due.down.sql":               "DROP INDEX CONCURRENTLY idx_cr_agent_results_dispatch_due",
+		"000386_review_loop_startup_due.up.sql":                  "CREATE INDEX CONCURRENTLY idx_srl_startup_send_due",
+		"000386_review_loop_startup_due.down.sql":                "DROP INDEX CONCURRENTLY idx_srl_startup_send_due",
+		"000387_review_loop_startup_pass_key.up.sql":             "CREATE UNIQUE INDEX CONCURRENTLY idx_srl_passes_org_session_loop_id",
+		"000387_review_loop_startup_pass_key.down.sql":           "DROP INDEX CONCURRENTLY idx_srl_passes_org_session_loop_id",
 	}
 
 	for _, path := range files {

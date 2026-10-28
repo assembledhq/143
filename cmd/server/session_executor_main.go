@@ -187,7 +187,14 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	// Code review lifecycle fanout so reviews run by the executor refresh the
 	// live code reviews list. nil-safe when redisClient is unavailable.
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
-	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewTransactions, err := db.NewThreadSendTransactions(pool)
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor code review terminal transactions: %w", err)
+	}
+	codeReviewStore, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, codeReviewTransactions)
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor code review terminal store: %w", err)
+	}
 	codeReviewStore.SetJobStore(jobStore)
 	codeReviewStore.SetStreams(codeReviewStreams)
 	codeReviewStore.SetLogger(logger)
@@ -446,16 +453,19 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) (*worker.Stores, 
 	if deps.PullRequests == nil {
 		deps.PullRequests = db.NewPullRequestStore(pool)
 	}
-	if deps.CodeReviews == nil {
-		deps.CodeReviews = db.NewCodeReviewStore(pool)
-	}
-	deps.CodeReviews.SetJobStore(deps.Jobs)
-	codeReviewRecheckStore := db.NewCodeReviewRecheckStore(pool)
-	codeReviewRecheckStore.SetJobStore(deps.Jobs)
 	threadSendDependencies, err := threadservice.NewSendDependencies(pool, deps.Sessions, deps.SessionThreads, deps.Jobs)
 	if err != nil {
 		return nil, fmt.Errorf("construct session executor store thread send dependencies: %w", err)
 	}
+	if deps.CodeReviews == nil {
+		deps.CodeReviews, err = db.NewCodeReviewStoreWithTerminalTransactions(pool, threadSendDependencies.Transactions)
+		if err != nil {
+			return nil, fmt.Errorf("construct session executor fallback code review terminal store: %w", err)
+		}
+	}
+	deps.CodeReviews.SetJobStore(deps.Jobs)
+	codeReviewRecheckStore := db.NewCodeReviewRecheckStore(pool)
+	codeReviewRecheckStore.SetJobStore(deps.Jobs)
 	return &worker.Stores{
 		Issues:                 deps.Issues,
 		Sessions:               deps.Sessions,

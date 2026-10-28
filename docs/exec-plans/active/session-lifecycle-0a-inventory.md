@@ -6,6 +6,13 @@ Source: repository baseline `0323c7e8e7b71149cd85f23add4fc136edd79467`; inspecte
 
 Exact scoped counts: 255 distinct reviewed unfenced roots with `canonical_target`; 353 distinct unfenced syntax-only candidates; 608 total. This does not reclassify the other 56 inventory entries or excuse their compatibility obligations. The separate 123-site job-status inventory belongs solely to A.2; references here do not split that authority.
 
+Those IDs, counts and classifications describe the pinned historical baseline,
+not the current scanner set or a count of completed conversions. The A.1
+successor and tracing records below retain the old IDs while naming their
+current implementations, retirements and unresolved transfers. They neither
+close another family's obligations nor establish a compatibility floor,
+activation readiness or production acceptance.
+
 ## Ownership rules
 
 - Each reviewed root below has exactly one primary caller/increment owner, even if its `canonical_target` names several shared operations. Whole-root completion requires every nested/shared branch's call-through evidence, not only the primary branch.
@@ -126,11 +133,30 @@ All root rows retain the source inventory's full `canonical_target`, authority, 
 | `internal/db/session_thread_store.go:SessionThreadStore.claimForSession` | A.1 | AdmitMessageInTx |
 | `internal/db/session_thread_store.go:SessionThreadStore.ClaimIdle` | A.1 | AdmitMessageInTx |
 | `internal/db/session_thread_store.go:SessionThreadStore.ClaimIdleForSession` | A.1 | AdmitMessageInTx, AdmitAnswerInTx |
-| `internal/services/thread/service.go:Service.claimSessionForSend` | A.1 | AdmitMessageInTx |
-| `internal/services/thread/service.go:Service.claimThreadForSend` | A.1 | AdmitMessageInTx |
-| `internal/services/thread/service.go:Service.releaseThread` | A.1 | A.1 removes old unreceipted compensation via admission atomicity; retained exact compensation calls B.1, not a copied status reset. |
-| `internal/services/thread/service.go:Service.revertAfterSendFailure` | A.1 | A.1 removes old unreceipted compensation via admission atomicity; retained exact compensation calls B.1. |
+| `internal/services/thread/service.go:Service.claimSessionForSend` | A.1 | Retired baseline root. Active ordinary input uses AdmitMessageInTx with sibling-derived parent status and no session claim; compatible v0 uses `send_legacy_atomic.go:Service.claimLegacySessionInTx` inside the single whole-command transaction. |
+| `internal/services/thread/service.go:Service.claimThreadForSend` | A.1 | Retired baseline root. Active ordinary input uses AdmitMessageInTx and its bound lane claim; compatible v0 uses `send_legacy_atomic.go:Service.claimLegacyThreadInTx` inside the single whole-command transaction. |
+| `internal/services/thread/service.go:Service.releaseThread` | A.1 | Retired with no replacement compensation call. Whole-command rollback now removes provisional claims with message/inbox/job writes; uncertain settlement permits no status reset. Later exact settlement remains B.1. |
+| `internal/services/thread/service.go:Service.revertAfterSendFailure` | A.1 | Retired with no replacement compensation call. Whole-command rollback now removes provisional claims with message/inbox/job writes; uncertain settlement permits no status reset. Later exact settlement remains B.1. |
 | `internal/services/thread/service.go:Service.SendMessage` | A.1 | A.1 owns the real thread caller; A.3 owns its answer operation, A.2 its complete consumer/status contract, B.2 its execution handoff. |
+
+The current service root is `send_routing.go:Service.SendMessage`. Its active
+ordinary branch composes `AdmitMessageInTx`; its compatible v0 branch composes
+`runLegacySendUnit -> writeLegacySendInTx` with the same supplied transaction
+for deciding reads, both legacy claims, message/optional answers/comments,
+inbox, pending projection and enqueue. The runner owns settlement and bounded
+whole-command retries; the service publishes staged effects only after a known
+commit. The legacy option builders perform no enqueue or settlement themselves;
+their complete bodies and concrete envelopes are pinned by
+`send_legacy_options_pin_test.go`, since scanner syntax facts alone do not cover
+all payload, queue, priority and target expressions.
+
+`send_legacy_test.go` pins the single guarded unit, attempt reset and unknown
+stop rules; `send_postgres_legacy_atomic_test.go` and
+`send_postgres_legacy_failure_test.go` exercise whole-graph rollback and
+ambiguous settlement through the actual service. These are specific evidence
+boundaries, not proof that A.3 answers, A.4/A.5 callers, B/E execution, the
+adjacent old binary or H have been converted. The retained DB legacy claim
+wrappers are compatible-v0 dependencies, not alternate active admission owners.
 
 ### A.3: 15 reviewed roots
 
@@ -568,6 +594,31 @@ Tracing is read-only source work, not an assumption that the candidate mutates l
 - `internal/services/thread/service.go:Service.createQueuedMessage`
 - `internal/services/thread/service.go:Service.createQueuedMessageAndInboxInTx`
 - `internal/services/thread/service.go:Service.queueMessageWaitingForSlot`
+
+#### A.1-T01 successor and transfer ledger
+
+The nine baseline candidate IDs above remain the audit set. A trace records the
+real callee and persistence/effect owner; a transfer retains unresolved work
+instead of counting a call-through as complete canonical conversion.
+
+| Baseline candidate | Current callee chain and concrete boundary | Disposition / remaining owner |
+| --- | --- | --- |
+| `InternalSessionTabsHandler.SendMessage` | `internal_session_tabs.go -> thread.Service.SendMessage -> send_routing.go`; the service owns DB settlement, while the handler currently emits a tool audit after success. The handler maps legacy contention and unknown send outcomes to generic `SEND_MESSAGE_FAILED` rather than a retry/reconciliation contract, and active replay would repeat that audit. | Trace transferred to **A.4** for caller conversion. Stable ingress identity, unknown-first transport rendering and safe same-key retry guidance, specialist policy, and replay-safe audit/effect suppression remain required before active use. The legacy outcome gap is unresolved, not an accepted residual or a safe automatic retry; a caller without stable identity cannot infer abort or repeat a possibly committed send. |
+| `SessionThreadHandler.SendThreadMessage` | `session_threads.go -> thread.Service.SendMessage -> send_routing.go -> AdmitMessageInTx` for active ordinary input, or `runLegacySendUnit -> writeLegacySendInTx` for compatible v0. The service owns input/claim/job settlement; the HTTP adapter renders typed contention/unknown outcomes and suppresses repeated audits/hooks on exact replay. | A.1 ordinary-admission call-through is explicit. `session_thread_admission_outcomes_test.go` covers response precedence, original legacy response and replay suppression. A.3 answer handling and remaining active adapter-validation obligations are not closed by this trace. |
+| `ThreadInboxStore.AppendForMessage` | `thread_inbox_store.go` retains tenant/session/lane membership and lane-serialized sequence allocation with an idempotent inbox insert. Active `AdmitMessageInTx` and compatible `sqlLegacySendPersistence.AppendInboxInTx` both construct the store with the caller's transaction. | Retained shared persistence, not an admission owner. A.1 composes it atomically; A.6 replay/drain and other callers retain their own complete command/fence obligations. `send_persistence_test.go` pins the supplied transaction; full-schema admission and atomic-send tests cover the composed graph. |
+| `Service.appendInboxForMessage` | Retired from `service.go`; compatible v0 now calls `createLegacyMessageInTx -> appendLegacyInboxInTx -> send.Legacy.AppendInboxInTx -> ThreadInboxStore(tx).AppendForMessage`. | A.1 retirement/successor recorded. No independent pool append or settlement remains in the retired wrapper; active input uses `AdmitMessageInTx`'s supplied transaction. |
+| `Service.appendInboxForMessageWithStore` | Retired from `service.go`; the same `appendLegacyInboxInTx` chain supplies the exact current command transaction rather than selecting a separate receiver-backed store. | A.1 retirement/successor recorded. `send_persistence_test.go` retains transaction identity and exact tenant/scope evidence. |
+| `Service.createMessageInTx` | Retired from `service.go`; compatible v0 uses `writeLegacySendInTx -> createLegacyMessageInTx` for message, optional comment/question/free-text writes, inbox and pending projection, then enqueues in that same outer unit. | A.1 atomic successor recorded; latest-pending legacy answers are compatibility behavior, not A.3 exact-answer authority. `send_postgres_legacy_atomic_test.go` covers rollback after these provisional writes. |
+| `Service.createQueuedMessage` | Retired from `service.go`; queued branch selection and turn attribution now stay inside `writeLegacySendInTx`, which calls `createLegacyMessageInTx` in the command transaction. | A.1 atomic successor recorded. Pending/running mid-turn input and capacity waiting retain distinct legacy enqueue behavior; queue drain/reconciliation remains A.6. |
+| `Service.createQueuedMessageAndInboxInTx` | Retired from `service.go`; `writeLegacySendInTx -> createLegacyMessageInTx -> appendLegacyInboxInTx` groups message, inbox and pending writes with the command's claims and any live-delivery enqueue. | A.1 atomic successor recorded. `send_postgres_legacy_failure_test.go` and `send_postgres_legacy_atomic_test.go` cover full rollback, not a detached subtransaction or post-failure compensation. |
+| `Service.queueMessageWaitingForSlot` | Retired from `service.go`; `claimLegacyThreadInTx` computes the capacity outcome in the same unit, and `writeLegacySendInTx` writes the waiting message/inbox/pending count without a continuation job or claim. Postcommit queued owner-loss recovery remains separately bounded. | A.1 compatible-v0 successor recorded. Active ordinary capacity waiting belongs to `AdmitMessageInTx`; pending-input progression remains A.6, not a newly inferred start permit. |
+
+These traces do not resolve legacy non-HTTP caller outcomes in code-review
+dispatch or review-loop orchestration. Their family owner is A.5; durable retry
+identity and reconciliation after contention or unknown settlement remain
+unresolved. A retry label alone cannot make a possibly committed send safe to
+repeat. A.4/A.5 adapter conversion and H's mixed-writer/activation proof remain
+separate gates.
 
 ### Trace A.3-T01: 8 candidates; family owner A.3; audit G.0
 
@@ -1035,4 +1086,4 @@ The following choices define primary accountability, not new runtime semantics:
 
 ## Mechanical reconciliation signal for adoption
 
-Before adopting or updating this table, compare its reviewed IDs as a set with inventory entries whose classification is unfenced-needs-conversion and canonical_target is present; compare all candidate IDs with the complementary unfenced set. Require exact equality, no duplicates, one primary owner per row, and count 255/353 only for this pinned baseline. Source changes require refreshed inventory fingerprints and explicit owner transfer/addition, not preservation of stale counts. No code/tests or runtime operations were executed to create this planning ledger.
+For the original baseline assignment, compare its reviewed IDs as a set with that pinned inventory's entries whose classification is unfenced-needs-conversion and canonical_target is present; compare all candidate IDs with its complementary unfenced set. Require exact equality, no duplicates, one primary owner per row, and count 255/353 only for this pinned baseline. Current source changes require refreshed scanner fingerprints and explicit successor, retirement or owner-transfer records, not equality with retired baseline IDs or preservation of stale current counts. No code/tests or runtime operations were executed to create the original baseline planning assignment; later successor records name source and test boundaries without asserting their execution results or runtime acceptance.

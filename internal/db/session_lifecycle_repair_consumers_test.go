@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -240,6 +242,151 @@ func TestLifecycleConsumerRetainedRepairJobRoutes(t *testing.T) {
 				require.Equal(t, expectedBytes, payloadBytes, "exact retained-job payload reads must consume the same aggregate discovery budget as subsequent legacy reads")
 			}
 			require.NoError(t, mock.ExpectationsWereMet(), "the scoped reader must issue one exact tenant-qualified ID probe with no history scan, status filter, writes or transaction settlement")
+		})
+	}
+}
+
+func TestLifecycleConsumerRetainedRepairStreamBoundaries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, scenario string
+		closeError     bool
+		cause          error
+	}{
+		{name: "exact remaining byte budget", scenario: "exact"},
+		{name: "candidate IDs are deduplicated and sorted", scenario: "sort"},
+		{name: "unmatched evidence supplies no candidate", scenario: "no candidate"},
+		{name: "candidate cap precedes SQL", scenario: "precap", cause: ErrLifecycleConsumerDiscoveryIncomplete},
+		{name: "returned row cap", scenario: "returned cap", cause: ErrLifecycleConsumerDiscoveryIncomplete},
+		{name: "raw route cap", scenario: "route cap", cause: ErrLifecycleConsumerDiscoveryIncomplete},
+		{name: "first repair then missing reference", scenario: "missing", cause: ErrLifecycleConsumerReconciliation},
+		{name: "first repair then unexpected row", scenario: "unexpected", cause: ErrLifecycleConsumerReconciliation},
+		{name: "first repair then iterator failure", scenario: "next"},
+		{name: "scan integer conversion failure", scenario: "scan"},
+		{name: "row scan failure", scenario: "row"},
+		{name: "clean rows cannot hide drain timeout", scenario: "exact", closeError: true},
+		{name: "byte cap cannot hide drain timeout", scenario: "bytes", closeError: true},
+		{name: "row cap cannot hide drain timeout", scenario: "returned cap", closeError: true},
+		{name: "negative size cannot hide drain timeout", scenario: "negative", closeError: true},
+		{name: "oversized NULL cannot hide drain timeout", scenario: "oversized", closeError: true},
+		{name: "route cap cannot hide drain timeout", scenario: "route cap", closeError: true},
+		{name: "scan and drain errors both survive", scenario: "scan", closeError: true},
+		{name: "row and drain errors both survive", scenario: "row", closeError: true},
+		{name: "iterator and drain errors both survive", scenario: "next", closeError: true},
+		{name: "cancellation at close precedes route parsing", scenario: "cancel", cause: context.Canceled},
+		{name: "cancelled empty observation is not successful", scenario: "cancel empty", cause: context.Canceled},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create a fresh retained-reference stream for each independent boundary")
+			t.Cleanup(mock.Close)
+			org, _, _ := legacyJobRouteTestIDs()
+			first, second, unknown := uuid.UUID{15: 1}, uuid.UUID{15: 2}, uuid.UUID{15: 3}
+			ids := []uuid.UUID{first}
+			evidence := []lifecycleConsumerEvidence{{jobID: &first, foundJobID: &first}}
+			payload := []byte(`{"repair_run_id":"55555555-5555-4555-8555-555555555555"}`)
+			limits := defaultLifecycleConsumerLimits()
+			closeFailure := &pgconn.PgError{Code: "57014", Message: "synthetic retained-route drain timeout"}
+			rowFailure := errors.New("synthetic retained-route row failure")
+			nextFailure := errors.New("synthetic retained-route iterator failure")
+			expected, expectedBytes := map[uuid.UUID]bool{first: true}, len(payload)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var supplied pgx.Tx = mock
+			var raw *lifecycleConsumerRawScanTx
+			if tt.scenario == "sort" || tt.scenario == "missing" || tt.scenario == "precap" {
+				ids = []uuid.UUID{first, second}
+				evidence = []lifecycleConsumerEvidence{{jobID: &second, foundJobID: &second}, {jobID: &first, foundJobID: &first}, {jobID: &second, foundJobID: &second}, {jobID: &unknown, foundJobID: &first}}
+			}
+			if tt.scenario == "precap" {
+				limits.structuredRows = 1
+			} else if tt.scenario == "no candidate" || tt.scenario == "cancel empty" {
+				evidence = []lifecycleConsumerEvidence{{jobID: &first, foundJobID: &second}, {foundJobID: &first}}
+				expected, expectedBytes = nil, 0
+				if tt.scenario == "cancel empty" {
+					cancel()
+				}
+			} else {
+				rows := pgxmock.NewRows([]string{"id", "bytes", "payload"})
+				var size any = len(payload)
+				switch tt.scenario {
+				case "exact":
+					limits.payloadBytes = len(payload)
+				case "bytes":
+					limits.payloadBytes = len(payload) - 1
+				case "returned cap":
+					limits.structuredRows = 1
+				case "negative":
+					size = -1
+				case "oversized":
+					size, payload = legacyJobRouteMaxBytes+1, nil
+				case "scan":
+					size = "not an integer"
+				case "route cap", "cancel":
+					payload = []byte("{" + strings.Repeat(`"session_id":null,`, legacyJobRouteMaxOccurrences+1) + `"repair_run_id":null}`)
+					size = len(payload)
+				}
+				if tt.scenario == "sort" {
+					ordinary := []byte(`{}`)
+					command := []byte(`{"command_type":"resolve_conflicts"}`)
+					rows.AddRow(first, len(ordinary), ordinary).AddRow(second, len(command), command)
+					expected, expectedBytes = map[uuid.UUID]bool{second: true}, len(ordinary)+len(command)
+				} else {
+					rows.AddRow(first, size, payload)
+				}
+				if tt.scenario == "returned cap" || tt.scenario == "unexpected" || tt.scenario == "next" {
+					rows.AddRow(second, len(payload), payload)
+				}
+				if tt.scenario == "row" {
+					rows.RowError(0, rowFailure)
+				}
+				if tt.closeError {
+					rows.CloseError(closeFailure)
+				}
+				mock.ExpectQuery(regexp.QuoteMeta(lifecycleConsumerRetainedJobRoutesQuery)).WithArgs(pgx.QueryExecModeExec, org, lifecycleConsumerUUIDArray(ids), legacyJobRouteMaxBytes).WillReturnRows(rows).RowsWillBeClosed()
+				if tt.scenario == "next" || tt.scenario == "cancel" || tt.scenario == "sort" {
+					raw = &lifecycleConsumerRawScanTx{Tx: mock, t: t, query: lifecycleConsumerRetainedJobRoutesQuery}
+					if tt.scenario == "next" {
+						raw.nextErr, raw.nextErrAfter = nextFailure, 1
+					} else if tt.scenario == "cancel" {
+						raw.onClose = cancel
+					}
+					supplied = raw
+				}
+			}
+			actual, byteCount, readErr := readRetainedLifecycleRepairJobsInTx(ctx, supplied, org, evidence, limits)
+			failed := tt.closeError || tt.cause != nil || tt.scenario == "scan" || tt.scenario == "row" || tt.scenario == "next"
+			if failed {
+				require.Nil(t, actual, "failed retained-reference discovery must expose no partial repair map")
+				require.Zero(t, byteCount, "failed retained-reference discovery must expose no reusable partial byte accounting")
+				if tt.closeError {
+					require.ErrorIs(t, readErr, closeFailure, "stream drain failures must take precedence over a semantic cap or reconciliation")
+					var serverErr *pgconn.PgError
+					require.ErrorAs(t, readErr, &serverErr, "the PostgreSQL error type must survive retained-stream closure")
+					require.Equal(t, "57014", serverErr.Code, "retained-stream failure diagnostics must preserve the actual timeout SQLSTATE")
+					require.NotErrorIs(t, readErr, ErrLifecycleConsumerDiscoveryIncomplete, "a SQL timeout must not masquerade as a completed semantic cap result")
+				} else if tt.cause != nil {
+					require.ErrorIs(t, readErr, tt.cause, "the retained reader must preserve its exact failure classification")
+				}
+				if tt.scenario == "scan" {
+					require.ErrorContains(t, readErr, "destination kind", "genuine integer conversion failures must survive closing the stream")
+				} else if tt.scenario == "row" {
+					require.ErrorIs(t, readErr, rowFailure, "row scan failures must survive closing the stream")
+				} else if tt.scenario == "next" {
+					require.ErrorIs(t, readErr, nextFailure, "iterator failures after a repair row must not expose a partial success")
+				}
+			} else {
+				require.NoError(t, readErr, "complete exact references may be observed without gaining authority")
+				require.Equal(t, expected, actual, "repair and command markers must be recorded only for the exact returned candidates")
+				require.Equal(t, expectedBytes, byteCount, "successful retained reads must consume exactly their existing shared byte allowance")
+			}
+			if raw != nil {
+				require.NotNil(t, raw.rows, "the raw-stream harness must observe the exact retained query")
+				require.True(t, raw.rows.closed, "semantic parsing and results must follow an explicitly finished retained statement")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "retained repair discovery must keep one exact custom-mode tenant/ID query and no transaction ownership")
 		})
 	}
 }

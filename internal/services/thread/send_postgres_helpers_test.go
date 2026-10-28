@@ -31,7 +31,12 @@ type sendPostgresFixture struct {
 
 func newSendPostgresFixture(t *testing.T, active bool, laneCount int) sendPostgresFixture {
 	t.Helper()
-	pool := testpostgres.NewPool(t, context.Background(), "../../../migrations", 2)
+	return newSendPostgresFixtureWithMaxConns(t, active, laneCount, 2)
+}
+
+func newSendPostgresFixtureWithMaxConns(t *testing.T, active bool, laneCount int, maxConns int32) sendPostgresFixture {
+	t.Helper()
+	pool := testpostgres.NewPool(t, context.Background(), "../../../migrations", maxConns)
 	f := sendPostgresFixture{pool: pool, org: uuid.New(), user: uuid.New()}
 	err := db.RunLifecycleTransaction(context.Background(), pool, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO organizations(id,name) VALUES($1,'Synthetic service admission tenant')`, f.org); err != nil {
@@ -128,14 +133,6 @@ func (e *sendPostgresEffects) PublishThreadPending(ctx context.Context, org uuid
 	e.pending++
 	e.SendEffects.PublishThreadPending(ctx, org, effect)
 }
-func (e *sendPostgresEffects) PublishThreadStatus(ctx context.Context, org uuid.UUID, effect db.ThreadPersistenceEffects) {
-	e.threadStatus++
-	e.SendEffects.PublishThreadStatus(ctx, org, effect)
-}
-func (e *sendPostgresEffects) PublishSessionStatus(ctx context.Context, org uuid.UUID, row models.Session) {
-	e.parentStatus++
-	e.SendEffects.PublishSessionStatus(ctx, org, row)
-}
 
 // This wraps real production persistence and publishers only to count caller
 // invocations. No authority, mode, SQL, transaction or guard is substituted.
@@ -192,6 +189,52 @@ func sendPostgresReadGraph(t *testing.T, f sendPostgresFixture) sendPostgresGrap
 	v, err := readSendPostgresGraph(ctx, f.pool, f)
 	require.NoError(t, err, "inspect only the isolated synthetic tenant's complete accepted graph and original counters")
 	return v
+}
+
+// Keep every column, including status/claim tokens, answer identities and
+// timestamps. Count-only equality could miss a compensating write, a replaced
+// row, or a changed answer while leaving the same apparent graph cardinality.
+func readSendPostgresSnapshot(ctx context.Context, q db.DBTX, f sendPostgresFixture) (json.RawMessage, error) {
+	var snapshot json.RawMessage
+	err := q.QueryRow(ctx, `SELECT jsonb_build_object(
+ 'session',(SELECT to_jsonb(s) FROM sessions s WHERE org_id=$1 AND id=$2),
+ 'threads',(SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM session_threads t WHERE org_id=$1 AND session_id=$2),
+ 'messages',(SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY id),'[]'::jsonb) FROM session_messages m WHERE org_id=$1 AND session_id=$2),
+ 'inbox',(SELECT coalesce(jsonb_agg(to_jsonb(i) ORDER BY id),'[]'::jsonb) FROM thread_inbox_entries i WHERE org_id=$1 AND session_id=$2),
+ 'dispatches',(SELECT coalesce(jsonb_agg(to_jsonb(d) ORDER BY id),'[]'::jsonb) FROM session_input_dispatches d WHERE org_id=$1 AND session_id=$2),
+ 'comments',(SELECT coalesce(jsonb_agg(to_jsonb(c) ORDER BY id),'[]'::jsonb) FROM session_review_comments c WHERE org_id=$1 AND session_id=$2),
+ 'questions',(SELECT coalesce(jsonb_agg(to_jsonb(q) ORDER BY id),'[]'::jsonb) FROM session_questions q WHERE org_id=$1 AND session_id=$2),
+ 'human_input',(SELECT coalesce(jsonb_agg(to_jsonb(h) ORDER BY id),'[]'::jsonb) FROM session_human_input_requests h WHERE org_id=$1 AND session_id=$2),
+ 'jobs',(SELECT coalesce(jsonb_agg(to_jsonb(j) ORDER BY id),'[]'::jsonb) FROM jobs j WHERE org_id=$1 AND payload->>'session_id'=$2::text)
+ )`, f.org, f.session).Scan(&snapshot)
+	return snapshot, err
+}
+
+func sendPostgresReadSnapshot(t *testing.T, f sendPostgresFixture) json.RawMessage {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), db.LifecycleTransactionTimeout)
+	defer cancel()
+	snapshot, err := readSendPostgresSnapshot(ctx, f.pool, f)
+	require.NoError(t, err, "read the exact tenant/session rows and every claim, projection, comment, answer and queued-job field")
+	return snapshot
+}
+
+func requireSendPostgresNoEffects(t *testing.T, effects *sendPostgresEffects) {
+	t.Helper()
+	require.Equal(t, []int{0, 0, 0, 0, 0, 0}, []int{len(effects.lifecycle), len(effects.jobs), effects.claims, effects.pending, effects.threadStatus, effects.parentStatus}, "aborted or unknown legacy work must publish no lifecycle, job, claim, pending or status callback")
+}
+
+func seedSendPostgresAnswers(t *testing.T, f sendPostgresFixture) (models.SessionQuestion, models.HumanInputRequest) {
+	t.Helper()
+	question := models.SessionQuestion{OrgID: f.org, SessionID: f.session, QuestionText: "Synthetic exact clarifying question", Status: models.SessionQuestionStatusPending, Options: []string{}}
+	request := models.HumanInputRequest{OrgID: f.org, SessionID: f.session, ThreadID: &f.lanes[0], AgentType: models.DefaultDefaultAgentType, Kind: models.HumanInputRequestKindFreeText, Title: "Synthetic free text request", Body: "Synthetic answer context"}
+	require.NoError(t, db.RunLifecycleTransaction(context.Background(), f.pool, func(ctx context.Context, tx pgx.Tx) error {
+		if err := db.NewSessionQuestionStore(tx).Create(ctx, &question); err != nil {
+			return err
+		}
+		return db.NewSessionHumanInputRequestStore(tx).Create(ctx, &request)
+	}), "seed a real pending clarifying question and a separate free-text request, not a tool approval")
+	return question, request
 }
 
 type sendPostgresUnit struct {

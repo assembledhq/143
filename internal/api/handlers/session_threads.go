@@ -637,7 +637,7 @@ func (h *SessionThreadHandler) SendThreadMessage(w http.ResponseWriter, r *http.
 		case errors.Is(err, thread.ErrSessionNotResumable):
 			writeError(w, r, http.StatusConflict, "NOT_RESUMABLE", "session must be idle, running, awaiting input, need guidance, or otherwise resumable to send a message")
 		case errors.Is(err, thread.ErrEnqueueFailed):
-			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue continue_session job", err)
+			writeError(w, r, http.StatusInternalServerError, "ENQUEUE_FAILED", "failed to enqueue message processing", err)
 		case errors.Is(err, pgx.ErrNoRows):
 			// Active scope absence is a safe 404. Keep this after legacy
 			// domain errors, which can wrap a no-rows claim diagnostic.

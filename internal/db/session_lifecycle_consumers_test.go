@@ -338,9 +338,12 @@ func TestLifecycleConsumerLegacyStreamCollection(t *testing.T) {
 
 type lifecycleConsumerRawScanTx struct {
 	pgx.Tx
-	t       *testing.T
-	rows    *lifecycleConsumerRawScanRows
-	onClose func()
+	t            *testing.T
+	rows         *lifecycleConsumerRawScanRows
+	onClose      func()
+	query        string
+	nextErr      error
+	nextErrAfter int
 }
 
 func TestLifecycleConsumerLegacyLaneStreamErrors(t *testing.T) {
@@ -382,18 +385,44 @@ func TestLifecycleConsumerLegacyLaneStreamErrors(t *testing.T) {
 
 func (tx *lifecycleConsumerRawScanTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	rows, err := tx.Tx.Query(ctx, sql, args...)
-	if err != nil || sql != lifecycleConsumerLegacyJobsQuery {
+	query := tx.query
+	if query == "" {
+		query = lifecycleConsumerLegacyJobsQuery
+	}
+	if err != nil || sql != query {
 		return rows, err
 	}
-	tx.rows = &lifecycleConsumerRawScanRows{Rows: rows, t: tx.t, onClose: tx.onClose}
+	tx.rows = &lifecycleConsumerRawScanRows{Rows: rows, t: tx.t, onClose: tx.onClose, nextErr: tx.nextErr, nextErrAfter: tx.nextErrAfter}
 	return tx.rows, nil
 }
 
 type lifecycleConsumerRawScanRows struct {
 	pgx.Rows
-	t       *testing.T
-	closed  bool
-	onClose func()
+	t                       *testing.T
+	closed                  bool
+	onClose                 func()
+	nextErr                 error
+	nextErrAfter, nextCount int
+	nextFailed              bool
+}
+
+func (rows *lifecycleConsumerRawScanRows) Next() bool {
+	if rows.nextErr != nil && rows.nextCount == rows.nextErrAfter {
+		rows.nextFailed = true
+		return false
+	}
+	more := rows.Rows.Next()
+	if more {
+		rows.nextCount++
+	}
+	return more
+}
+
+func (rows *lifecycleConsumerRawScanRows) Err() error {
+	if rows.nextFailed {
+		return errors.Join(rows.nextErr, rows.Rows.Err())
+	}
+	return rows.Rows.Err()
 }
 
 func (rows *lifecycleConsumerRawScanRows) Scan(dest ...any) error {

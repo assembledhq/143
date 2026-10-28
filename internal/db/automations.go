@@ -675,7 +675,7 @@ func NewAutomationRunStore(db TxStarter) *AutomationRunStore {
 // automationRunContinuityColumns are the per-target continuity columns
 // (design doc 125) appended to every run projection. The order must match
 // AutomationRunContinuityColumnNames and automationRunContinuityDests.
-const automationRunContinuityColumns = `target_id, target_generation, session_id, thread_id, turn_number,
+const automationRunContinuityColumns = `review_start_id,target_id, target_generation, session_id, thread_id, turn_number,
 	github_action, pull_request_updated_at, head_epoch, head_resolution, resolved_head_sha,
 	continuation_mode, continuation_reason, native_context, previous_head_sha, base_sha,
 	dispatch_state, wait_reason, wait_started_at, execution_started_at, job_id,
@@ -688,6 +688,7 @@ const automationRunContinuityColumns = `target_id, target_generation, session_id
 // list projection the run's own session_id is aliased run_session_id because
 // the joined session already produces a session_id column.
 var AutomationRunContinuityColumnNames = []string{
+	"review_start_id",
 	"target_id", "target_generation", "run_session_id", "thread_id", "turn_number",
 	"github_action", "pull_request_updated_at", "head_epoch", "head_resolution", "resolved_head_sha",
 	"continuation_mode", "continuation_reason", "native_context", "previous_head_sha", "base_sha",
@@ -698,7 +699,7 @@ var AutomationRunContinuityColumnNames = []string{
 
 // automationRunContinuityListColumns is automationRunContinuityColumns
 // qualified for the ListByAutomation projection.
-const automationRunContinuityListColumns = `ar.target_id, ar.target_generation, ar.session_id AS run_session_id, ar.thread_id, ar.turn_number,
+const automationRunContinuityListColumns = `ar.review_start_id,ar.target_id, ar.target_generation, ar.session_id AS run_session_id, ar.thread_id, ar.turn_number,
 	ar.github_action, ar.pull_request_updated_at, ar.head_epoch, ar.head_resolution, ar.resolved_head_sha,
 	ar.continuation_mode, ar.continuation_reason, ar.native_context, ar.previous_head_sha, ar.base_sha,
 	ar.dispatch_state, ar.wait_reason, ar.wait_started_at, ar.execution_started_at, ar.job_id,
@@ -707,6 +708,7 @@ const automationRunContinuityListColumns = `ar.target_id, ar.target_generation, 
 
 func automationRunContinuityDests(r *models.AutomationRun) []any {
 	return []any{
+		&r.ReviewStartID,
 		&r.TargetID, &r.TargetGeneration, &r.SessionID, &r.ThreadID, &r.TurnNumber,
 		&r.GitHubAction, &r.PullRequestUpdatedAt, &r.HeadEpoch, &r.HeadResolution, &r.ResolvedHeadSHA,
 		&r.ContinuationMode, &r.ContinuationReason, &r.NativeContext, &r.PreviousHeadSHA, &r.BaseSHA,

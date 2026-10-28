@@ -2,12 +2,12 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/assembledhq/143/internal/codereviewreceipt"
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
@@ -75,6 +75,11 @@ func recoverStagedFullAssessment(ctx context.Context, stores *Stores, services *
 	if metadata.ID != job.MetadataID || metadata.ID != a.MetadataID || metadata.RepositoryID != a.RepositoryID || metadata.PullRequestID != a.PullRequestID || metadata.PolicyID != a.PolicyID || metadata.HeadSHA != a.HeadSHA || metadata.ReviewOutputKey != a.PublicationKey {
 		return true, fmt.Errorf("staged metadata differs from original controller identity: %w", db.ErrCodeReviewAssessmentState)
 	}
+	// Operator reconciliation is a durable pause for this original staged
+	// owner, including confirmed publications with a metadata provider ID.
+	if a.PublicationState == models.CodeReviewPublicationConfirmed && a.FailureDetail != nil && strings.HasPrefix(*a.FailureDetail, "operator_reconciliation_required:") {
+		return true, errCodeReviewPublicationPaused
+	}
 	// Terminal metadata's orphan repair normally runs after this early recovery
 	// exit. A confirmed, reusable outcome must run that existing guarded path
 	// first, then still prove complete runtime drain inside owner claiming.
@@ -111,17 +116,7 @@ func confirmedFullAssessmentReceiptMatches(a models.CodeReviewAssessment, metada
 		a.GitHubReviewID == nil || a.SubmittedCommitSHA == nil || *a.SubmittedCommitSHA != a.HeadSHA {
 		return false
 	}
-	var receipt struct {
-		AssessmentID       string `json:"assessment_id"`
-		InputDigest        string `json:"input_digest"`
-		SubmittedCommitSHA string `json:"submitted_commit_sha"`
-		GitHubReviewID     *int64 `json:"github_review_id"`
-	}
-	if err := json.Unmarshal(a.PublicationReceipt, &receipt); err != nil {
-		return false
-	}
-	return receipt.AssessmentID == a.ID.String() && receipt.InputDigest == a.InputDigest &&
-		receipt.SubmittedCommitSHA == a.HeadSHA && receipt.GitHubReviewID != nil && *receipt.GitHubReviewID == *a.GitHubReviewID &&
+	return codereviewreceipt.Matches(a.PublicationReceipt, a.ID.String(), a.InputDigest, a.HeadSHA, *a.GitHubReviewID) &&
 		(metadata.GitHubReviewID == nil || *metadata.GitHubReviewID == *a.GitHubReviewID)
 }
 

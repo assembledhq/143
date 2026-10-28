@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -79,6 +80,19 @@ func seedMessageAdmissionRepair(t *testing.T, pool *pgxpool.Pool, f activatedLif
 	return run.ID, pr
 }
 
+func seedMessageAdmissionRetainedRepairRuntime(t *testing.T, pool *pgxpool.Pool, f activatedLifecycleFixture, job uuid.UUID) {
+	t.Helper()
+	runtime := createSeedRuntime(t, pool, f.orgID, f.sessionID, f.primaryThreadID)
+	// Retain a complete synthetic allocation on the sibling's own epoch (four),
+	// not the target lane's epoch (five). This is work to reconcile, not a typed
+	// allocation receipt or permission to launch, settle or release the repair.
+	admissionPostgresExec(t, pool, `UPDATE thread_runtimes SET job_id=$3,
+ job_attempt_token=gen_random_uuid(),allocation_digest=repeat('a',64),
+ allocation_expected_turn=0,input_dispatch_ids=ARRAY[gen_random_uuid()],
+ admission_session_epoch=$4,admission_thread_epoch=4,provider_invocation_ordinal=0
+ WHERE org_id=$1 AND id=$2`, f.orgID, runtime.ID, job, f.fence.sessionEpoch)
+}
+
 type admissionPostgresCounts struct{ messages, inbox, dispatches, jobs, claims, pending int64 }
 
 func admissionPostgresGraph(t *testing.T, q DBTX, f activatedLifecycleFixture) admissionPostgresCounts {
@@ -98,7 +112,6 @@ func admissionPostgresGraph(t *testing.T, q DBTX, f activatedLifecycleFixture) a
 
 func TestMessageAdmissionFullSchemaOutcomesPostgres(t *testing.T) {
 	t.Parallel()
-	pool := newLifecycleScopeSnapshotPool(t)
 	tests := []struct {
 		name   string
 		setup  func(*testing.T, *pgxpool.Pool, activatedLifecycleFixture)
@@ -124,6 +137,12 @@ func TestMessageAdmissionFullSchemaOutcomesPostgres(t *testing.T) {
 			admissionPostgresExec(t, p, `UPDATE session_threads SET status='cancelled' WHERE org_id=$1 AND id=$2`, f.orgID, f.threadID)
 			admissionPostgresExec(t, p, `UPDATE sessions SET status='cancelled' WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID)
 		}, want: MessageAdmissionNewJob},
+		{name: "pending parent remains not resumable until start CAS is defined", setup: func(t *testing.T, p *pgxpool.Pool, f activatedLifecycleFixture) {
+			admissionPostgresExec(t, p, `UPDATE sessions SET status='pending' WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID)
+		}, cause: ErrMessageAdmissionNotResumable},
+		{name: "skipped parent returns status conflict rather than actor refusal", setup: func(t *testing.T, p *pgxpool.Pool, f activatedLifecycleFixture) {
+			admissionPostgresExec(t, p, `UPDATE sessions SET status='skipped' WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID)
+		}, cause: ErrMessageAdmissionNotResumable},
 		{name: "running queues without a second job", setup: func(t *testing.T, p *pgxpool.Pool, f activatedLifecycleFixture) {
 			admissionPostgresExec(t, p, `UPDATE session_threads SET status='running' WHERE org_id=$1 AND id=$2`, f.orgID, f.threadID)
 			admissionPostgresExec(t, p, `UPDATE sessions SET status='running' WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID)
@@ -197,6 +216,7 @@ func TestMessageAdmissionFullSchemaOutcomesPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			pool := newLifecycleScopeSnapshotPool(t)
 			f := seedActivatedLifecycleFixture(t, context.Background(), pool)
 			command := admissionPostgresCommand(t, f, "synthetic-command", tt.change)
 			if tt.setup != nil {
@@ -284,27 +304,58 @@ func TestMessageAdmissionStaleRepairWorkPostgres(t *testing.T) {
 	t.Parallel()
 	// This is a required shared-consumer join, not an assertion that the original
 	// active-reservation lookup proves released/old-head physical work absent.
-	pool := newLifecycleScopeSnapshotPool(t)
 	tests := []struct {
-		name        string
-		status      models.JobStatus
-		runtime     bool
-		commandOnly bool
-		want        MessageAdmissionDisposition
+		name         string
+		status       models.JobStatus
+		targetStatus models.ThreadStatus
+		runtime      bool
+		commandOnly  bool
+		capacity     bool
+		comments     bool
+		ordinary     bool
+		want         MessageAdmissionDisposition
+		reason       string
 	}{
-		{name: "released old-head pending sibling repair still waits", status: models.JobStatusPending, want: MessageAdmissionWaiting},
-		{name: "released old-head running sibling repair still waits", status: models.JobStatusRunning, want: MessageAdmissionWaiting},
-		{name: "released old-head parked sibling repair still waits", status: models.JobStatusAwaitingStartControl, want: MessageAdmissionWaiting},
-		{name: "terminal repair job cannot erase retained sibling runtime", status: models.JobStatusFailed, runtime: true, want: MessageAdmissionWaiting},
+		{name: "released old-head pending sibling repair still waits", status: models.JobStatusPending, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "released old-head running sibling repair still waits", status: models.JobStatusRunning, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "released old-head parked sibling repair still waits", status: models.JobStatusAwaitingStartControl, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "pending repair dominates running target queue", status: models.JobStatusPending, targetStatus: models.ThreadStatusRunning, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "pending repair dominates pending target queue", status: models.JobStatusPending, targetStatus: models.ThreadStatusPending, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "terminal repair job cannot erase retained sibling runtime", status: models.JobStatusFailed, runtime: true, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "retained terminal repair dominates running target queue", status: models.JobStatusFailed, targetStatus: models.ThreadStatusRunning, runtime: true, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "retained terminal repair dominates full sibling capacity", status: models.JobStatusFailed, runtime: true, capacity: true, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "retained terminal repair comments roll back", status: models.JobStatusFailed, runtime: true, comments: true},
+		{name: "retained terminal repair running comments roll back", status: models.JobStatusFailed, targetStatus: models.ThreadStatusRunning, runtime: true, comments: true},
+		{name: "retained terminal repair capacity comments roll back", status: models.JobStatusFailed, runtime: true, capacity: true, comments: true},
 		{name: "released terminal repair history alone permits ordinary job", status: models.JobStatusFailed, want: MessageAdmissionNewJob},
-		{name: "pending repair command without reservation ID still waits", status: models.JobStatusPending, commandOnly: true, want: MessageAdmissionWaiting},
-		{name: "terminal repair command without reservation ID retains live sibling runtime", status: models.JobStatusFailed, runtime: true, commandOnly: true, want: MessageAdmissionWaiting},
+		{name: "released terminal repair history preserves running target queue", status: models.JobStatusFailed, targetStatus: models.ThreadStatusRunning, want: MessageAdmissionQueued, reason: "lane_running"},
+		{name: "released terminal repair history preserves pending target queue", status: models.JobStatusFailed, targetStatus: models.ThreadStatusPending, want: MessageAdmissionQueued, reason: "lane_running"},
+		{name: "pending repair command without reservation ID still waits", status: models.JobStatusPending, commandOnly: true, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "terminal repair command without reservation ID retains live sibling runtime", status: models.JobStatusFailed, runtime: true, commandOnly: true, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "retained terminal command dominates pending target queue", status: models.JobStatusFailed, targetStatus: models.ThreadStatusPending, runtime: true, commandOnly: true, want: MessageAdmissionWaiting, reason: "repair_reconciliation"},
 		{name: "released terminal command history alone is not an owner", status: models.JobStatusFailed, commandOnly: true, want: MessageAdmissionNewJob},
+		{name: "ordinary pending sibling preserves running target queue", status: models.JobStatusPending, targetStatus: models.ThreadStatusRunning, ordinary: true, want: MessageAdmissionQueued, reason: "lane_running"},
+		{name: "ordinary pending sibling preserves pending target queue", status: models.JobStatusPending, targetStatus: models.ThreadStatusPending, ordinary: true, want: MessageAdmissionQueued, reason: "lane_running"},
+		{name: "ordinary pending sibling preserves full capacity reason", status: models.JobStatusPending, capacity: true, ordinary: true, want: MessageAdmissionWaiting, reason: "capacity"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			pool := newLifecycleScopeSnapshotPool(t)
 			f := seedActivatedLifecycleFixture(t, context.Background(), pool)
+			if tt.targetStatus != "" {
+				admissionPostgresExec(t, pool, `UPDATE session_threads SET status=$3,current_turn=4 WHERE org_id=$1 AND id=$2`, f.orgID, f.threadID, tt.targetStatus)
+				admissionPostgresExec(t, pool, `UPDATE sessions SET status='running' WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID)
+			}
+			if tt.capacity {
+				// Reuse the explicit extra-lane representation instead of changing
+				// fixture creation limits or borrowing a target-lane claim.
+				admissionPostgresExec(t, pool, `UPDATE session_threads SET status='running' WHERE org_id=$1 AND id=$2`, f.orgID, f.primaryThreadID)
+				for range 2 {
+					admissionPostgresExec(t, pool, `INSERT INTO session_threads(id,org_id,session_id,agent_type,label,status,lifecycle_version,admission_epoch) VALUES($1,$2,$3,$4,'Synthetic occupied sibling','running',1,6)`, uuid.New(), f.orgID, f.sessionID, models.DefaultDefaultAgentType)
+				}
+				admissionPostgresExec(t, pool, `UPDATE sessions SET status='running' WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID)
+			}
 			runID, prID := seedMessageAdmissionRepair(t, pool, f, &f.primaryThreadID, false, "old-head")
 			admissionPostgresExec(t, pool, `UPDATE pull_request_repair_runs SET obsoleted_by_version=2 WHERE org_id=$1 AND id=$2`, f.orgID, runID)
 			payload := fmt.Sprintf(`{"org_id":%q,"session_id":%q,"thread_id":%q,"repair_run_id":%q,"pull_request_id":%q,"head_sha":"old-head"}`, f.orgID, f.sessionID, f.primaryThreadID, runID, prID)
@@ -312,24 +363,46 @@ func TestMessageAdmissionStaleRepairWorkPostgres(t *testing.T) {
 				// The actual worker accepts this repair mode without a reservation
 				// ID. Its command field must not become ordinary sibling evidence.
 				payload = fmt.Sprintf(`{"org_id":%q,"session_id":%q,"thread_id":%q,"command_type":%q,"pull_request_id":%q,"head_sha":"old-head"}`, f.orgID, f.sessionID, f.primaryThreadID, models.PullRequestRepairActionTypeResolveConflicts, prID)
+			} else if tt.ordinary {
+				payload = fmt.Sprintf(`{"org_id":%q,"session_id":%q,"thread_id":%q}`, f.orgID, f.sessionID, f.primaryThreadID)
 			}
 			job := seedPredicateLegacyJob(t, pool, lifecyclePredicateFixture{org: f.orgID, session: f.sessionID, lane: f.threadID, sibling: f.primaryThreadID}, payload)
 			admissionPostgresExec(t, pool, `UPDATE jobs SET status=$3 WHERE org_id=$1 AND id=$2`, f.orgID, job, tt.status)
 			if tt.runtime {
-				runtime := createSeedRuntime(t, pool, f.orgID, f.sessionID, f.primaryThreadID)
-				// Install a complete synthetic allocation shape, not a partial job
-				// pointer that the shared schema correctly rejects. This is retained
-				// work to reconcile, not a producer-owned allocation receipt.
-				admissionPostgresExec(t, pool, `UPDATE thread_runtimes SET job_id=$3,
- job_attempt_token=gen_random_uuid(),allocation_digest=repeat('a',64),
- allocation_expected_turn=0,input_dispatch_ids=ARRAY[gen_random_uuid()],
- admission_session_epoch=$4,admission_thread_epoch=$5,provider_invocation_ordinal=0
- WHERE org_id=$1 AND id=$2`, f.orgID, runtime.ID, job, f.fence.sessionEpoch, int64(4))
+				seedMessageAdmissionRetainedRepairRuntime(t, pool, f, job)
+			}
+			var commentID uuid.UUID
+			if tt.comments {
+				actor := seedMessageAdmissionActor(t, pool, f)
+				comment := models.SessionReviewComment{OrgID: f.orgID, SessionID: f.sessionID, UserID: actor, FilePath: "synthetic.go", LineNumber: 1, DiffSide: "new", Body: "Synthetic unresolved repair comment", PassNumber: 1}
+				require.NoError(t, NewSessionReviewCommentStore(pool).Create(context.Background(), &comment), "seed an exact-session unresolved comment before testing whole-abort repair behavior")
+				commentID = comment.ID
 			}
 			before := admissionPostgresGraph(t, pool, f)
-			a, effects, err := runAdmissionPostgres(t, pool, admissionPostgresCommand(t, f, "ordinary-after-repair", nil))
+			command := admissionPostgresCommand(t, f, "ordinary-after-repair", func(input *MessageAdmissionInput) {
+				if tt.comments {
+					input.ResolveReviewCommentIDs = []uuid.UUID{commentID}
+				}
+			})
+			a, effects, err := runAdmissionPostgres(t, pool, command)
+			if tt.comments {
+				require.ErrorIs(t, err, ErrMessageAdmissionBusy, "comments cannot resolve without an immediately admitted new job even when repair scope is uncertain")
+				require.Equal(t, Admission{}, a, "repair-wait comment refusal must expose no partial accepted receipt")
+				require.Empty(t, effects, "whole-abort comment handling cannot publish effects or notify jobs")
+				require.Equal(t, before, admissionPostgresGraph(t, pool, f), "repair-wait comment refusal must leave every accepted-input and claim counter unchanged")
+				var resolved bool
+				require.NoError(t, pool.QueryRow(context.Background(), `SELECT resolved FROM session_review_comments WHERE org_id=$1 AND session_id=$2 AND id=$3`, f.orgID, f.sessionID, commentID).Scan(&resolved), "read the exact original comment after the supplied transaction rolled back")
+				require.False(t, resolved, "repair reconciliation must retain the original unresolved review comment")
+				return
+			}
 			require.NoError(t, err, "uncertain repair scope must preserve ordinary input without borrowing repair authority")
 			require.Equal(t, tt.want, a.Disposition(), "reservation inactivity head drift and obsolescence must not erase live repair work or retain released history as an owner")
+			require.Equal(t, tt.reason, a.Reason(), "retained repair uncertainty must dominate queue and capacity reasons without making released history an owner")
+			turn := 1
+			if tt.targetStatus == models.ThreadStatusRunning || tt.targetStatus == models.ThreadStatusPending {
+				turn = 6
+			}
+			require.Equal(t, turn, a.Message().TurnNumber, "repair waiting must preserve the original ordinary lane's admitted turn calculation")
 			want := before
 			want.messages++
 			want.inbox++
@@ -339,11 +412,17 @@ func TestMessageAdmissionStaleRepairWorkPostgres(t *testing.T) {
 				want.claims++
 			} else {
 				want.pending++
-				require.Equal(t, "repair_reconciliation", a.Reason(), "live repair provenance must retain the explicit reconciliation reason even after reservation release or head drift")
 				_, hasJob := a.JobID()
 				_, hasClaim := a.Authority()
 				require.False(t, hasJob, "repair reconciliation must not schedule another input consumer")
 				require.False(t, hasClaim, "repair reconciliation must not install or borrow a logical lane claim")
+				var state, consumer, reason string
+				var due *time.Time
+				var boundJob *uuid.UUID
+				require.NoError(t, pool.QueryRow(context.Background(), `SELECT admission_state,consumer_kind,reason,next_attempt_at,job_id FROM session_input_dispatches WHERE org_id=$1 AND session_id=$2 AND id=$3`, f.orgID, f.sessionID, a.DispatchID()).Scan(&state, &consumer, &reason, &due, &boundJob), "inspect only the newly accepted exact-tenant dispatch")
+				require.Equal(t, []string{"waiting", "none", tt.reason}, []string{state, consumer, reason}, "queued or repair/capacity waiting input must retain its exact durable unbound reason")
+				require.NotNil(t, due, "accepted input without a job must remain independently due and discoverable")
+				require.Nil(t, boundJob, "accepted waiting input cannot adopt the retained specialist or ordinary sibling job")
 			}
 			require.Equal(t, want, admissionPostgresGraph(t, pool, f), "repair uncertainty must commit only accepted input and never mutate stale specialist state")
 			require.NotEmpty(t, effects, "new durable waiting input still needs ordinary postcommit data notifications")
@@ -353,7 +432,6 @@ func TestMessageAdmissionStaleRepairWorkPostgres(t *testing.T) {
 
 func TestMessageAdmissionChangesetScopePostgres(t *testing.T) {
 	t.Parallel()
-	pool := newLifecycleScopeSnapshotPool(t)
 	tests := []struct {
 		name    string
 		foreign bool
@@ -366,6 +444,7 @@ func TestMessageAdmissionChangesetScopePostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			pool := newLifecycleScopeSnapshotPool(t)
 			f := seedActivatedLifecycleFixture(t, context.Background(), pool)
 			orgID, sessionID := f.orgID, f.sessionID
 			if tt.foreign {
@@ -383,6 +462,7 @@ func TestMessageAdmissionChangesetScopePostgres(t *testing.T) {
 			a, effects, err := runAdmissionPostgres(t, pool, command)
 			if tt.other {
 				require.ErrorIs(t, err, pgx.ErrNoRows, "wrong session or tenant association must be hidden rather than treated as an availability wait")
+				require.ErrorIs(t, err, ErrMessageAdmissionChangesetNotFound, "association-only changeset absence must retain its truthful target-not-found category")
 				require.Equal(t, Admission{}, a, "foreign association cannot yield a sealed admission receipt")
 				require.Empty(t, effects, "foreign association cannot yield postcommit effects")
 				require.Equal(t, before, admissionPostgresGraph(t, pool, f), "association failure must leave accepted input and claims unchanged")
@@ -399,16 +479,18 @@ func TestMessageAdmissionChangesetScopePostgres(t *testing.T) {
 
 func TestMessageAdmissionReplayHistoricalOptionsAndCorruptionPostgres(t *testing.T) {
 	t.Parallel()
-	pool := newLifecycleScopeSnapshotPool(t)
 	tests := []struct {
 		name     string
 		mutation string
 		cause    error
 	}{
 		{"new current epoch does not veto", "epoch", nil},
+		{"current pending parent does not veto exact accepted receipt", "parent_pending", nil},
+		{"changed server retry default retains original concrete options", "server_default", nil},
 		{"new current end or awaiting status does not veto", "status", nil},
 		{"current backoff and target do not replace original options", "schedule", nil},
 		{"current retained owner does not veto accepted input", "owner", nil},
+		{"new retained terminal repair cannot replace an exact historical receipt", "repair", nil},
 		{"archived exact resource refuses disclosure", "hidden", pgx.ErrNoRows},
 		{"mutated immutable job payload refuses", "payload", ErrLifecycleConsumerReconciliation},
 		{"conflicting same-key semantic intent refuses", "digest", ErrMessageAdmissionConflict},
@@ -416,6 +498,7 @@ func TestMessageAdmissionReplayHistoricalOptionsAndCorruptionPostgres(t *testing
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			pool := newLifecycleScopeSnapshotPool(t)
 			f := seedActivatedLifecycleFixture(t, context.Background(), pool)
 			command := admissionPostgresCommand(t, f, "stable-replay", nil)
 			a, _, err := runAdmissionPostgres(t, pool, command)
@@ -424,12 +507,28 @@ func TestMessageAdmissionReplayHistoricalOptionsAndCorruptionPostgres(t *testing
 			switch tt.mutation {
 			case "epoch":
 				admissionPostgresExec(t, pool, `UPDATE session_threads SET admission_epoch=admission_epoch+1 WHERE org_id=$1 AND id=$2`, f.orgID, f.threadID)
+			case "parent_pending":
+				admissionPostgresExec(t, pool, `UPDATE sessions SET status='pending' WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID)
+			case "server_default":
+				input := command.Input()
+				input.Dispatch.MaxAttempts += 2
+				input.Dispatch.RunAt = input.Dispatch.RunAt.Add(time.Hour)
+				input.Ingress = prepareMessageAdmissionCommandFixture(t, input, "stable-replay")
+				command, err = NewMessageAdmission(input)
+				require.NoError(t, err, "an identical client retry must remain valid with independently chosen current server queue defaults")
 			case "status":
 				admissionPostgresExec(t, pool, `UPDATE session_threads SET status='awaiting_input',end_epoch=admission_epoch WHERE org_id=$1 AND id=$2`, f.orgID, f.threadID)
 			case "schedule":
 				admissionPostgresExec(t, pool, `UPDATE jobs SET run_at=run_at+interval '1 hour',target_node_id='synthetic-retarget' WHERE org_id=$1 AND id=$2`, f.orgID, job)
 			case "owner":
 				admissionPostgresExec(t, pool, `UPDATE sessions SET automation_owner_generation_id=$3 WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID, uuid.New())
+			case "repair":
+				runID, prID := seedMessageAdmissionRepair(t, pool, f, &f.primaryThreadID, false, "old-head")
+				admissionPostgresExec(t, pool, `UPDATE pull_request_repair_runs SET obsoleted_by_version=2 WHERE org_id=$1 AND id=$2`, f.orgID, runID)
+				payload := fmt.Sprintf(`{"org_id":%q,"session_id":%q,"thread_id":%q,"repair_run_id":%q,"pull_request_id":%q}`, f.orgID, f.sessionID, f.primaryThreadID, runID, prID)
+				repairJob := seedPredicateLegacyJob(t, pool, lifecyclePredicateFixture{org: f.orgID, session: f.sessionID, lane: f.threadID, sibling: f.primaryThreadID}, payload)
+				admissionPostgresExec(t, pool, `UPDATE jobs SET status='failed' WHERE org_id=$1 AND id=$2`, f.orgID, repairJob)
+				seedMessageAdmissionRetainedRepairRuntime(t, pool, f, repairJob)
 			case "hidden":
 				admissionPostgresExec(t, pool, `UPDATE sessions SET archived_at=now() WHERE org_id=$1 AND id=$2`, f.orgID, f.sessionID)
 			case "payload":
@@ -450,11 +549,119 @@ func TestMessageAdmissionReplayHistoricalOptionsAndCorruptionPostgres(t *testing
 				require.NoError(t, err, "exact committed receipt takes precedence over new admission eligibility")
 				require.Equal(t, MessageAdmissionReplayed, replay.Disposition(), "a committed exact key must report replay not new work")
 				require.Equal(t, a.DispatchID(), replay.DispatchID(), "replay cannot create or adopt a different dispatch")
+				require.Equal(t, a.OriginalDisposition(), replay.OriginalDisposition(), "new repair uncertainty cannot replace the original committed admission outcome")
+				require.Equal(t, a.Reason(), replay.Reason(), "historical replay must preserve its original reason rather than classify current repair work")
 				require.Equal(t, a.DispatchOptions(), replay.DispatchOptions(), "historical replay must return original concrete scheduling options")
 				require.Equal(t, a.TargetNodeID(), replay.TargetNodeID(), "current retargeting must not replace retained original routing choices")
 			}
 			require.Empty(t, effects, "historical replay or refusal can never reissue postcommit effects")
 			require.Equal(t, before, admissionPostgresGraph(t, pool, f), "replay and conflicting reuse must leave the complete accepted graph unchanged")
+		})
+	}
+}
+
+func TestMessageAdmissionReplayAfterContinuationAttemptPostgres(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		mutation string
+	}{
+		{name: "actual lease-fenced continuation progress preserves exact replay"},
+		{name: "changed post-success action still refuses", mutation: "action"},
+		{name: "foreign tenant payload still refuses", mutation: "org"},
+		{name: "foreign session payload still refuses", mutation: "session"},
+		{name: "foreign lane payload still refuses", mutation: "lane"},
+		{name: "changed input binding still refuses", mutation: "binding"},
+		{name: "changed queued instruction still refuses", mutation: "message"},
+		{name: "unrecognized payload addition still refuses", mutation: "unexpected"},
+		{name: "changed queue still refuses", mutation: "queue"},
+		{name: "changed job type still refuses", mutation: "type"},
+		{name: "changed persisted retry budget still refuses", mutation: "job_budget"},
+		{name: "changed retained retry budget still refuses durable binding", mutation: "envelope_budget"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// The actual claimant scans its queue across tenants. Give each case
+			// an isolated database so another parallel case cannot steal its job.
+			pool := newLifecycleScopeSnapshotPool(t)
+			ctx := context.Background()
+			f := seedActivatedLifecycleFixture(t, ctx, pool)
+			command := admissionPostgresCommand(t, f, "replay-after-actual-start", func(input *MessageAdmissionInput) {
+				// Use explicit immutable collections so the complete message
+				// comparison does not conflate nil construction values with the
+				// store's canonical empty JSON collections on readback.
+				input.References = models.SessionInputReferences{{Kind: models.SessionInputReferenceKindFile, Path: "synthetic.go", Display: "synthetic.go"}}
+				input.Commands = models.SessionInputCommands{{Kind: "command", AgentType: models.DefaultDefaultAgentType, Name: "test", Token: "/test", Display: "/test", Source: models.SessionInputCommandSourceBuiltin}}
+			})
+			accepted, _, err := runAdmissionPostgres(t, pool, command)
+			require.NoError(t, err, "commit the canonical bound job before its actual current worker starts")
+			jobID, hasJob := accepted.JobID()
+			require.True(t, hasJob, "idle admission must bind exactly one immutable input job")
+			node, token := "synthetic-replay-worker-"+uuid.NewString(), uuid.New()
+			admissionPostgresExec(t, pool, `INSERT INTO nodes(id,mode,status,last_heartbeat_at) VALUES($1,'worker','active',now())`, node)
+			claimed, err := NewJobStore(pool).ClaimNextRunnable(ctx, node, "synthetic-replay-owner", token, time.Minute)
+			require.NoError(t, err, "the real queue claimant must establish the job's running lease")
+			require.NotNil(t, claimed, "the isolated queue must have its newly admitted due job")
+			require.Equal(t, jobID, claimed.ID, "the real claimant must own the exact admitted job, not another queue item")
+			runtime := createSeedRuntime(t, pool, f.orgID, f.sessionID, f.threadID)
+			store := NewJobStore(pool)
+			changed, err := store.RecordContinuationAttemptWithLease(ctx, f.orgID, jobID, uuid.New(), f.sessionID, f.threadID, runtime.ID, runtime.LeaseToken, accepted.Message().ID, []int64{accepted.Message().ID})
+			require.NoError(t, err, "a stale job token must be a clean fenced refusal")
+			require.False(t, changed, "no attempt may be recorded without the actual job lease token")
+			changed, err = store.RecordContinuationAttemptWithLease(ctx, f.orgID, jobID, token, f.sessionID, f.threadID, runtime.ID, uuid.New(), accepted.Message().ID, []int64{accepted.Message().ID})
+			require.NoError(t, err, "a stale runtime token must be a clean fenced refusal")
+			require.False(t, changed, "the current job lease alone cannot record a foreign runtime attempt")
+			changed, err = store.RecordContinuationAttemptWithLease(ctx, f.orgID, jobID, token, f.sessionID, f.threadID, runtime.ID, runtime.LeaseToken, accepted.Message().ID, []int64{accepted.Message().ID})
+			require.NoError(t, err, "the actual continuation-attempt writer must accept both current lease generations")
+			require.True(t, changed, "the real start writer must actually rewrite the persisted payload before replay is tested")
+			var progress struct {
+				Runtime string  `json:"continuation_runtime_id"`
+				Message string  `json:"continuation_message_id"`
+				IDs     []int64 `json:"continuation_task_message_ids"`
+			}
+			var payload []byte
+			require.NoError(t, pool.QueryRow(ctx, `SELECT payload FROM jobs WHERE org_id=$1 AND id=$2`, f.orgID, jobID).Scan(&payload), "read the exact payload after the real fenced attempt writer")
+			require.NoError(t, json.Unmarshal(payload, &progress), "decode only the three documented mutable attempt-progress fields")
+			require.Equal(t, runtime.ID.String(), progress.Runtime, "the actual writer must retain the current exact runtime identity")
+			require.Equal(t, fmt.Sprint(accepted.Message().ID), progress.Message, "the current attempt must retain the original admitted instruction")
+			require.Equal(t, []int64{accepted.Message().ID}, progress.IDs, "the current attempt must retain exactly its original task message set")
+			switch tt.mutation {
+			case "action":
+				admissionPostgresExec(t, pool, `UPDATE jobs SET payload=jsonb_set(payload,'{post_success_action}','"unreviewed_action"') WHERE org_id=$1 AND id=$2`, f.orgID, jobID)
+			case "org", "session", "lane":
+				key := map[string]string{"org": "org_id", "session": "session_id", "lane": "thread_id"}[tt.mutation]
+				admissionPostgresExec(t, pool, `UPDATE jobs SET payload=jsonb_set(payload,ARRAY[$3::text],to_jsonb($4::text)) WHERE org_id=$1 AND id=$2`, f.orgID, jobID, key, uuid.NewString())
+			case "binding":
+				admissionPostgresExec(t, pool, `UPDATE jobs SET payload=jsonb_set(payload,'{input_dispatch_ids}',jsonb_build_array(gen_random_uuid()::text)) WHERE org_id=$1 AND id=$2`, f.orgID, jobID)
+			case "message":
+				admissionPostgresExec(t, pool, `UPDATE jobs SET payload=jsonb_set(payload,'{queued_message_id}','"999999999"') WHERE org_id=$1 AND id=$2`, f.orgID, jobID)
+			case "unexpected":
+				admissionPostgresExec(t, pool, `UPDATE jobs SET payload=payload||'{"unrecognized_progress":true}' WHERE org_id=$1 AND id=$2`, f.orgID, jobID)
+			case "queue":
+				admissionPostgresExec(t, pool, `UPDATE jobs SET queue='synthetic_other' WHERE org_id=$1 AND id=$2`, f.orgID, jobID)
+			case "type":
+				admissionPostgresExec(t, pool, `UPDATE jobs SET job_type='run_agent' WHERE org_id=$1 AND id=$2`, f.orgID, jobID)
+			case "job_budget":
+				admissionPostgresExec(t, pool, `UPDATE jobs SET max_attempts=max_attempts+1 WHERE org_id=$1 AND id=$2`, f.orgID, jobID)
+			case "envelope_budget":
+				admissionPostgresExec(t, pool, `UPDATE session_input_dispatches SET validated_payload=jsonb_set(validated_payload,'{max_attempts}',to_jsonb($3::integer)) WHERE org_id=$1 AND id=$2`, f.orgID, accepted.DispatchID(), accepted.DispatchOptions().MaxAttempts+1)
+			}
+			before := admissionPostgresGraph(t, pool, f)
+			replayed, effects, err := runAdmissionPostgres(t, pool, command)
+			if tt.mutation != "" {
+				require.ErrorIs(t, err, ErrLifecycleConsumerReconciliation, "permitting documented attempt progress must not permit corruption of any immutable admitted binding")
+				require.Equal(t, Admission{}, replayed, "corrupted immutable binding must expose no partial receipt")
+			} else {
+				require.NoError(t, err, "an identical client retry must survive the existing real start writer")
+				require.Equal(t, MessageAdmissionReplayed, replayed.Disposition(), "started accepted work must return its original receipt rather than create work")
+				require.Equal(t, accepted.OriginalDisposition(), replayed.OriginalDisposition(), "worker progress cannot change the accepted outcome")
+				require.Equal(t, accepted.DispatchID(), replayed.DispatchID(), "replay must retain the exact accepted dispatch")
+				require.Equal(t, accepted.DispatchOptions(), replayed.DispatchOptions(), "replay must retain original concrete server options")
+				require.Equal(t, accepted.Message(), replayed.Message(), "replay must return the exact original admitted message")
+			}
+			require.Empty(t, effects, "replay or corruption refusal cannot repeat any postcommit effect")
+			require.Equal(t, before, admissionPostgresGraph(t, pool, f), "replay and refusal must leave the entire accepted graph unchanged")
 		})
 	}
 }
@@ -551,7 +758,6 @@ func seedMessageAdmissionActor(t *testing.T, pool *pgxpool.Pool, f activatedLife
 
 func TestMessageAdmissionEnqueueCollisionAndCommentRollbackPostgres(t *testing.T) {
 	t.Parallel()
-	pool := newLifecycleScopeSnapshotPool(t)
 	tests := []struct {
 		name     string
 		comments bool
@@ -559,6 +765,7 @@ func TestMessageAdmissionEnqueueCollisionAndCommentRollbackPostgres(t *testing.T
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			pool := newLifecycleScopeSnapshotPool(t)
 			f := seedActivatedLifecycleFixture(t, context.Background(), pool)
 			foreign := seedActivatedLifecycleFixture(t, context.Background(), pool)
 			dedupe := "synthetic-global-collision:" + uuid.NewString()

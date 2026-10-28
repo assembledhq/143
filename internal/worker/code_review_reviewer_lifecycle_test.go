@@ -24,10 +24,13 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	stores.CodeReviews = db.NewCodeReviewStore(mock)
 	stores.SessionThreads = db.NewSessionThreadStore(mock)
 	stores.SessionMessages = db.NewSessionMessageStore(mock)
-	orgID, sessionID, mainThreadID, threadID, resultID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	wireCodeReviewControllerCPUFixture(t, stores, mock)
+	orgID, sessionID, mainThreadID, threadID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	var resultID uuid.UUID
 	now := time.Now().UTC()
-	job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, RepositoryID: uuid.New(), HeadSHA: strings.Repeat("a", 40)}
-	metadata := models.CodeReviewSessionMetadata{CreatedAt: now.Add(-time.Minute), PromptRecordKey: stringPtr("review-prompts"), BaseSHA: strings.Repeat("b", 40)}
+	job := legacyCodeReviewCPUJob(orgID, sessionID)
+	job.RepositoryID, job.HeadSHA = uuid.New(), strings.Repeat("a", 40)
+	metadata := models.CodeReviewSessionMetadata{ID: job.MetadataID, ReviewOutputKey: job.OutputKey, CreatedAt: now.Add(-time.Minute), PromptRecordKey: stringPtr("review-prompts"), BaseSHA: strings.Repeat("b", 40)}
 	cfg := codeReviewRankedConfigForTest()
 	policy := codeReviewPolicyRecordForTest(cfg)
 	results, _ := codeReviewRankedResultsForTest(cfg, []codeReviewRankedAttemptForTest{
@@ -40,6 +43,8 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(codeReviewRankedResultRowsForTest(orgID, sessionID, results))
+	expectCodeReviewNoRetainedReviewers(mock, job)
+	expectCodeReviewFreshLegacyReviewerOwner(mock, job, "02:claude_code")
 	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, nil)
 	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
 	setWorkerSessionColumn(sessionRow, "repository_id", &job.RepositoryID)
@@ -76,18 +81,36 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(newSessionThreadRows().AddRow(threadRow...))
 	var recoveredState json.RawMessage
+	expectCodeReviewFreshLegacyReviewerOwner(mock, job, "02:claude_code")
+	// The new insert uses a controller-preminted UUID. Capture that actual
+	// argument and return the same row, as PostgreSQL RETURNING does; a fresh
+	// unrelated test UUID would falsely simulate adoption of another owner.
+	insertedRows := newCodeReviewAgentResultRows()
 	mock.ExpectQuery("INSERT INTO code_review_agent_results").
-		WithArgs(orgID, sessionID, "claude_code", stringPtr(models.DefaultClaudeCodeModel), models.CodeReviewAgentRoleReviewer,
+		WithArgs(codeReviewFallbackArg(func(value any) bool {
+			var ok bool
+			resultID, ok = value.(uuid.UUID)
+			return ok && resultID != uuid.Nil
+		}), orgID, sessionID, "claude_code", stringPtr(models.DefaultClaudeCodeModel),
 			models.CodeReviewAgentResultStatusQueued, (*string)(nil), codeReviewFallbackArg(func(value any) bool {
-				recoveredState, _ = value.(json.RawMessage)
+				raw, ok := value.([]byte)
+				if !ok {
+					return false
+				}
+				recoveredState = append(json.RawMessage(nil), raw...)
 				state, ok := parseCodeReviewReviewerStructuredResult(recoveredState)
-				return ok && state.ReviewerKey == "02:claude_code" && state.ThreadID == threadID.String() && state.PromptRecordKey == recordKey && state.ReadOnly
+				if !ok || state.ReviewerKey != "02:claude_code" || state.ThreadID != threadID.String() || state.PromptRecordKey != recordKey || !state.ReadOnly {
+					return false
+				}
+				insertedRows.AddRow(resultID, orgID, sessionID, "claude_code", stringPtr(models.DefaultClaudeCodeModel),
+					models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusQueued, nil, recoveredState, now)
+				return true
 			})).
-		WillReturnRows(newCodeReviewAgentResultRows().AddRow(resultID, orgID, sessionID, "claude_code", stringPtr(models.DefaultClaudeCodeModel),
-			models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusQueued, nil, json.RawMessage(`{}`), now))
+		WillReturnRows(insertedRows)
 
 	err = ensureCodeReviewReviewerThreads(context.Background(), stores, nil, zerolog.Nop(), job, models.PullRequest{}, policy, metadata, nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.NoError(t, err, "a fallback already dispatched before result persistence should recover without sending another turn")
+	require.NotEqual(t, uuid.Nil, resultID, "the actual fresh legacy insert must retain the controller's preminted result identity")
 	require.Contains(t, capturedPrompt, job.HeadSHA, "fallback review must use the same captured PR head")
 	require.NoError(t, mock.ExpectationsWereMet(), "recovery should create only the missing attempt and preserve the completed peer")
 
@@ -97,6 +120,7 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	require.False(t, codeReviewReviewerRosterTerminal(cfg, results, false), "the review should wait for its replacement report")
 	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(codeReviewRankedResultRowsForTest(orgID, sessionID, results))
+	expectCodeReviewNoRetainedReviewers(mock, job)
 	setWorkerSessionThreadColumn(threadRow, "status", models.ThreadStatusCompleted)
 	setWorkerSessionThreadColumn(threadRow, "completed_at", &now)
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
@@ -105,6 +129,7 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	mock.ExpectQuery("(?s)SELECT .*FROM session_messages").WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
 		WillReturnRows(newSessionMessageRows().AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, raw, nil, nil, nil, nil, "", now))
 	var completedState json.RawMessage
+	expectCodeReviewLegacyReviewerOutcome(mock, job, resultID)
 	mock.ExpectQuery("UPDATE code_review_agent_results").WithArgs(models.CodeReviewAgentResultStatusCompleted, &raw, codeReviewFallbackArg(func(value any) bool {
 		completedState, _ = value.(json.RawMessage)
 		state, ok := parseCodeReviewReviewerStructuredResult(completedState)
@@ -126,6 +151,7 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	require.Equal(t, originalResults, finalResults[:2], "fallback must preserve the original reports and failure history")
 	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(codeReviewRankedResultRowsForTest(orgID, sessionID, finalResults))
+	expectCodeReviewNoRetainedReviewers(mock, job)
 	err = ensureCodeReviewReviewerThreads(context.Background(), stores, nil, zerolog.Nop(), job, models.PullRequest{}, policy, metadata, nil, models.CodeReviewVisualEvidenceSnapshot{})
 	require.NoError(t, err, "another worker poll should leave the unused fallback untouched")
 	require.NoError(t, mock.ExpectationsWereMet(), "a satisfied reviewer count should cause no new prompt, result, or thread writes")

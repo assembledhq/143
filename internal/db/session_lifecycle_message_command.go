@@ -183,8 +183,9 @@ func messageAdmissionSemanticPayload(input MessageAdmissionInput) (json.RawMessa
 	laneID, _ := input.Fence.ThreadID()
 	// Fixed typed JSON gives one semantic encoding. Empty collections encode as
 	// [] regardless of nil/empty input. Order and exact text are otherwise kept.
-	// Epochs, turn/token/message/job IDs, lease holder and ALL server times are
-	// absent; a freshly selected server value must not conflict with client replay.
+	// Epochs, turn/token/message/job IDs, lease holder, server retry budget and
+	// ALL server times are absent. Concrete dispatch options remain frozen on
+	// the command, but freshly selected server values cannot change client intent.
 	payload := struct {
 		Version                       int                           `json:"version"`
 		OrgID                         uuid.UUID                     `json:"org_id"`
@@ -202,7 +203,6 @@ func messageAdmissionSemanticPayload(input MessageAdmissionInput) (json.RawMessa
 		PostSuccessAction             MessagePostSuccessAction      `json:"post_success_action"`
 		PostSuccessAuthorMode         MessagePostSuccessAuthorMode  `json:"post_success_author_mode"`
 		ContinuationDedupeKeyOverride *string                       `json:"continuation_dedupe_key_override"`
-		MaxAttempts                   int                           `json:"max_attempts"`
 	}{
 		Version: 1, OrgID: input.OrgID, SessionID: input.Fence.SessionID(), ThreadID: laneID,
 		ActorID: input.ActorID, Source: input.Source, Message: input.Message,
@@ -213,7 +213,7 @@ func messageAdmissionSemanticPayload(input MessageAdmissionInput) (json.RawMessa
 		ResolveReviewCommentIDs: append([]uuid.UUID{}, input.ResolveReviewCommentIDs...),
 		PlanMode:                input.PlanMode, PostSuccessAction: input.PostSuccessAction,
 		PostSuccessAuthorMode:         input.PostSuccessAuthorMode,
-		ContinuationDedupeKeyOverride: input.ContinuationDedupeKeyOverride, MaxAttempts: input.Dispatch.MaxAttempts,
+		ContinuationDedupeKeyOverride: input.ContinuationDedupeKeyOverride,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

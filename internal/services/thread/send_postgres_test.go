@@ -15,12 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func sendPostgresExpectedUnits(active, grouped, running bool) []sendPostgresGraph {
+func sendPostgresExpectedUnits(active, running bool) []sendPostgresGraph {
 	idle := sendPostgresGraph{parentStatus: models.SessionStatusIdle, threadStatus: models.ThreadStatusIdle}
-	lane := idle
-	lane.threadStatus = models.ThreadStatusRunning
-	both := lane
-	both.parentStatus = models.SessionStatusRunning
+	both := sendPostgresGraph{parentStatus: models.SessionStatusRunning, threadStatus: models.ThreadStatusRunning}
 	message := both
 	message.messages = 1
 	inbox := message
@@ -40,17 +37,11 @@ func sendPostgresExpectedUnits(active, grouped, running bool) []sendPostgresGrap
 		pending.pending = 1
 		queued := pending
 		queued.liveJobs = 1
-		if grouped {
-			return []sendPostgresGraph{both, both, pending, queued}
-		}
-		return []sendPostgresGraph{both, both, message, inbox, pending, queued}
+		return []sendPostgresGraph{both, queued}
 	}
 	job := inbox
 	job.continueJobs = 1
-	if grouped {
-		return []sendPostgresGraph{idle, lane, both, inbox, job}
-	}
-	return []sendPostgresGraph{idle, lane, both, message, inbox, job}
+	return []sendPostgresGraph{idle, job}
 }
 
 func TestThreadSendRealServiceDurableUnitsPostgres(t *testing.T) {
@@ -99,15 +90,15 @@ func TestThreadSendRealServiceDurableUnitsPostgres(t *testing.T) {
 			inbox, err := db.NewThreadInboxStore(f.pool).GetByClientMessageID(context.Background(), f.org, input.ThreadID, input.ClientMessageID)
 			require.NoError(t, err, "read the exact durable client inbox association")
 			require.Equal(t, &inbox, result.InboxEntry, "the entire returned inbox receipt must match durable storage")
-			wantUnits := sendPostgresExpectedUnits(tt.active, tt.grouped, tt.running)
+			wantUnits := sendPostgresExpectedUnits(tt.active, tt.running)
 			actualUnits := make([]sendPostgresGraph, len(recorder.units))
 			ids := make(map[int64]struct{}, len(recorder.units))
 			for i, unit := range recorder.units {
 				actualUnits[i] = unit.graph
 				ids[unit.id] = struct{}{}
 			}
-			require.Equal(t, wantUnits, actualUnits, "real transaction snapshots must preserve every original v0 separate/grouped boundary or the v1 two-stage observation/admission boundary")
-			require.Equal(t, len(wantUnits), len(ids), "each recorded unit must be a distinct real PostgreSQL transaction, never a savepoint or encompassing legacy owner")
+			require.Equal(t, wantUnits, actualUnits, "entry observation must be followed by exactly one complete atomic legacy or active mutation, regardless of optional grouped wiring")
+			require.Equal(t, len(wantUnits), len(ids), "entry and complete command must own distinct real PostgreSQL transactions")
 			require.Equal(t, wantUnits[len(wantUnits)-1], sendPostgresReadGraph(t, f), "independent postcommit read must equal the complete final graph and unchanged execution counters")
 			if tt.active {
 				require.NotNil(t, result.Admission, "active acceptance must expose the sealed canonical receipt")
@@ -378,14 +369,19 @@ func TestThreadSendPendingAnswerScopePostgres(t *testing.T) {
 func TestThreadSendRepairReconciliationPostgres(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		active   bool
-		comments bool
-		want     db.MessageAdmissionDisposition
-		reason   string
+		name         string
+		active       bool
+		retained     bool
+		targetStatus models.ThreadStatus
+		comments     bool
+		want         db.MessageAdmissionDisposition
+		reason       string
 	}{
 		{name: "unresolved sibling repair accepts ordinary input due without scope proof", active: true, want: db.MessageAdmissionWaiting, reason: "repair_reconciliation"},
 		{name: "unresolved repair and review comments require whole abort", active: true, comments: true},
+		{name: "released terminal repair with retained runtime overrides running lane queue", retained: true, targetStatus: models.ThreadStatusRunning, want: db.MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "released terminal repair with retained runtime overrides pending lane queue", retained: true, targetStatus: models.ThreadStatusPending, want: db.MessageAdmissionWaiting, reason: "repair_reconciliation"},
+		{name: "released terminal repair with retained runtime and running comments whole abort", retained: true, targetStatus: models.ThreadStatusRunning, comments: true},
 		{name: "released old-head history alone is not a permanent owner", want: db.MessageAdmissionNewJob},
 	}
 	for _, tt := range tests {
@@ -393,6 +389,38 @@ func TestThreadSendRepairReconciliationPostgres(t *testing.T) {
 			t.Parallel()
 			f := newSendPostgresFixture(t, true, 2)
 			run := seedSendPostgresRepair(t, f, f.lanes[1], tt.active)
+			if tt.targetStatus != "" {
+				sendPostgresExec(t, f, `UPDATE session_threads SET status=$3,current_turn=4 WHERE org_id=$1 AND id=$2`, f.org, f.lanes[0], tt.targetStatus)
+				sendPostgresExec(t, f, `UPDATE sessions SET status='running' WHERE org_id=$1 AND id=$2`, f.org, f.session)
+			}
+			if tt.retained {
+				// Released and obsolete reservation history is not the blocker. The
+				// independently retained live runtime still names this terminal job.
+				sendPostgresExec(t, f, `UPDATE pull_request_repair_runs SET obsoleted_by_version=2 WHERE org_id=$1 AND id=$2`, f.org, run.ID)
+				require.NoError(t, db.RunLifecycleTransaction(context.Background(), f.pool, func(ctx context.Context, tx pgx.Tx) error {
+					job, err := db.NewJobStore(tx).EnqueueInTx(ctx, tx, f.org, "agent", "continue_session", map[string]any{
+						"org_id": f.org, "session_id": f.session, "thread_id": f.lanes[1], "repair_run_id": run.ID, "pull_request_id": run.PullRequestID,
+					}, 3, nil)
+					if err != nil {
+						return err
+					}
+					if _, err := tx.Exec(ctx, `UPDATE jobs SET status='failed' WHERE org_id=$1 AND id=$2`, f.org, job); err != nil {
+						return err
+					}
+					runtime, err := db.NewThreadRuntimeStore(tx).CreateStarting(ctx, f.org, db.CreateThreadRuntimeParams{
+						SessionID: f.session, ThreadID: f.lanes[1], SandboxID: uuid.New(), AgentType: models.DefaultDefaultAgentType,
+						OwnerNodeID: "synthetic-repair-worker", LeaseToken: uuid.New(), LeaseDuration: time.Minute,
+					})
+					if err != nil {
+						return err
+					}
+					_, err = tx.Exec(ctx, `UPDATE thread_runtimes SET job_id=$3,job_attempt_token=gen_random_uuid(),
+ allocation_digest=repeat('a',64),allocation_expected_turn=0,input_dispatch_ids=ARRAY[gen_random_uuid()],
+ admission_session_epoch=3,admission_thread_epoch=5,provider_invocation_ordinal=0
+ WHERE org_id=$1 AND id=$2`, f.org, runtime.ID, job)
+					return err
+				}), "retain a complete synthetic sibling runtime allocation with the released terminal repair job, without launching a provider")
+			}
 			service, effects := f.service(t, true)
 			input := f.input(0, "synthetic-repair-reconciliation")
 			var comment uuid.UUID
@@ -414,8 +442,15 @@ func TestThreadSendRepairReconciliationPostgres(t *testing.T) {
 				require.NoError(t, err, "ordinary no-comment input must be accepted durably while unresolved repair awaits A5 scope reconciliation")
 				require.Equal(t, tt.want, result.Admission.Disposition(), "active reservation and released history must have distinct finite dispositions")
 				require.Equal(t, tt.reason, result.Admission.Reason(), "unresolved reservation exposes the explicit reconciliation reason instead of borrowing specialist authority")
-				if tt.active {
-					require.Equal(t, sendPostgresGraph{messages: 1, inbox: 1, dispatches: 1, pending: 1, parentStatus: models.SessionStatusIdle, threadStatus: models.ThreadStatusIdle}, sendPostgresReadGraph(t, f), "repair reconciliation creates durable due input but no job, lane claim, parent claim or execution counter change")
+				wantGraph := before
+				wantGraph.messages++
+				wantGraph.inbox++
+				wantGraph.dispatches++
+				if tt.want == db.MessageAdmissionWaiting {
+					wantGraph.pending++
+					require.Equal(t, wantGraph, sendPostgresReadGraph(t, f), "repair reconciliation creates durable due input but no job, lane claim, parent claim or execution counter change")
+					_, hasClaim := result.Admission.Authority()
+					require.False(t, hasClaim, "accepted repair waiting cannot install or borrow a logical lane claim")
 					var due *time.Time
 					var consumer string
 					var job *uuid.UUID
@@ -426,7 +461,10 @@ func TestThreadSendRepairReconciliationPostgres(t *testing.T) {
 					require.Nil(t, job, "waiting ordinary input must not adopt a specialist repair job")
 					require.Empty(t, effects.jobs, "waiting cannot issue a speculative launch notification")
 				} else {
-					require.Equal(t, sendPostgresGraph{messages: 1, inbox: 1, dispatches: 1, continueJobs: 1, claims: 1, parentStatus: models.SessionStatusRunning, threadStatus: models.ThreadStatusRunning}, sendPostgresReadGraph(t, f), "released history with no live consumer permits exactly one ordinary admission graph")
+					wantGraph.continueJobs++
+					wantGraph.claims++
+					wantGraph.parentStatus, wantGraph.threadStatus = models.SessionStatusRunning, models.ThreadStatusRunning
+					require.Equal(t, wantGraph, sendPostgresReadGraph(t, f), "released history with no live consumer permits exactly one ordinary admission graph")
 					require.Equal(t, 1, len(effects.jobs), "only the actual ordinary committed job may be notified")
 				}
 			}

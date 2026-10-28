@@ -511,6 +511,8 @@ func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
 	pullRequestID := uuid.New()
 	policyID := uuid.New()
 	metadataID := uuid.New()
+	jobID := uuid.New()
+	lockToken := uuid.New()
 	now := time.Date(2026, 7, 16, 22, 56, 4, 0, time.UTC)
 	deadLetterErr := &ghservice.GitHubAPIError{
 		Method:     http.MethodGet,
@@ -523,13 +525,29 @@ func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
 	acceptable := false
 	statusCode := models.CodeReviewStatusCodeGitHubUnavailable
 	statusMessage := "GitHub remained unavailable until automatic retries expired. Retry the review to start a fresh attempt."
+	job := runCodeReviewPayload{
+		OrgID: orgID, SessionID: sessionID, MetadataID: metadataID, RepositoryID: repositoryID,
+		PullRequestID: pullRequestID, PolicyID: policyID, HeadSHA: "head", OutputKey: "output-key",
+		RequestedReviewerLogin: "143-code-reviewer",
+	}
+	transactions := &codeReviewHandlerCPUTransactions{mock: mock}
+	codeReviews, err := db.NewCodeReviewStoreWithTerminalTransactions(mock, transactions)
+	require.NoError(t, err, "dead-letter fixture should explicitly compose its CPU terminal transaction owner")
+	jobs, err := db.NewJobStoreWithCodeReviewTerminalTransactions(mock, transactions)
+	require.NoError(t, err, "dead-letter fixture should obtain sealed outcomes from the actual JobStore wrapper")
+
+	expectCodeReviewHandlerCPULegacyRetirementLocks(mock, job, jobID, lockToken)
+	mock.ExpectExec("UPDATE jobs SET status='dead_letter'").
+		WithArgs(orgID, jobID, lockToken, deadLetterErr.Error(), models.JobTypeRunCodeReview).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "failure_reason": reason,
-			"status_code":       statusCode,
-			"status_message":    statusMessage,
-			"retryable_failure": true,
+			"status_code":           statusCode,
+			"status_message":        statusMessage,
+			"retryable_failure":     true,
+			"terminal_metadata_ids": []uuid.UUID{metadataID},
 		}).
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
@@ -537,7 +555,9 @@ func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
 				models.CodeReviewSessionStatusFailed, nil, &statusCode,
 				&statusMessage, nil, &now, true,
 				&decision, &acceptable, false, nil,
-				"output-key", nil, nil, nil, nil, &reason, &now, now))
+				"output-key", nil, nil, nil, nil, &reason, &now, now)).RowsWillBeClosed()
+	expectCodeReviewHandlerCPURetiredPendingCancellation(mock, job)
+	mock.ExpectCommit()
 	idleRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusIdle, 0, nil, nil)
 	setWorkerSessionColumn(idleRow, "origin", models.SessionOriginCodeReview)
 	mock.ExpectQuery("(?s)SELECT .*FROM sessions").
@@ -546,10 +566,15 @@ func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
 	failedRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusFailed, 0, nil, nil)
 	setWorkerSessionColumn(failedRow, "origin", models.SessionOriginCodeReview)
 	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now").
-		WithArgs(workerAnyArgs(3)...).
+		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID, "status": string(models.SessionStatusFailed)}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(failedRow...))
 	mock.ExpectExec("UPDATE sessions[\\s\\S]+failure_explanation").
-		WithArgs(workerAnyArgs(6)...).
+		WithArgs(pgx.NamedArgs{
+			"id": sessionID, "org_id": orgID, "failure_explanation": reason,
+			"failure_category":      "code_review_job_failed",
+			"failure_next_steps":    []string{"Request the code reviewer again to start a fresh attempt."},
+			"failure_retry_advised": true,
+		}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("(?s)FROM pull_requests.*WHERE id = @id AND org_id = @org_id").
 		WithArgs(pgx.NamedArgs{"id": pullRequestID, "org_id": orgID}).
@@ -566,20 +591,48 @@ func TestCodeReviewDeadLetterReconciliationFailsMetadata(t *testing.T) {
 
 	remover := &capturingCodeReviewSubmitter{}
 	ctx := jobctx.WithDeadLetterHooks(context.Background())
-	registerCodeReviewDeadLetterReconciliation(ctx, &Stores{
-		CodeReviews:  db.NewCodeReviewStore(mock),
+	ctx = jobctx.WithJobID(ctx, jobID)
+	ctx = jobctx.WithLockToken(ctx, lockToken)
+	stores := &Stores{
+		CodeReviews:  codeReviews,
 		Sessions:     db.NewSessionStore(mock),
 		PullRequests: db.NewPullRequestStore(mock),
 		Repositories: db.NewRepositoryStore(mock),
-	}, &Services{CodeReviews: remover}, zerolog.Nop(), runCodeReviewPayload{
-		OrgID:                  orgID,
-		SessionID:              sessionID,
-		RepositoryID:           repositoryID,
-		PullRequestID:          pullRequestID,
-		RequestedReviewerLogin: "143-code-reviewer",
+	}
+	stores.ThreadSendDependencies.Transactions = transactions
+	registerCodeReviewDeadLetterReconciliation(ctx, stores, &Services{CodeReviews: remover}, zerolog.Nop(), job)
+	hookCalls := 0
+	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, hookErr error) {
+		hookCalls++
+		outcome, scope, committed := committedCodeReviewTerminalOutcome(hookCtx, orgID, models.JobTypeRunCodeReview)
+		require.True(t, committed, "actual retirement should release its sealed exact-job outcome only after mock commit")
+		require.Equal(t, db.CodeReviewTerminalScope{
+			OrgID: orgID, JobID: jobID, LockToken: lockToken, JobType: models.JobTypeRunCodeReview,
+			SessionID: sessionID, MetadataID: metadataID, RepositoryID: repositoryID,
+			PullRequestID: pullRequestID, PolicyID: policyID, HeadSHA: "head", OutputKey: "output-key",
+			ReviewScope: models.CodeReviewScopeFull,
+		}, scope, "cleanup must retain the complete original full-review owner and no fabricated assessment")
+		metadata, changed := outcome.Metadata()
+		require.True(t, changed, "committed retirement should carry the metadata change that authorizes cleanup")
+		require.Equal(t, models.CodeReviewSessionMetadata{
+			ID: metadataID, OrgID: orgID, SessionID: sessionID, RepositoryID: repositoryID,
+			PullRequestID: pullRequestID, PolicyID: policyID, BaseSHA: "base", HeadSHA: "head",
+			TriggerSource: models.CodeReviewTriggerSourceTeamReviewer, Status: models.CodeReviewSessionStatusFailed,
+			StatusCode: &statusCode, StatusMessage: &statusMessage, LastErrorAt: &now, RetryableFailure: true,
+			Decision: &decision, Acceptable: &acceptable, ReviewOutputKey: "output-key",
+			FailureReason: &reason, CompletedAt: &now, CreatedAt: now,
+		}, metadata, "dead-letter cleanup should preserve the exact failed metadata descriptor from its transaction")
+		require.Same(t, deadLetterErr, hookErr, "cleanup should retain the original terminal error")
+		require.Equal(t, 1, transactions.commits, "parent and reviewer cleanup should run after one known mock commit")
 	})
-	jobctx.RunDeadLetterHooks(ctx, deadLetterErr)
+	w := &Worker{jobs: jobs, codeReviewTerminal: jobs, logger: zerolog.Nop()}
+	w.deadLetterJob(context.Background(), ctx, &models.Job{
+		ID: jobID, OrgID: orgID, JobType: models.JobTypeRunCodeReview, LockToken: &lockToken,
+	}, deadLetterErr)
 
+	require.Equal(t, 1, transactions.calls, "retirement and legacy cleanup should use only one explicit CPU Run")
+	require.Equal(t, 1, transactions.commits, "retirement should settle its supplied mock transaction exactly once")
+	require.Equal(t, 1, hookCalls, "the actual Worker retirement should deliver its committed cleanup hooks exactly once")
 	require.NoError(t, mock.ExpectationsWereMet(), "dead-letter hook should fail the review metadata and parent session")
 	require.Equal(t, []codereview.RequestedReviewersRequest{{
 		InstallationID: 143,
@@ -1791,6 +1844,7 @@ func TestHarvestCodeReviewReviewerResultsPreservesCompletedOutputAfterDeadline(t
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
+	job := legacyCodeReviewCPUJob(orgID, sessionID)
 	threadID := uuid.New()
 	resultID := uuid.New()
 	findingID := uuid.New()
@@ -1821,6 +1875,7 @@ func TestHarvestCodeReviewReviewerResultsPreservesCompletedOutputAfterDeadline(t
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(newCodeReviewAgentResultRows().
 			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+	expectCodeReviewNoRetainedReviewers(mock, job)
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
@@ -1845,6 +1900,7 @@ func TestHarvestCodeReviewReviewerResultsPreservesCompletedOutputAfterDeadline(t
 				models.CodeReviewFindingSeverityHigh, models.CodeReviewFindingConfidenceHigh,
 				stringPtr("internal/db/users.go"), intPtr(42), intPtr(42), "Missing org filter",
 				"This query can read another org's rows.", false, nil, now))
+	expectCodeReviewLegacyReviewerOutcome(mock, job, resultID)
 	mock.ExpectQuery("UPDATE code_review_agent_results").
 		WithArgs(models.CodeReviewAgentResultStatusCompleted, &rawReview, completedReviewerResultArg{expectedCompletedAt: &completedAt}, orgID, resultID).
 		WillReturnRows(newCodeReviewAgentResultRows().
@@ -1857,10 +1913,8 @@ func TestHarvestCodeReviewReviewerResultsPreservesCompletedOutputAfterDeadline(t
 		SessionThreads:  db.NewSessionThreadStore(mock),
 		SessionMessages: db.NewSessionMessageStore(mock),
 	}
-	err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
-		OrgID:     orgID,
-		SessionID: sessionID,
-	}, policy, models.CodeReviewSessionMetadata{CreatedAt: reviewStartedAt}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
+	wireCodeReviewControllerCPUFixture(t, stores, mock)
+	err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), job, policy, models.CodeReviewSessionMetadata{CreatedAt: reviewStartedAt}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
 
 	require.NoError(t, err, "a completed reviewer output should be harvested even when the worker resumes after the deadline")
 	require.NoError(t, mock.ExpectationsWereMet(), "reviewer harvest should preserve terminal output instead of replacing it with a timeout")
@@ -1875,6 +1929,7 @@ func TestHarvestCodeReviewReviewerResultsCompletesIdleReadOnlyViolationWithoutAs
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
+	job := legacyCodeReviewCPUJob(orgID, sessionID)
 	threadID := uuid.New()
 	resultID := uuid.New()
 	now := time.Now().UTC()
@@ -1891,6 +1946,7 @@ func TestHarvestCodeReviewReviewerResultsCompletesIdleReadOnlyViolationWithoutAs
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(newCodeReviewAgentResultRows().
 			AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+	expectCodeReviewNoRetainedReviewers(mock, job)
 	mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 		WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 		WillReturnRows(newSessionThreadRows().
@@ -1904,6 +1960,7 @@ func TestHarvestCodeReviewReviewerResultsCompletesIdleReadOnlyViolationWithoutAs
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
 		WillReturnRows(newSessionMessageRows().
 			AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleUser, "review this PR", nil, nil, nil, nil, "", now))
+	expectCodeReviewLegacyReviewerOutcome(mock, job, resultID)
 	mock.ExpectQuery("UPDATE code_review_agent_results").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(newCodeReviewAgentResultRows().
@@ -1916,10 +1973,8 @@ func TestHarvestCodeReviewReviewerResultsCompletesIdleReadOnlyViolationWithoutAs
 		SessionThreads:  db.NewSessionThreadStore(mock),
 		SessionMessages: db.NewSessionMessageStore(mock),
 	}
-	err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
-		OrgID:     orgID,
-		SessionID: sessionID,
-	}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
+	wireCodeReviewControllerCPUFixture(t, stores, mock)
+	err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), job, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
 
 	require.NoError(t, err, "idle read-only violations without assistant output should not fail reviewer results")
 	require.NoError(t, mock.ExpectationsWereMet(), "reviewer harvest should keep code review moving after a read-only violation")
@@ -1969,6 +2024,7 @@ func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing
 
 			orgID := uuid.New()
 			sessionID := uuid.New()
+			job := legacyCodeReviewCPUJob(orgID, sessionID)
 			threadID := uuid.New()
 			resultID := uuid.New()
 			now := time.Now().UTC()
@@ -1983,6 +2039,7 @@ func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 				WillReturnRows(newCodeReviewAgentResultRows().
 					AddRow(resultID, orgID, sessionID, "claude_code", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusRunning, nil, state, now))
+			expectCodeReviewNoRetainedReviewers(mock, job)
 			mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 				WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 				WillReturnRows(newSessionThreadRows().
@@ -1996,6 +2053,7 @@ func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "thread_id": threadID}).
 				WillReturnRows(newSessionMessageRows().
 					AddRow(int64(1), sessionID, orgID, &threadID, nil, 1, models.MessageRoleAssistant, tt.assistantOutput, nil, nil, nil, nil, "", now))
+			expectCodeReviewLegacyReviewerOutcome(mock, job, resultID)
 			mock.ExpectQuery("UPDATE code_review_agent_results").
 				WithArgs(tt.expectedStatus, &tt.assistantOutput, pgxmock.AnyArg(), orgID, resultID).
 				WillReturnRows(newCodeReviewAgentResultRows().
@@ -2008,10 +2066,8 @@ func TestHarvestCodeReviewReviewerResultsClassifiesFailedThreadOutput(t *testing
 				SessionThreads:  db.NewSessionThreadStore(mock),
 				SessionMessages: db.NewSessionMessageStore(mock),
 			}
-			err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
-				OrgID:     orgID,
-				SessionID: sessionID,
-			}, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
+			wireCodeReviewControllerCPUFixture(t, stores, mock)
+			err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), job, policy, models.CodeReviewSessionMetadata{CreatedAt: now}, []codereview.PullRequestFile{{Filename: "internal/db/users.go"}})
 
 			require.NoError(t, err, "failed reviewer output should be classified without stopping the harvest")
 			require.NoError(t, mock.ExpectationsWereMet(), "failed reviewer output should use valid completed reviews but reject operational error text")
@@ -2032,18 +2088,26 @@ func TestFailCodeReviewWithoutReviewerOutputFailsMetadata(t *testing.T) {
 	pullRequestID := uuid.New()
 	policyID := uuid.New()
 	metadataID := uuid.New()
+	job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, MetadataID: metadataID, OutputKey: "output-key"}
 	now := time.Now().UTC()
 	reason := "no code review reviewer produced usable output: Codex failed, Claude Code failed"
 	decision := models.CodeReviewDecisionBlocked
 	acceptable := false
 	statusCode := models.CodeReviewStatusCodeReviewerFailed
 	statusMessage := "Reviewer agents did not produce usable output. Retry the review to start a fresh attempt."
+	transactions := &codeReviewHandlerCPUTransactions{mock: mock}
+	codeReviews, err := db.NewCodeReviewStoreWithTerminalTransactions(mock, transactions)
+	require.NoError(t, err, "missing-output fixture should explicitly compose its CPU terminal transaction owner")
+	expectCodeReviewNoRetainedReviewers(mock, job)
+	expectCodeReviewHandlerCPUBegin(mock)
+	expectCodeReviewHandlerCPUMetadataLock(mock, orgID, sessionID, metadataID, true)
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "failure_reason": reason,
-			"status_code":       statusCode,
-			"status_message":    statusMessage,
-			"retryable_failure": true,
+			"status_code":           statusCode,
+			"status_message":        statusMessage,
+			"retryable_failure":     true,
+			"terminal_metadata_ids": []uuid.UUID{metadataID},
 		}).
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
@@ -2051,19 +2115,20 @@ func TestFailCodeReviewWithoutReviewerOutputFailsMetadata(t *testing.T) {
 				models.CodeReviewSessionStatusFailed, nil, &statusCode,
 				&statusMessage, nil, &now, true,
 				&decision, &acceptable, false, nil,
-				"output-key", nil, nil, nil, nil, &reason, &now, now))
+				"output-key", nil, nil, nil, nil, &reason, &now, now)).RowsWillBeClosed()
+	expectCodeReviewHandlerCPUPendingCancellation(mock, orgID, sessionID, metadataID)
+	mock.ExpectCommit()
 
-	err = failCodeReviewWithoutReviewerOutput(context.Background(), &Stores{
-		CodeReviews: db.NewCodeReviewStore(mock),
-	}, nil, zerolog.Nop(), runCodeReviewPayload{
-		OrgID:     orgID,
-		SessionID: sessionID,
-	}, models.PullRequest{}, []models.CodeReviewAgentResult{
+	stores := &Stores{CodeReviews: codeReviews}
+	wireCodeReviewControllerCPUFixture(t, stores, mock)
+	err = failCodeReviewWithoutReviewerOutput(context.Background(), stores, nil, zerolog.Nop(), job, models.PullRequest{}, []models.CodeReviewAgentResult{
 		{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "codex", Status: models.CodeReviewAgentResultStatusFailed},
 		{Role: models.CodeReviewAgentRoleReviewer, AgentProvider: "claude_code", Status: models.CodeReviewAgentResultStatusFailed},
 	})
 
 	require.NoError(t, err, "missing reviewer output should terminate the code review cleanly")
+	require.Equal(t, 1, transactions.calls, "missing reviewer output should invoke its explicit CPU Run once")
+	require.Equal(t, 1, transactions.commits, "missing reviewer output should commit its complete mocked metadata transition")
 	require.NoError(t, mock.ExpectationsWereMet(), "missing reviewer output should fail the code review metadata")
 }
 
@@ -2080,9 +2145,11 @@ func TestRunCodeReviewHandlerReconcilesTerminalFailedMetadata(t *testing.T) {
 	pullRequestID := uuid.New()
 	policyID := uuid.New()
 	metadataID := uuid.New()
+	job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, MetadataID: metadataID, RepositoryID: repositoryID, PullRequestID: pullRequestID, PolicyID: policyID, OutputKey: "output-key"}
 	now := time.Now().UTC()
 	reason := "no code review reviewer produced usable output: claude_code failed"
 
+	expectCodeReviewNoRetainedReviewers(mock, job)
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(newCodeReviewMetadataRows())
@@ -2115,19 +2182,14 @@ func TestRunCodeReviewHandlerReconcilesTerminalFailedMetadata(t *testing.T) {
 		WithArgs(workerAnyArgs(6)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	job := runCodeReviewPayload{
-		OrgID:         orgID,
-		SessionID:     sessionID,
-		RepositoryID:  repositoryID,
-		PullRequestID: pullRequestID,
-		PolicyID:      policyID,
-	}
 	payload, err := json.Marshal(job)
 	require.NoError(t, err, "code review job payload should marshal")
-	err = newRunCodeReviewHandler(&Stores{
+	stores := &Stores{
 		CodeReviews: db.NewCodeReviewStore(mock),
 		Sessions:    db.NewSessionStore(mock),
-	}, nil, zerolog.Nop())(context.Background(), "run_code_review", payload)
+	}
+	wireCodeReviewControllerCPUFixture(t, stores, mock)
+	err = newRunCodeReviewHandler(stores, nil, zerolog.Nop())(context.Background(), "run_code_review", payload)
 
 	require.NoError(t, err, "terminal failed metadata should reconcile a parent left non-terminal by a prior transient failure")
 	require.NoError(t, mock.ExpectationsWereMet(), "terminal failed metadata should retry parent failure reconciliation")
@@ -2185,12 +2247,15 @@ func TestRunCodeReviewHandlerFastWaitSkipsGitHubRefresh(t *testing.T) {
 			threadID := uuid.New()
 			now := time.Now().UTC()
 			headSHA := "reviewed-head"
+			job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, MetadataID: metadataID, RepositoryID: repositoryID,
+				PullRequestID: pullRequestID, PolicyID: policyID, PolicyVersion: 1, HeadSHA: headSHA, OutputKey: "output-key"}
 			promptRecordKey := "code-review-prompts/" + sessionID.String() + "/" + headSHA
 			policy := models.DefaultCodeReviewPolicyConfig()
 			policy.AgentRoster.Reviewers = []models.AgentType{models.AgentTypeCodex}
 			policy.AgentRoster.ReviewerModels = []string{models.DefaultCodexModel}
 			policy.AgentRoster.RequireReviewerQuorum = 1
 
+			expectCodeReviewNoRetainedReviewers(mock, job)
 			mock.ExpectQuery("UPDATE code_review_session_metadata").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 				WillReturnRows(newCodeReviewMetadataRows().
@@ -2253,10 +2318,8 @@ func TestRunCodeReviewHandlerFastWaitSkipsGitHubRefresh(t *testing.T) {
 				SessionLogs:     db.NewSessionLogStore(mock),
 				Jobs:            db.NewJobStore(mock),
 			}
-			payload, err := json.Marshal(runCodeReviewPayload{
-				OrgID: orgID, SessionID: sessionID, MetadataID: metadataID, RepositoryID: repositoryID,
-				PullRequestID: pullRequestID, PolicyID: policyID, PolicyVersion: 1, HeadSHA: headSHA, OutputKey: "output-key",
-			})
+			wireCodeReviewControllerCPUFixture(t, stores, mock)
+			payload, err := json.Marshal(job)
 			require.NoError(t, err, "code review job payload should marshal")
 
 			err = newRunCodeReviewHandler(stores, services, zerolog.Nop())(context.Background(), models.JobTypeRunCodeReview, payload)
@@ -2286,9 +2349,12 @@ func TestRunCodeReviewHandlerChecksCancellationBeforeGitHubRefresh(t *testing.T)
 	metadataID := uuid.New()
 	now := time.Now().UTC()
 	headSHA := "reviewed-head"
+	job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, MetadataID: metadataID, RepositoryID: repositoryID,
+		PullRequestID: pullRequestID, PolicyID: policyID, PolicyVersion: 1, HeadSHA: headSHA, OutputKey: "output-key"}
 	reason := "parent code review session was cancelled"
 	policy := models.DefaultCodeReviewPolicyConfig()
 
+	expectCodeReviewNoRetainedReviewers(mock, job)
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(newCodeReviewMetadataRows().
@@ -2313,13 +2379,23 @@ func TestRunCodeReviewHandlerChecksCancellationBeforeGitHubRefresh(t *testing.T)
 	mock.ExpectQuery("(?s)SELECT .*FROM sessions").
 		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	transactions := &codeReviewHandlerCPUTransactions{mock: mock}
+	codeReviews, err := db.NewCodeReviewStoreWithTerminalTransactions(mock, transactions)
+	require.NoError(t, err, "handler cancellation fixture should explicitly compose its CPU terminal transaction owner")
+	expectCodeReviewHandlerCPUBegin(mock)
+	expectCodeReviewHandlerCPUMetadataLock(mock, orgID, sessionID, metadataID, true)
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "failure_reason": reason}).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "failure_reason": reason,
+			"terminal_metadata_ids": []uuid.UUID{metadataID},
+		}).
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 				"base", headSHA, false, models.CodeReviewTriggerSourceTeamReviewer,
 				models.CodeReviewSessionStatusCancelled, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
-				"output-key", nil, nil, nil, nil, &reason, &now, now))
+				"output-key", nil, nil, nil, nil, &reason, &now, now)).RowsWillBeClosed()
+	expectCodeReviewHandlerCPUPendingCancellation(mock, orgID, sessionID, metadataID)
+	mock.ExpectCommit()
 
 	syncCalls := 0
 	submitter := &capturingCodeReviewSubmitter{}
@@ -2331,19 +2407,19 @@ func TestRunCodeReviewHandlerChecksCancellationBeforeGitHubRefresh(t *testing.T)
 		CodeReviews: submitter,
 	}
 	stores := &Stores{
-		CodeReviews:  db.NewCodeReviewStore(mock),
+		CodeReviews:  codeReviews,
 		PullRequests: db.NewPullRequestStore(mock),
 		Sessions:     db.NewSessionStore(mock),
 	}
-	payload, err := json.Marshal(runCodeReviewPayload{
-		OrgID: orgID, SessionID: sessionID, MetadataID: metadataID, RepositoryID: repositoryID,
-		PullRequestID: pullRequestID, PolicyID: policyID, PolicyVersion: 1, HeadSHA: headSHA, OutputKey: "output-key",
-	})
+	wireCodeReviewControllerCPUFixture(t, stores, mock)
+	payload, err := json.Marshal(job)
 	require.NoError(t, err, "code review job payload should marshal")
 
 	err = newRunCodeReviewHandler(stores, services, zerolog.Nop())(context.Background(), models.JobTypeRunCodeReview, payload)
 
 	require.NoError(t, err, "parent cancellation should end the code review without external reconciliation")
+	require.Equal(t, 1, transactions.calls, "handler cancellation should invoke its explicit CPU Run once")
+	require.Equal(t, 1, transactions.commits, "handler cancellation should finish its mocked metadata transition before returning")
 	require.Equal(t, 0, syncCalls, "parent cancellation should not synchronize pull request state through GitHub")
 	require.Empty(t, submitter.fileListRequests, "parent cancellation should not list pull request files through GitHub")
 	require.NoError(t, mock.ExpectationsWereMet(), "parent cancellation should be handled entirely from durable local state")
@@ -2370,17 +2446,27 @@ func TestStopCodeReviewIfParentSessionCancelledCancelsMetadata(t *testing.T) {
 	mock.ExpectQuery("(?s)SELECT .*FROM sessions").
 		WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	transactions := &codeReviewHandlerCPUTransactions{mock: mock}
+	codeReviews, err := db.NewCodeReviewStoreWithTerminalTransactions(mock, transactions)
+	require.NoError(t, err, "parent cancellation fixture should explicitly compose its CPU terminal transaction owner")
+	expectCodeReviewHandlerCPUBegin(mock)
+	expectCodeReviewHandlerCPUMetadataLock(mock, orgID, sessionID, metadataID, true)
 	mock.ExpectQuery("UPDATE code_review_session_metadata").
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID, "failure_reason": reason}).
+		WithArgs(pgx.NamedArgs{
+			"org_id": orgID, "session_id": sessionID, "failure_reason": reason,
+			"terminal_metadata_ids": []uuid.UUID{metadataID},
+		}).
 		WillReturnRows(newCodeReviewMetadataRows().
 			AddRow(metadataID, orgID, sessionID, repositoryID, pullRequestID, policyID,
 				"base", "head", false, models.CodeReviewTriggerSourceTeamReviewer,
 				models.CodeReviewSessionStatusCancelled, nil, nil, nil, nil, nil, false, nil, nil, false, nil,
-				"output-key", nil, nil, nil, nil, &reason, &now, now))
+				"output-key", nil, nil, nil, nil, &reason, &now, now)).RowsWillBeClosed()
+	expectCodeReviewHandlerCPUPendingCancellation(mock, orgID, sessionID, metadataID)
+	mock.ExpectCommit()
 
 	stopped, err := stopCodeReviewIfParentSessionCancelled(context.Background(), &Stores{
 		Sessions:    db.NewSessionStore(mock),
-		CodeReviews: db.NewCodeReviewStore(mock),
+		CodeReviews: codeReviews,
 	}, nil, zerolog.Nop(), runCodeReviewPayload{
 		OrgID:     orgID,
 		SessionID: sessionID,
@@ -2388,6 +2474,8 @@ func TestStopCodeReviewIfParentSessionCancelledCancelsMetadata(t *testing.T) {
 
 	require.NoError(t, err, "parent cancellation should stop the code review cleanly")
 	require.True(t, stopped, "parent cancellation should prevent any later orchestrator or GitHub submission")
+	require.Equal(t, 1, transactions.calls, "parent cancellation should invoke its explicit CPU Run once")
+	require.Equal(t, 1, transactions.commits, "parent cancellation should commit its complete mocked metadata transition")
 	require.NoError(t, mock.ExpectationsWereMet(), "parent cancellation should persist cancelled code review metadata")
 }
 
@@ -2620,6 +2708,7 @@ func TestHarvestCodeReviewAgentResultRejectsTerminalOutputAfterDeadline(t *testi
 
 			orgID := uuid.New()
 			sessionID := uuid.New()
+			job := legacyCodeReviewCPUJob(orgID, sessionID)
 			threadID := uuid.New()
 			resultID := uuid.New()
 			now := time.Now().UTC()
@@ -2639,6 +2728,9 @@ func TestHarvestCodeReviewAgentResultRejectsTerminalOutputAfterDeadline(t *testi
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 				WillReturnRows(newCodeReviewAgentResultRows().
 					AddRow(resultID, orgID, sessionID, "codex", nil, tt.role, models.CodeReviewAgentResultStatusRunning, nil, structuredResult, reviewStartedAt))
+			if tt.role == models.CodeReviewAgentRoleReviewer {
+				expectCodeReviewNoRetainedReviewers(mock, job)
+			}
 			mock.ExpectQuery("(?s)SELECT .*FROM session_threads").
 				WithArgs(pgx.NamedArgs{"id": threadID, "org_id": orgID}).
 				WillReturnRows(newSessionThreadRows().
@@ -2651,6 +2743,7 @@ func TestHarvestCodeReviewAgentResultRejectsTerminalOutputAfterDeadline(t *testi
 			var structuredArg any = completedOrchestratorResultArg{expectedError: tt.expectedRaw, expectedCompletedAt: &now}
 			if tt.role == models.CodeReviewAgentRoleReviewer {
 				structuredArg = completedReviewerResultArg{expectedError: tt.expectedRaw, expectedCompletedAt: &now}
+				expectCodeReviewLegacyReviewerOutcome(mock, job, resultID)
 			}
 			mock.ExpectQuery("UPDATE code_review_agent_results").
 				WithArgs(models.CodeReviewAgentResultStatusTimedOut, &tt.expectedRaw, structuredArg, orgID, resultID).
@@ -2662,9 +2755,9 @@ func TestHarvestCodeReviewAgentResultRejectsTerminalOutputAfterDeadline(t *testi
 				CodeReviews:    db.NewCodeReviewStore(mock),
 				SessionThreads: db.NewSessionThreadStore(mock),
 			}
-			job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID}
 			metadata := models.CodeReviewSessionMetadata{CreatedAt: reviewStartedAt}
 			if tt.role == models.CodeReviewAgentRoleReviewer {
+				wireCodeReviewControllerCPUFixture(t, stores, mock)
 				err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), job, policy, metadata, nil)
 			} else {
 				err = harvestCodeReviewOrchestratorResult(context.Background(), stores, nil, zerolog.Nop(), job, policy, nil, models.CodeReviewVisualEvidenceSnapshot{})
@@ -2694,8 +2787,9 @@ func TestHarvestCodeReviewReviewerResultsPersistsTerminalEvidence(t *testing.T) 
 			expectedRaw: "reviewer result is missing its thread id",
 		},
 		{
-			name:             "malformed structured result",
-			structuredResult: json.RawMessage(`{`),
+			name: "malformed structured result",
+			// JSONB can retain the wrong application shape, but never invalid JSON.
+			structuredResult: json.RawMessage(`[]`),
 			expectedRaw:      "reviewer result has a malformed structured result",
 			preserveRaw:      true,
 		},
@@ -2719,26 +2813,27 @@ func TestHarvestCodeReviewReviewerResultsPersistsTerminalEvidence(t *testing.T) 
 
 			orgID := uuid.New()
 			sessionID := uuid.New()
+			job := legacyCodeReviewCPUJob(orgID, sessionID)
 			resultID := uuid.New()
 			now := time.Now().UTC()
 			mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 				WillReturnRows(newCodeReviewAgentResultRows().
 					AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusRunning, nil, tt.structuredResult, now))
+			expectCodeReviewNoRetainedReviewers(mock, job)
 			var structuredArg any = completedReviewerResultArg{expectedError: tt.expectedRaw}
 			if tt.preserveRaw {
 				structuredArg = preservedJSONArg{expected: tt.structuredResult}
 			}
+			expectCodeReviewLegacyReviewerOutcome(mock, job, resultID)
 			mock.ExpectQuery("UPDATE code_review_agent_results").
 				WithArgs(models.CodeReviewAgentResultStatusFailed, &tt.expectedRaw, structuredArg, orgID, resultID).
 				WillReturnRows(newCodeReviewAgentResultRows().
 					AddRow(resultID, orgID, sessionID, "codex", nil, models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusFailed, &tt.expectedRaw, tt.structuredResult, now))
 
 			stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock)}
-			err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), runCodeReviewPayload{
-				OrgID:     orgID,
-				SessionID: sessionID,
-			}, codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig()), models.CodeReviewSessionMetadata{CreatedAt: now}, nil)
+			wireCodeReviewControllerCPUFixture(t, stores, mock)
+			err = harvestCodeReviewReviewerResults(context.Background(), stores, nil, zerolog.Nop(), job, codeReviewPolicyRecordForTest(models.DefaultCodeReviewPolicyConfig()), models.CodeReviewSessionMetadata{CreatedAt: now}, nil)
 
 			require.NoError(t, err, "malformed reviewer results should become terminal without losing diagnostic evidence")
 			require.NoError(t, mock.ExpectationsWereMet(), "malformed reviewer result update should preserve raw evidence or persist terminal timing")
@@ -5988,7 +6083,10 @@ func TestCancelActiveCodeReviewThreads_InterruptsStaleReviewThreads(t *testing.T
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
+	job := legacyCodeReviewCPUJob(orgID, sessionID)
 	threadID := uuid.New()
+	wireCodeReviewControllerCPUFixture(t, stores, mock)
+	expectCodeReviewNoRetainedReviewers(mock, job)
 	sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, nil)
 	setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
 	mock.ExpectQuery("(?s)SELECT .*FROM sessions.*id = ANY\\(@ids\\)").
@@ -6003,10 +6101,7 @@ func TestCancelActiveCodeReviewThreads_InterruptsStaleReviewThreads(t *testing.T
 		WillReturnRows(newSessionThreadRows().AddRow(threadRow...))
 
 	orch := &orchestratorServiceStub{cancelThreadResult: true}
-	err := cancelActiveCodeReviewThreads(context.Background(), stores, &Services{Orchestrator: orch}, zerolog.Nop(), runCodeReviewPayload{
-		OrgID:     orgID,
-		SessionID: sessionID,
-	})
+	err := cancelActiveCodeReviewThreads(context.Background(), stores, &Services{Orchestrator: orch}, zerolog.Nop(), job)
 
 	require.NoError(t, err, "stale review fallback should cancel active reviewer threads")
 	require.Equal(t, []uuid.UUID{threadID}, orch.cancelThreadIDs, "stale review fallback should interrupt the active thread")

@@ -99,9 +99,11 @@ Common rules for every increment:
   in addition to H's assembled pre-floor/floor and floor/new proofs. Keeping legacy
   lock order until activation is an unproved alternative, not the selected contract.
   Each family's increment converts its version-0 path to the selected compatible
-  order without combining its old transaction units into larger overlaps. Keep
-  those old compatible boundaries until the established floor. Larger transaction
-  activation and any reliance on new fences require completed 0a for that scope.
+  order and retains its old transaction boundaries until the established floor,
+  except for the bounded atomic legacy `thread.Service.SendMessage` unit specified
+  in A.1 below. That exception needs its own adjacent-build full-schema proof;
+  it does not establish the floor or permit reliance on new fences. All other
+  larger transaction activation requires completed 0a for that scope.
 - The existing runner already sets writer version 1. Adopt it only with the caller's
   complete canonical active-version branch and locked mode dispatch. A version marker
   is a compatibility backstop, not authority; a marked legacy writer must never mutate
@@ -236,8 +238,22 @@ Reviewable increments:
    dispatch/consumer schema and consumer query; it owns no second schema or policy.
    Install production routing in `thread.Service.SendMessage` through locked
    cutover observation, the only version switch, covering idle/running/capacity.
-   Version 0 uses characterized policy with the selected compatible order and old
-   transaction boundaries; the complete canonical version-1 branch stays dark.
+   Version 0 uses characterized policy with the selected compatible order and one
+   bounded atomic legacy send unit; the complete canonical version-1 branch stays
+   dark. After the entry observation, the legacy unit rechecks mode and ownership,
+   then performs claims, transcript/comment/question/free-text-answer persistence,
+   inbox/pending writes and database enqueue on the same supplied transaction.
+   A database enqueue failure rolls the whole unit back, including live-delivery
+   enqueue. No stranded claim or committed input is repaired by compensation.
+   Retry revalidates the whole unit under the existing two-second total budget
+   and confirmed-rollback policy, resetting per-attempt results and effect tokens.
+   Every database read inside the unit uses the supplied transaction, including
+   capacity classification and client-key replay. Publish existing effects only
+   after a known outer commit. Unknown commit returns uncertainty without retry,
+   compensation or effects; it does not invent a canonical legacy receipt.
+   Queued owner-loss recovery remains a separate bounded postcommit operation.
+   Prove exact rollback, lost-ack commit/abort, retry, postcommit visibility and
+   adjacent-build lock coexistence on the full schema before this exception ships.
    Preserve its existing running, queue/capacity, source, actor and target semantics.
    Ordinary non-answer sibling admission checks scope, capacity and exclusive
    reservations, including session-wide/legacy consumers, any workspace recovery
@@ -668,9 +684,9 @@ contains a related rule; shortening the parent must not erase their timing.
 
 | Retained obligation | Owning increment | Evidence and stop gate |
 | --- | --- | --- |
-| Before activating larger transactions, convert competing old entry points and store primitives to the chosen compatible lock order: answers/grants, sends/drains, sibling claim/archive CTEs, explicit multi-row order, implicit FK and retained specialist transactions. | A.1/A.3–A.6 admissions, B.1 settlements/reclaimers, B.2 starts, B.3 owners/end/topology, C.1 workspace, D.1–D.2 storage; G.2 residual operators | Each actual production version-0 path and locked mode router converts in its owning increment. Adjacent-build full-schema barriers and the full H graph must pass before the larger transaction activates. |
-| If old writers remain, keep the old compatible transaction boundaries active until the floor is established. | Every A–G caller increment; H establishes floor | Do not combine legacy units or extend lock overlap merely because the new branch exists or has a marker. Test multi-transaction activation straddles with exact receipt resolution. |
-| 0a is a prerequisite for any slice that changes lock overlap or relies on the new semantics, including storage work moved forward from later milestones. | Every activation join in A–G; H release gate | Only proved compatibility-order preparation retaining the old boundaries may run pre-floor. Any new overlap/reliance stays dark until the established 0a floor; adjacent-build proof alone cannot waive this prerequisite. |
+| Before activating larger transactions, convert competing old entry points and store primitives to the chosen compatible lock order: answers/grants, sends/drains, sibling claim/archive CTEs, explicit multi-row order, implicit FK and retained specialist transactions. | A.1/A.3–A.6 admissions, B.1 settlements/reclaimers, B.2 starts, B.3 owners/end/topology, C.1 workspace, D.1–D.2 storage; G.2 residual operators | Each actual production version-0 path and locked mode router converts in its owning increment. Adjacent-build full-schema barriers and the full H graph gate activation. The sole pre-floor overlap exception is A.1's bounded atomic legacy thread send, subject to its explicit rollback/effect/coexistence proof. |
+| If old writers remain, keep the old compatible transaction boundaries active until the floor is established, except for A.1's bounded atomic legacy thread send. | Every A–G caller increment; H establishes floor | A version marker is no permission to combine legacy units. A.1 must prove its specified atomic exception against adjacent old writers; remaining multi-transaction paths retain activation-straddle tests with exact receipt resolution. |
+| 0a is a prerequisite for reliance on new semantics and for all other transaction-overlap changes, including storage work moved forward from later milestones. | Every activation join in A–G; H release gate | Pre-floor preparation retains old boundaries except for the narrowly specified A.1 legacy send. That exception grants no new fence/receipt/activation authority and does not waive the assembled H proof. |
 | Record baseline inversions/abort outcomes separately from regressions; pre-floor aborts do not prove safety, and known cycles cannot excuse starvation or unresolved floor/new graph. | Each increment's characterization; H assembled proof | Preserve baseline outcomes alongside no-new-pair, bounded-progress and throughput results. Missing progress evidence blocks release. |
 | Roll back readers before removing passive schema columns. | Each additive schema increment's down/rollback procedure; H rollback review | Reader-before-column removal is required while inactive. Once active, the supported rollback floor additionally forbids dropping epochs, cutover/guard provenance, bindings or unresolved receipts/controls. |
 
@@ -681,7 +697,8 @@ points. A.1, A.3–A.6, B.1–B.3, C.1–C.2, D.1–D.3, E.1–E.3 and F.1–F.3
 the mode routing and compatible-order conversion of their assigned caller roots.
 G owns the guard/claim/constructor/residual roots assigned to it, not a second
 conversion of A–F. Before converting a root, enumerate its competing baseline
-edges, preserve old transaction boundaries and prove adjacent coexistence.
+edges, preserve old transaction boundaries except for A.1's specified legacy
+send unit, and prove adjacent coexistence.
 Shared callers listed under another package compose the root owner's canonical
 operation; they cannot copy its predicate or invent an additional enable switch.
 
@@ -781,6 +798,11 @@ closed until the joined callers and their failure paths are proven.
   This planning task authorizes none of the latter operational actions.
 - Retain provider-private isolation/export as optional hardening. Exact-target
   verification, trusted-session safeguards and reference-safe cleanup remain gates.
+- Make the legacy thread-send database mutation atomic so a failed enqueue cannot
+  strand committed input or a running claim. Limit this pre-floor overlap exception
+  to `thread.Service.SendMessage`; preserve branch policy, fixed mode routing and
+  runner bounds, remove send compensation, and require full-schema adjacent-writer
+  proof. Other caller families retain their existing boundary and activation gates.
 
 ## Outcomes & Retrospective
 

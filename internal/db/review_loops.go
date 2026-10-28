@@ -58,6 +58,8 @@ func (s *SessionReviewLoopStore) ListStrandedPublicationLoops(
 		  AND loop.source = 'publication' AND loop.status = 'running'
 		  AND publication.state = 'review_pending'
 		  AND publication.review_gate_state = 'pending'
+		  AND loop.startup_send_due_at IS NULL
+		  AND NOT caller143_start_unresolved(publication.org_id,publication.review_start_id)
 		  AND thread.status IN ('idle', 'completed', 'failed', 'cancelled')
 		  AND COALESCE(thread.last_activity_at, loop.started_at) < @inactive_before
 		  AND NOT EXISTS (
@@ -97,11 +99,19 @@ func (s *SessionReviewLoopStore) RestartStrandedPublicationLoop(
 		return false, fmt.Errorf("begin stranded publication review restart: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := prelockReviewLoopWriter(ctx, orgID, loopID, tx); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
 
 	var sessionID uuid.UUID
 	err = tx.QueryRow(ctx, `
 		UPDATE session_review_loops AS loop
 		SET status = 'failed',
+			startup_send_writer_seq=CASE WHEN loop.startup_send_version IS NOT NULL THEN loop.startup_send_writer_seq+1 ELSE loop.startup_send_writer_seq END,
+			startup_send_updated_at=CASE WHEN loop.startup_send_version IS NOT NULL THEN statement_timestamp() ELSE loop.startup_send_updated_at END,
 			latest_summary = @summary,
 			completed_passes = (
 				SELECT count(*)
@@ -113,6 +123,9 @@ func (s *SessionReviewLoopStore) RestartStrandedPublicationLoop(
 		FROM session_threads AS thread
 		WHERE loop.org_id = @org_id AND loop.id = @loop_id
 		  AND loop.source = 'publication' AND loop.status = 'running'
+		  AND loop.startup_send_due_at IS NULL
+		  AND EXISTS(SELECT 1 FROM session_publications p WHERE p.org_id=loop.org_id AND p.review_loop_id=loop.id
+		      AND NOT caller143_start_unresolved(p.org_id,p.review_start_id))
 		  AND thread.org_id = loop.org_id AND thread.id = loop.thread_id
 		  AND thread.status IN ('idle', 'completed', 'failed', 'cancelled')
 		  AND COALESCE(thread.last_activity_at, loop.started_at) < @inactive_before
@@ -172,7 +185,7 @@ const reviewLoopSelectColumns = `id, org_id, session_id, automation_run_id, thre
 	status, source, changeset_id, workspace_revision, desired_head_sha,
 	agent_type, max_passes, fix_mode, completed_passes, review_required,
 	bypassed_by_user_id, bypass_reason, loop_start_checkpoint_key, latest_checkpoint_key,
-	latest_summary, started_by_user_id, started_at, completed_at`
+	latest_summary, started_by_user_id, started_at, completed_at, startup_send_state`
 
 // #nosec G101 -- these are database column names; *_message_id fields are not credentials.
 const reviewLoopPassSelectColumns = `id, org_id, loop_id, session_id, pass_index,
@@ -367,8 +380,14 @@ func (s *SessionReviewLoopStore) RefreshPublicationEvidence(ctx context.Context,
 		return fmt.Errorf("begin publication evidence refresh: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := prelockReviewLoopWriter(ctx, orgID, loopID, tx); err != nil {
+		return err
+	}
+
 	result, err := tx.Exec(ctx, `UPDATE session_review_loops
-		SET workspace_revision = @workspace_revision, desired_head_sha = @desired_head_sha
+		SET workspace_revision = @workspace_revision, desired_head_sha = @desired_head_sha,
+		    startup_send_writer_seq=CASE WHEN startup_send_version IS NOT NULL THEN startup_send_writer_seq+1 ELSE startup_send_writer_seq END,
+		    startup_send_updated_at=CASE WHEN startup_send_version IS NOT NULL THEN statement_timestamp() ELSE startup_send_updated_at END
 		WHERE org_id = @org_id AND id = @loop_id AND source = 'publication' AND status = 'running'`, pgx.NamedArgs{
 		"org_id": orgID, "loop_id": loopID, "workspace_revision": workspaceRevision,
 		"desired_head_sha": desiredHeadSHA,
@@ -515,7 +534,7 @@ func (s *SessionReviewLoopStore) MarkPassClean(ctx context.Context, orgID, loopI
 	if err := decision.Validate(); err != nil {
 		return err
 	}
-	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+	return s.withTerminalTransition(ctx, orgID, loopID, func(tx pgx.Tx) error {
 		if err := execPassUpdateOn(ctx, tx, `
 			UPDATE session_review_loop_passes
 			SET status = 'clean', agent_decision = @agent_decision,
@@ -534,7 +553,7 @@ func (s *SessionReviewLoopStore) MarkPassCleanAndEnqueueOpenPR(ctx context.Conte
 	if err := decision.Validate(); err != nil {
 		return err
 	}
-	return s.withTerminalOpenPRJob(ctx, orgID, payload, dedupeKey, func(tx pgx.Tx) error {
+	return s.withTerminalOpenPRJob(ctx, orgID, loopID, payload, dedupeKey, func(tx pgx.Tx) error {
 		if err := execPassUpdateOn(ctx, tx, `
 			UPDATE session_review_loop_passes
 			SET status = 'clean',
@@ -563,7 +582,7 @@ func (s *SessionReviewLoopStore) MarkPassFixComplete(ctx context.Context, orgID,
 }
 
 func (s *SessionReviewLoopStore) MarkLoopNeedsHumanDecision(ctx context.Context, orgID, loopID uuid.UUID, summary string) error {
-	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+	return s.withTerminalTransition(ctx, orgID, loopID, func(tx pgx.Tx) error {
 		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusNeedsHumanDecision, summary)
 	})
 }
@@ -572,7 +591,7 @@ func (s *SessionReviewLoopStore) MarkPassNeedsHumanDecision(ctx context.Context,
 	if err := decision.Validate(); err != nil {
 		return err
 	}
-	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+	return s.withTerminalTransition(ctx, orgID, loopID, func(tx pgx.Tx) error {
 		if err := markPassNeedsHumanDecisionOn(ctx, tx, orgID, passID, decision, summary); err != nil {
 			return err
 		}
@@ -584,7 +603,7 @@ func (s *SessionReviewLoopStore) MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx 
 	if err := decision.Validate(); err != nil {
 		return err
 	}
-	return s.withTerminalOpenPRJob(ctx, orgID, payload, dedupeKey, func(tx pgx.Tx) error {
+	return s.withTerminalOpenPRJob(ctx, orgID, loopID, payload, dedupeKey, func(tx pgx.Tx) error {
 		if err := markPassNeedsHumanDecisionOn(ctx, tx, orgID, passID, decision, summary); err != nil {
 			return err
 		}
@@ -593,13 +612,13 @@ func (s *SessionReviewLoopStore) MarkPassNeedsHumanDecisionAndEnqueueOpenPR(ctx 
 }
 
 func (s *SessionReviewLoopStore) MarkLoopFailed(ctx context.Context, orgID, loopID uuid.UUID, summary string) error {
-	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+	return s.withTerminalTransition(ctx, orgID, loopID, func(tx pgx.Tx) error {
 		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusFailed, summary)
 	})
 }
 
 func (s *SessionReviewLoopStore) MarkLoopFailedAndEnqueueOpenPR(ctx context.Context, orgID, loopID uuid.UUID, summary string, payload map[string]any, dedupeKey string) error {
-	return s.withTerminalOpenPRJob(ctx, orgID, payload, dedupeKey, func(tx pgx.Tx) error {
+	return s.withTerminalOpenPRJob(ctx, orgID, loopID, payload, dedupeKey, func(tx pgx.Tx) error {
 		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusFailed, summary)
 	})
 }
@@ -617,7 +636,7 @@ func markPassNeedsHumanDecisionOn(ctx context.Context, q DBTX, orgID, passID uui
 }
 
 func (s *SessionReviewLoopStore) CancelLoop(ctx context.Context, orgID, loopID uuid.UUID) error {
-	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+	return s.withTerminalTransition(ctx, orgID, loopID, func(tx pgx.Tx) error {
 		return markLoopTerminalOn(ctx, tx, orgID, loopID, models.ReviewLoopStatusCancelled, "Review loop cancelled.")
 	})
 }
@@ -650,6 +669,11 @@ func markLoopTerminalOn(ctx context.Context, q DBTX, orgID, loopID uuid.UUID, st
 	err := q.QueryRow(ctx, `
 		UPDATE session_review_loops
 		SET status = @status,
+            startup_send_state=CASE WHEN startup_send_state='pending' THEN 'cancelled' ELSE startup_send_state END,
+            startup_send_due_at=CASE WHEN startup_send_state='pending' THEN NULL ELSE startup_send_due_at END,
+            startup_send_resolution=CASE WHEN startup_send_state='pending' THEN CASE WHEN @status='cancelled' THEN 'owner_cancelled' ELSE 'owner_ineligible' END ELSE startup_send_resolution END,
+            startup_send_writer_seq=CASE WHEN startup_send_version IS NOT NULL THEN startup_send_writer_seq+1 ELSE startup_send_writer_seq END,
+            startup_send_updated_at=CASE WHEN startup_send_version IS NOT NULL THEN statement_timestamp() ELSE startup_send_updated_at END,
 		    latest_summary = @summary,
 		    completed_passes = (
 		        SELECT count(*)
@@ -795,8 +819,8 @@ func resumeParkedPublicationOn(ctx context.Context, q DBTX, orgID, sessionID uui
 	return nil
 }
 
-func (s *SessionReviewLoopStore) withTerminalOpenPRJob(ctx context.Context, orgID uuid.UUID, payload map[string]any, dedupeKey string, transition func(pgx.Tx) error) error {
-	return s.withTerminalTransition(ctx, func(tx pgx.Tx) error {
+func (s *SessionReviewLoopStore) withTerminalOpenPRJob(ctx context.Context, orgID, loopID uuid.UUID, payload map[string]any, dedupeKey string, transition func(pgx.Tx) error) error {
+	return s.withTerminalTransition(ctx, orgID, loopID, func(tx pgx.Tx) error {
 		if err := transition(tx); err != nil {
 			return err
 		}
@@ -814,7 +838,7 @@ func (s *SessionReviewLoopStore) withTerminalOpenPRJob(ctx context.Context, orgI
 	})
 }
 
-func (s *SessionReviewLoopStore) withTerminalTransition(ctx context.Context, transition func(pgx.Tx) error) error {
+func (s *SessionReviewLoopStore) withTerminalTransition(ctx context.Context, orgID, loopID uuid.UUID, transition func(pgx.Tx) error) error {
 	txStarter, ok := s.db.(TxStarter)
 	if !ok {
 		return fmt.Errorf("review loop terminal transition requires transaction support")
@@ -824,6 +848,9 @@ func (s *SessionReviewLoopStore) withTerminalTransition(ctx context.Context, tra
 		return fmt.Errorf("begin review loop terminal tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := prelockReviewLoopWriter(ctx, orgID, loopID, tx); err != nil {
+		return err
+	}
 
 	if err := transition(tx); err != nil {
 		return err

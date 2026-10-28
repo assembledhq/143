@@ -513,6 +513,10 @@ func reconcileCompletedFullAssessment(ctx context.Context, stores *Stores, metad
 	if stores == nil || stores.CodeReviewAssessments == nil {
 		return nil
 	}
+	transactions := stores.ThreadSendDependencies.Transactions
+	if !fullAssessmentTransactionsAvailable(transactions) {
+		return fmt.Errorf("assessment reconciliation requires bounded transaction ownership")
+	}
 	assessment, err := stores.CodeReviewAssessments.GetBySessionID(ctx, metadata.OrgID, metadata.SessionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
@@ -520,8 +524,25 @@ func reconcileCompletedFullAssessment(ctx context.Context, stores *Stores, metad
 	if err != nil {
 		return err
 	}
+	if !fullAssessmentMatchesMetadataOwner(assessment, metadata) {
+		return db.ErrCodeReviewAssessmentState
+	}
 	if assessment.Status == models.CodeReviewAssessmentCompleted {
-		return nil
+		// Old binaries may have completed the business owner without settling
+		// pending admission. Reconcile that exact completed owner without
+		// rewriting its immutable assessment or implying an attempted send aborted.
+		return transactions.Run(ctx, func(unitCtx context.Context, tx pgx.Tx) error {
+			if err := db.NewCodeReviewRecheckStore(tx).LockFullAssessmentCompletion(unitCtx, tx, metadata.OrgID, assessment.PullRequestID); err != nil {
+				return err
+			}
+			if err := db.LockCodeReviewMetadataForCompletionInTx(unitCtx, metadata.OrgID, tx, metadata.SessionID); err != nil {
+				return err
+			}
+			if err := db.LockCodeReviewAssessmentCompletionOwnerInTx(unitCtx, metadata.OrgID, tx, assessment.ID, metadata.ID, metadata.SessionID, metadata.PullRequestID, assessment.Status); err != nil {
+				return err
+			}
+			return db.ReconcileCompletedCodeReviewDispatchInTx(unitCtx, metadata.OrgID, tx, metadata.ID, metadata.SessionID)
+		})
 	}
 	if assessment.ResultOrigin == nil || assessment.Decision == nil || assessment.Acceptable == nil || assessment.RenderedBody == nil || len(assessment.StructuredOutcome) == 0 {
 		return db.ErrCodeReviewAssessmentState
@@ -556,37 +577,49 @@ func reconcileCompletedFullAssessment(ctx context.Context, stores *Stores, metad
 	if assessment.PublicationState != models.CodeReviewPublicationConfirmed && assessment.PublicationState != models.CodeReviewPublicationNotRequired {
 		return db.ErrCodeReviewAssessmentState
 	}
-	if stores.ThreadSendTx == nil {
-		return fmt.Errorf("assessment reconciliation requires transaction")
-	}
-	tx, err := stores.ThreadSendTx.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	store := db.NewCodeReviewAssessmentStore(tx)
-	if err := db.NewCodeReviewRecheckStore(tx).LockFullAssessmentCompletion(ctx, tx, assessment.OrgID, assessment.PullRequestID); err != nil {
-		return err
-	}
-	if err := store.LinkFullReviewEvidence(ctx, assessment.OrgID, assessment.ID, assessment.SessionID); err != nil {
-		return err
-	}
-	if assessment.CoverageComplete {
-		claimed, err := db.NewCodeReviewRecheckStore(tx).ClaimFullAssessmentOwner(ctx, tx, assessment.OrgID, assessment.SessionID, assessment.PullRequestID)
-		if err != nil {
+	return transactions.Run(ctx, func(unitCtx context.Context, tx pgx.Tx) error {
+		// Every callback owns fresh local stores/results. No provisional value
+		// or external effect escapes an aborted attempt or uncertain settlement.
+		store := db.NewCodeReviewAssessmentStore(tx)
+		if err := db.NewCodeReviewRecheckStore(tx).LockFullAssessmentCompletion(unitCtx, tx, assessment.OrgID, assessment.PullRequestID); err != nil {
 			return err
 		}
-		if !claimed {
-			return fmt.Errorf("full assessment conversation is not yet drained: %w", db.ErrCodeReviewAssessmentState)
+		if err := db.LockCodeReviewMetadataForCompletionInTx(unitCtx, assessment.OrgID, tx, assessment.SessionID); err != nil {
+			return err
 		}
-	}
-	if err := store.Complete(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: *assessment.ResultOrigin, CoverageComplete: assessment.CoverageComplete, Decision: *assessment.Decision, Acceptable: *assessment.Acceptable, RiskReasonDetails: assessment.RiskReasonDetails, StructuredOutcome: assessment.StructuredOutcome, RenderedBody: *assessment.RenderedBody}); err != nil {
-		return err
-	}
-	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(ctx, assessment.OrgID, tx, assessment.ID); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+		if err := db.LockCodeReviewAssessmentCompletionOwnerInTx(unitCtx, metadata.OrgID, tx, assessment.ID, metadata.ID, metadata.SessionID, metadata.PullRequestID, assessment.Status); err != nil {
+			return err
+		}
+		if err := store.LinkFullReviewEvidence(unitCtx, assessment.OrgID, assessment.ID, assessment.SessionID); err != nil {
+			return err
+		}
+		if err := db.ReconcileCompletedCodeReviewDispatchInTx(unitCtx, metadata.OrgID, tx, metadata.ID, metadata.SessionID); err != nil {
+			return err
+		}
+		if assessment.CoverageComplete {
+			claimed, err := db.NewCodeReviewRecheckStore(tx).ClaimFullAssessmentOwner(unitCtx, tx, assessment.OrgID, assessment.SessionID, assessment.PullRequestID)
+			if err != nil {
+				return err
+			}
+			if !claimed {
+				return fmt.Errorf("full assessment conversation is not yet drained: %w", db.ErrCodeReviewAssessmentState)
+			}
+		}
+		if err := store.Complete(unitCtx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: *assessment.ResultOrigin, CoverageComplete: assessment.CoverageComplete, Decision: *assessment.Decision, Acceptable: *assessment.Acceptable, RiskReasonDetails: assessment.RiskReasonDetails, StructuredOutcome: assessment.StructuredOutcome, RenderedBody: *assessment.RenderedBody}); err != nil {
+			return err
+		}
+		return db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(unitCtx, assessment.OrgID, tx, assessment.ID)
+	})
+}
+
+func fullAssessmentMatchesMetadataOwner(assessment models.CodeReviewAssessment, metadata models.CodeReviewSessionMetadata) bool {
+	return assessment.ID != uuid.Nil && assessment.ReviewScope == models.CodeReviewScopeFull &&
+		assessment.OrgID != uuid.Nil && assessment.OrgID == metadata.OrgID &&
+		assessment.SessionID != uuid.Nil && assessment.SessionID == metadata.SessionID &&
+		assessment.MetadataID != uuid.Nil && assessment.MetadataID == metadata.ID &&
+		assessment.PullRequestID != uuid.Nil && assessment.PullRequestID == metadata.PullRequestID &&
+		assessment.RepositoryID != uuid.Nil && assessment.RepositoryID == metadata.RepositoryID &&
+		assessment.PolicyID != uuid.Nil && assessment.PolicyID == metadata.PolicyID
 }
 
 // resumeStagedFullAssessment consumes the already committed decision after a
@@ -687,7 +720,7 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 		legacy.Additions, legacy.Deletions = &additions, &deletions
 	}
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
-	if err := completeFullAssessment(ctx, stores.ThreadSendTx, assessment, legacy, assessment.StructuredOutcome, assessment.CoverageComplete, *assessment.RenderedBody); err != nil {
+	if err := completeFullAssessment(ctx, stores.ThreadSendDependencies.Transactions, assessment, legacy, assessment.StructuredOutcome, assessment.CoverageComplete, *assessment.RenderedBody); err != nil {
 		return err
 	}
 	logCodeReviewFirstReviewerStart(ctx, stores, logger, job, metadata.CreatedAt)
@@ -768,72 +801,80 @@ func prepareFullAssessment(ctx context.Context, stores *Stores, services *Servic
 // attribution, and immutable assessment outcome in one transaction. The caller
 // has already reconciled any external GitHub write against this assessment's
 // publication key; absence of a GitHub publisher is explicitly not_required.
-func completeFullAssessment(ctx context.Context, txStarter db.TxStarter, assessment models.CodeReviewAssessment, legacy db.CompleteCodeReviewParams, outcome json.RawMessage, coverageComplete bool, assessmentBody string) error {
-	if txStarter == nil {
-		return fmt.Errorf("assessment completion requires a transaction")
+func completeFullAssessment(ctx context.Context, transactions db.CodeReviewMetadataTransactions, assessment models.CodeReviewAssessment, legacy db.CompleteCodeReviewParams, outcome json.RawMessage, coverageComplete bool, assessmentBody string) error {
+	if !fullAssessmentTransactionsAvailable(transactions) {
+		return fmt.Errorf("assessment completion requires bounded transaction ownership")
 	}
 	if assessment.ReviewScope != models.CodeReviewScopeFull || assessment.SessionID != legacy.SessionID || assessment.Status != models.CodeReviewAssessmentRunning && assessment.Status != models.CodeReviewAssessmentPublishing {
 		return db.ErrCodeReviewAssessmentState
-	}
-	tx, err := txStarter.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	assessments := db.NewCodeReviewAssessmentStore(tx)
-	if err := db.NewCodeReviewRecheckStore(tx).LockFullAssessmentCompletion(ctx, tx, assessment.OrgID, assessment.PullRequestID); err != nil {
-		return err
-	}
-	if err := assessments.LinkFullReviewEvidence(ctx, assessment.OrgID, assessment.ID, assessment.SessionID); err != nil {
-		return err
-	}
-	if assessment.PublicationState == models.CodeReviewPublicationNotStarted {
-		if err := assessments.MarkPublicationNotRequired(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest); err != nil {
-			return err
-		}
-	}
-	if _, err := db.NewCodeReviewStore(tx).CompleteReview(ctx, assessment.OrgID, legacy); err != nil {
-		return err
-	}
-	if coverageComplete {
-		claimed, err := db.NewCodeReviewRecheckStore(tx).ClaimFullAssessmentOwner(ctx, tx, assessment.OrgID, assessment.SessionID, assessment.PullRequestID)
-		if err != nil {
-			return err
-		}
-		if !claimed {
-			return fmt.Errorf("full assessment conversation is not yet drained: %w", db.ErrCodeReviewAssessmentState)
-		}
 	}
 	reasons, err := json.Marshal(legacy.RiskReasonDetails)
 	if err != nil {
 		return fmt.Errorf("encode assessment risk reasons: %w", err)
 	}
-	if err := assessments.Complete(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{
-		ResultOrigin:      models.CodeReviewResultExecuted,
-		CoverageComplete:  coverageComplete,
-		Decision:          legacy.Decision,
-		Acceptable:        legacy.Acceptable,
-		RiskReasonDetails: reasons,
-		StructuredOutcome: outcome,
-		RenderedBody:      assessmentBody,
-	}); err != nil {
-		return err
-	}
-	if assessment.PreviousAssessmentID != nil {
-		previous, err := assessments.GetByID(ctx, assessment.OrgID, *assessment.PreviousAssessmentID)
-		if err != nil {
+	return transactions.Run(ctx, func(unitCtx context.Context, tx pgx.Tx) error {
+		assessments := db.NewCodeReviewAssessmentStore(tx)
+		if err := db.NewCodeReviewRecheckStore(tx).LockFullAssessmentCompletion(unitCtx, tx, assessment.OrgID, assessment.PullRequestID); err != nil {
 			return err
 		}
-		if previous.SessionID != assessment.SessionID {
-			if _, err := db.NewCodeReviewRecheckStore(tx).RetireOwnerForCompletedReplacement(ctx, tx, assessment.OrgID, previous.SessionID, assessment.PullRequestID, assessment.ID); err != nil {
+		// LinkFullReviewEvidence already writes metadata/results. Acquire the
+		// whole ordered metadata set before that first mutation, not afterward.
+		if err := db.LockCodeReviewMetadataForCompletionInTx(unitCtx, assessment.OrgID, tx, assessment.SessionID); err != nil {
+			return err
+		}
+		if err := assessments.LinkFullReviewEvidence(unitCtx, assessment.OrgID, assessment.ID, assessment.SessionID); err != nil {
+			return err
+		}
+		if assessment.PublicationState == models.CodeReviewPublicationNotStarted {
+			if err := assessments.MarkPublicationNotRequired(unitCtx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest); err != nil {
 				return err
 			}
 		}
+		if _, err := db.CompleteCodeReviewInTx(unitCtx, assessment.OrgID, tx, legacy); err != nil {
+			return err
+		}
+		if coverageComplete {
+			claimed, err := db.NewCodeReviewRecheckStore(tx).ClaimFullAssessmentOwner(unitCtx, tx, assessment.OrgID, assessment.SessionID, assessment.PullRequestID)
+			if err != nil {
+				return err
+			}
+			if !claimed {
+				return fmt.Errorf("full assessment conversation is not yet drained: %w", db.ErrCodeReviewAssessmentState)
+			}
+		}
+		if err := assessments.Complete(unitCtx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{
+			ResultOrigin: models.CodeReviewResultExecuted, CoverageComplete: coverageComplete,
+			Decision: legacy.Decision, Acceptable: legacy.Acceptable, RiskReasonDetails: reasons,
+			StructuredOutcome: outcome, RenderedBody: assessmentBody,
+		}); err != nil {
+			return err
+		}
+		if assessment.PreviousAssessmentID != nil {
+			previous, err := assessments.GetByID(unitCtx, assessment.OrgID, *assessment.PreviousAssessmentID)
+			if err != nil {
+				return err
+			}
+			if previous.SessionID != assessment.SessionID {
+				if _, err := db.NewCodeReviewRecheckStore(tx).RetireOwnerForCompletedReplacement(unitCtx, tx, assessment.OrgID, previous.SessionID, assessment.PullRequestID, assessment.ID); err != nil {
+					return err
+				}
+			}
+		}
+		return db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(unitCtx, assessment.OrgID, tx, assessment.ID)
+	})
+}
+
+func fullAssessmentTransactionsAvailable(transactions db.CodeReviewMetadataTransactions) bool {
+	if transactions == nil {
+		return false
 	}
-	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(ctx, assessment.OrgID, tx, assessment.ID); err != nil {
-		return err
+	value := reflect.ValueOf(transactions)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
 	}
-	return tx.Commit(ctx)
 }
 
 // reserveFullAssessmentPublication fences the exact input and commit before a

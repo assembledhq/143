@@ -69,6 +69,7 @@ func TestQueueCapturedIdentityReplacementLegacy(t *testing.T) {
 			expected.ChangeKey = "capture_identity:" + input.PriorSessionID.String()
 			expected.GitHubDeliveryID = expected.ChangeKey
 			expected.ChangeReason = captureIdentityChangeReason
+			expected.PriorMetadataID = &metadata.getBySession.ID
 			require.Equal(t, expected, jobs.reassessmentPayload, "replacement should preserve human request and reviewer provenance")
 			require.Nil(t, jobs.opts.RunAt, "capture drift should not spend another quiet period on obsolete work")
 			require.Equal(t, "code_review_reassessment:"+input.PullRequestID.String()+":"+expected.ChangeKey, jobs.dedupeKey, "source session must govern deterministic replacement admission")

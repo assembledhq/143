@@ -64,6 +64,15 @@ func TestMessageAdmissionDecision(t *testing.T) {
 		{name: "parent aggregate awaiting does not veto independent lane", change: func(s *lockedLifecycleScope, _ *messageAdmissionState) {
 			s.session.status = models.SessionStatusAwaitingInput
 		}, want: messageAdmissionDecision{disposition: MessageAdmissionNewJob, turn: 1}},
+		{name: "pending parent preserves legacy not resumable refusal", change: func(s *lockedLifecycleScope, _ *messageAdmissionState) {
+			s.session.status = models.SessionStatusPending
+		}, cause: ErrMessageAdmissionNotResumable},
+		{name: "skipped parent is a status conflict not authorization failure", change: func(s *lockedLifecycleScope, _ *messageAdmissionState) {
+			s.session.status = models.SessionStatusSkipped
+		}, cause: ErrMessageAdmissionNotResumable},
+		{name: "unsupported lane is a status conflict not authorization failure", change: func(_ *lockedLifecycleScope, v *messageAdmissionState) {
+			v.status = "unsupported"
+		}, cause: ErrMessageAdmissionNotIdle},
 		{name: "pending target or whole request never answered", change: func(_ *lockedLifecycleScope, v *messageAdmissionState) { v.pendingAnswer = true }, cause: ErrMessageAdmissionAwaitingInput},
 		{name: "parent awaiting plus pending target never answered", change: func(s *lockedLifecycleScope, v *messageAdmissionState) {
 			s.session.status, v.pendingAnswer = models.SessionStatusAwaitingInput, true
@@ -93,6 +102,22 @@ func TestMessageAdmissionDecision(t *testing.T) {
 		{name: "running repair wait preserves message turn", change: func(_ *lockedLifecycleScope, v *messageAdmissionState) {
 			v.status, v.currentTurn, v.repairReconciliation = models.ThreadStatusRunning, 8, true
 		}, want: messageAdmissionDecision{disposition: MessageAdmissionWaiting, turn: 10, reason: "repair_reconciliation"}},
+		{name: "pending repair wait preserves message turn", change: func(_ *lockedLifecycleScope, v *messageAdmissionState) {
+			v.status, v.currentTurn, v.repairReconciliation = models.ThreadStatusPending, 4, true
+		}, want: messageAdmissionDecision{disposition: MessageAdmissionWaiting, turn: 6, reason: "repair_reconciliation"}},
+		{name: "repair wait dominates occupied sibling capacity", change: func(s *lockedLifecycleScope, v *messageAdmissionState) {
+			v.repairReconciliation = true
+			for range models.MaxRunningThreadsPerSession {
+				s.threads = append(s.threads, lifecycleLockedThread{id: uuid.New(), status: models.ThreadStatusRunning})
+			}
+		}, want: messageAdmissionDecision{disposition: MessageAdmissionWaiting, turn: 1, reason: "repair_reconciliation"}},
+		{name: "repair does not override pending answer refusal", change: func(_ *lockedLifecycleScope, v *messageAdmissionState) {
+			v.pendingAnswer, v.repairReconciliation = true, true
+		}, cause: ErrMessageAdmissionAwaitingInput},
+		{name: "repair does not override explicit end refusal", change: func(s *lockedLifecycleScope, v *messageAdmissionState) {
+			s.session.epochs.EndEpoch = cloneMessageAdmissionPointer(new(int64))
+			v.repairReconciliation = true
+		}, cause: ErrMessageAdmissionConflict},
 		{name: "repair wait cannot resolve comments", comments: true, change: func(_ *lockedLifecycleScope, v *messageAdmissionState) { v.repairReconciliation = true }, cause: ErrMessageAdmissionBusy},
 	}
 	for _, tt := range tests {
@@ -233,6 +258,7 @@ func TestMessageAdmissionEnvelopeRetainsOriginalServerOptions(t *testing.T) {
 	require.Equal(t, *a.holderID, *envelope.LeaseHolderID, "replay must retain original server changeset lease holder")
 	changed := command.Input()
 	changed.Dispatch.RunAt = changed.Dispatch.RunAt.Add(time.Hour)
+	changed.Dispatch.MaxAttempts++
 	*changed.LeaseHolderID = uuid.New()
 	changed.Fence.sessionEpoch++
 	newCommand, err := NewMessageAdmission(changed)
@@ -262,7 +288,6 @@ func TestMessageAdmissionEnvelopeRejectsContradictoryIdentity(t *testing.T) {
 		{"resolved comment outside semantic command", func(e *messageAdmissionEnvelope) { e.ResolvedComments[0].ID = uuid.New() }},
 		{"unknown original disposition", func(e *messageAdmissionEnvelope) { e.Disposition = "future" }},
 		{"missing original retry budget", func(e *messageAdmissionEnvelope) { e.MaxAttempts = 0 }},
-		{"changed original retry budget", func(e *messageAdmissionEnvelope) { e.MaxAttempts++ }},
 		{"different semantic payload", func(e *messageAdmissionEnvelope) { e.SemanticPayload = `{"version":1}` }},
 		{"missing inbox identity", func(e *messageAdmissionEnvelope) { e.InboxID = uuid.Nil }},
 	}

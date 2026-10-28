@@ -19,7 +19,7 @@ func codeReviewReviewerSlotsFilled(cfg models.CodeReviewPolicyConfig, results []
 	filled := 0
 	for idx, agentType := range cfg.AgentRoster.Reviewers {
 		result, ok := byKey[codeReviewReviewerKey(idx, agentType)]
-		if ok && (!codeReviewReviewerResultTerminal(result.Status) || codeReviewReviewerResultHasUsableOutput(result)) {
+		if ok && (codeReviewReviewerRetainsDispatch(result) || !codeReviewReviewerResultTerminal(result.Status) || codeReviewReviewerResultHasUsableOutput(result)) {
 			filled++
 		}
 	}

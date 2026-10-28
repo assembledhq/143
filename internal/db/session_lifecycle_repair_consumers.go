@@ -3,7 +3,7 @@ package db
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -26,6 +26,9 @@ const lifecycleConsumerRetainedJobRoutesQuery = `SELECT id,octet_length(payload:
 // runtime/executor/physical operation drained. Released history without a live
 // consumer reference supplies no candidate here. No receipt/claim is granted.
 func readRetainedLifecycleRepairJobsInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, evidence []lifecycleConsumerEvidence, limits lifecycleConsumerLimits) (map[uuid.UUID]bool, int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	var ids []uuid.UUID
 	for _, v := range evidence {
 		if v.jobID != nil && v.foundJobID != nil && *v.jobID == *v.foundJobID {
@@ -34,6 +37,9 @@ func readRetainedLifecycleRepairJobsInTx(ctx context.Context, tx pgx.Tx, orgID u
 	}
 	slices.SortFunc(ids, func(a, b uuid.UUID) int { return bytes.Compare(a[:], b[:]) })
 	ids = slices.Compact(ids)
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	if len(ids) == 0 {
 		return nil, 0, nil
 	}
@@ -44,41 +50,64 @@ func readRetainedLifecycleRepairJobsInTx(ctx context.Context, tx pgx.Tx, orgID u
 	if err != nil {
 		return nil, 0, fmt.Errorf("read exact retained lifecycle job routes: %w", err)
 	}
-	defer rows.Close()
-	repairs := make(map[uuid.UUID]bool)
-	seen := make(map[uuid.UUID]bool, len(ids))
-	var count, payloadBytes int
+	// Keep route parsing out of the active statement, just as the ordinary
+	// legacy reader does. pgx copies *[]byte directly instead of validating
+	// json.RawMessage while PostgreSQL is waiting for the client to consume it.
+	var payloads []lifecycleLegacyConsumerPayload
+	var scanErr error
+	var incomplete *lifecycleConsumerError
+	var payloadBytes int
 	for rows.Next() {
 		var id uuid.UUID
 		var size int
-		var payload json.RawMessage
+		var payload []byte
 		if err := rows.Scan(&id, &size, &payload); err != nil {
-			return nil, 0, fmt.Errorf("decode retained lifecycle job route: %w", err)
+			scanErr = fmt.Errorf("decode retained lifecycle job route: %w", err)
+			break
 		}
-		count++
-		if count > limits.structuredRows || size < 0 || size > legacyJobRouteMaxBytes || size > limits.payloadBytes-payloadBytes {
-			return nil, 0, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: id}
+		if len(payloads) >= limits.structuredRows || size < 0 || size > legacyJobRouteMaxBytes || size > limits.payloadBytes-payloadBytes {
+			incomplete = &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: id}
+			break
 		}
 		payloadBytes += size
-		if !slices.Contains(ids, id) || seen[id] {
-			return nil, 0, reconcileLifecycleConsumer(lifecycleConsumerLegacyJob, id)
+		payloads = append(payloads, lifecycleLegacyConsumerPayload{id, payload})
+	}
+	streamErr := rows.Err()
+	rows.Close()
+	if err := errors.Join(scanErr, streamErr, rows.Err(), ctx.Err()); err != nil {
+		return nil, 0, fmt.Errorf("collect retained lifecycle job routes: %w", err)
+	}
+	if incomplete != nil {
+		return nil, 0, incomplete
+	}
+	repairs := make(map[uuid.UUID]bool)
+	seen := make(map[uuid.UUID]bool, len(ids))
+	for _, raw := range payloads {
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
 		}
-		seen[id] = true
-		route := decodeLegacyJobRoute(orgID, payload)
+		if !slices.Contains(ids, raw.id) || seen[raw.id] {
+			return nil, 0, reconcileLifecycleConsumer(lifecycleConsumerLegacyJob, raw.id)
+		}
+		seen[raw.id] = true
+		route := decodeLegacyJobRoute(orgID, raw.payload)
+		if err := ctx.Err(); err != nil {
+			return nil, 0, err
+		}
 		if route.incomplete() {
-			return nil, 0, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: id}
+			return nil, 0, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerLegacyJob, id: raw.id}
 		}
 		if route.repairScopeUnproved {
-			repairs[id] = true
+			repairs[raw.id] = true
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("collect retained lifecycle job routes: %w", err)
 	}
 	for _, id := range ids {
 		if !seen[id] {
 			return nil, 0, reconcileLifecycleConsumer(lifecycleConsumerLegacyJob, id)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
 	}
 	return repairs, payloadBytes, nil
 }

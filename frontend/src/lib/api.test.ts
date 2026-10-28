@@ -9,6 +9,18 @@ describe('api client', () => {
     setActiveOrgId(null);
   });
 
+  it('recovers the original review within encoded path segments and the active org', async () => {
+    let captured: { pathname: string; method: string; org: string | null; body: unknown } | undefined;
+    setActiveOrgId('synthetic-org');
+    server.use(http.post('/api/v1/sessions/:session/review-loops/:loop/recover', async ({ request }) => {
+      captured = { pathname: new URL(request.url).pathname, method: request.method, org: request.headers.get('X-Active-Org-ID'), body: await request.json() };
+      return HttpResponse.json({ data: { id: 'original-review', admission_state: 'accepted' } });
+    }));
+    const response = await api.sessions.recoverReviewLoop('synthetic/session', 'original/../cancel');
+    expect(captured).toEqual({ pathname: '/api/v1/sessions/synthetic%2Fsession/review-loops/original%2F..%2Fcancel/recover', method: 'POST', org: 'synthetic-org', body: {} });
+    expect(response.data.id).toBe('original-review');
+  });
+
   describe('issues', () => {
     it('fetches issues list', async () => {
       const mockData = {

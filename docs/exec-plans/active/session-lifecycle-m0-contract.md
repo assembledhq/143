@@ -816,6 +816,17 @@ eligible conflict cause. Cancellation or deadline expiry also forbids replay; th
 same whole-unit deadline covers all attempts rather than resetting on conflict.
 A rollback failure is not a confirmed abort; abandon connection and resolve
 command receipt.
+
+The 0a A.1 delivery contract permits one pre-floor transaction-overlap exception:
+the version-0 `thread.Service.SendMessage` database mutation becomes one guarded
+atomic unit, including enqueue. Preserve its characterized branch policy and the
+bounds above, use the supplied transaction for every in-unit read/write, roll
+back the whole graph on database failure and remove send compensation. Require
+full-schema adjacent-build coexistence and postcommit/unknown-settlement proof
+before shipping it. This is not a general legacy-boundary waiver, a compatibility
+floor or authority to activate version-1 semantics; other families retain their
+stated release gates.
+
 No provider/Slack/Redis effect inside any attempted transaction. Foreground lock
 retry exhaustion returns typed Contended without a claim/answer; already accepted
 async receipt stays pending for independent reconciliation, not ingress-job retry

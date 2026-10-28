@@ -76,6 +76,11 @@ type CodeReviewStore struct {
 	streams        *cache.CodeReviewStreams
 	logger         zerolog.Logger
 	analyticsClock func() time.Time
+	// Explicit construction chooses owned-Run or supplied-tx terminalization.
+	// DBTX alone is never inspected to infer transaction ownership or fallback.
+	terminalTransactions CodeReviewMetadataTransactions
+	terminalTx           pgx.Tx
+	terminalInTx         bool
 
 	// Shared by the worker's publication paths. Waiters must stay outside the
 	// pool: a publisher holds a transaction and can also block its lease renewal,
@@ -1162,7 +1167,22 @@ func (s *CodeReviewStore) SetProvisionalReviewBody(ctx context.Context, orgID, s
 }
 
 func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context, orgID, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) ([]models.CodeReviewSessionMetadata, error) {
-	rows, err := s.db.Query(ctx, `
+	return s.terminalMetadata(ctx, orgID, true, func(unitCtx context.Context, tx pgx.Tx) ([]models.CodeReviewSessionMetadata, error) {
+		return MarkCodeReviewsStaleForPullRequestExceptHeadInTx(unitCtx, orgID, tx, pullRequestID, currentHeadSHA, supersededBySessionID)
+	})
+}
+
+// MarkCodeReviewsStaleForPullRequestExceptHeadInTx leaves settlement/effects to
+// its explicit outer owner. The metadata locks/mutation finish before a fresh
+// child statement cancels pending intents; no transaction is begun here.
+func MarkCodeReviewsStaleForPullRequestExceptHeadInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, pullRequestID uuid.UUID, currentHeadSHA string, supersededBySessionID *uuid.UUID) ([]models.CodeReviewSessionMetadata, error) {
+	locked, err := lockCodeReviewMetadataTerminal(ctx, tx, codeReviewMetadataTerminalBatchLocks, pgx.NamedArgs{
+		"org_id": orgID, "pull_request_id": pullRequestID, "current_head_sha": currentHeadSHA,
+	})
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'stale',
 		    stale = true,
@@ -1178,25 +1198,21 @@ func (s *CodeReviewStore) MarkStaleForPullRequestExceptHead(ctx context.Context,
 		  AND pull_request_id = @pull_request_id
 		  AND head_sha <> @current_head_sha
 		  AND status IN ('queued', 'running')
+		  AND id = ANY(@terminal_metadata_ids)
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
 		"org_id":                   orgID,
 		"pull_request_id":          pullRequestID,
 		"current_head_sha":         currentHeadSHA,
 		"superseded_by_session_id": supersededBySessionID,
+		"terminal_metadata_ids":    locked,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("mark stale code reviews: %w", err)
 	}
 	defer rows.Close()
-	metadata, err := pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewSessionMetadata])
+	metadata, err := collectCodeReviewTerminalMetadata(ctx, orgID, tx, rows)
 	if err != nil {
 		return nil, fmt.Errorf("collect stale code reviews: %w", err)
-	}
-	if len(metadata) > 0 {
-		// Batch update touches multiple rows; publish one org-scoped signal so
-		// the list refreshes. SessionID is left zero — the frontend refetches
-		// the whole list rather than reading individual fields off the event.
-		s.publishUpdated(ctx, models.CodeReviewSessionMetadata{OrgID: orgID, Status: models.CodeReviewSessionStatusStale})
 	}
 	return metadata, nil
 }
@@ -1212,7 +1228,22 @@ func (s *CodeReviewStore) MarkActiveReviewStale(ctx context.Context, orgID, sess
 }
 
 func (s *CodeReviewStore) markStale(ctx context.Context, orgID, sessionID uuid.UUID, reason string, activeOnly bool) (models.CodeReviewSessionMetadata, error) {
-	rows, err := s.db.Query(ctx, `
+	return s.terminalMetadataOne(ctx, orgID, func(unitCtx context.Context, tx pgx.Tx) (models.CodeReviewSessionMetadata, error) {
+		return MarkCodeReviewStaleInTx(unitCtx, orgID, tx, sessionID, reason, activeOnly)
+	})
+}
+
+// MarkCodeReviewStaleInTx preserves the old unconditional/active-only variants,
+// but performs pending cancellation in the same supplied transaction, with no
+// commit or publication. Its outer owner must roll back on every error.
+func MarkCodeReviewStaleInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, sessionID uuid.UUID, reason string, activeOnly bool) (models.CodeReviewSessionMetadata, error) {
+	locked, err := lockCodeReviewMetadataTerminal(ctx, tx, codeReviewMetadataTerminalSessionLocks, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "active_only": activeOnly,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	rows, err := tx.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'stale',
 		    stale = true,
@@ -1229,21 +1260,18 @@ func (s *CodeReviewStore) markStale(ctx context.Context, orgID, sessionID uuid.U
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		  AND (NOT @active_only OR status IN ('queued', 'running'))
+		  AND id = ANY(@terminal_metadata_ids)
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
-		"org_id":         orgID,
-		"session_id":     sessionID,
-		"failure_reason": reason,
-		"active_only":    activeOnly,
+		"org_id":                orgID,
+		"session_id":            sessionID,
+		"failure_reason":        reason,
+		"active_only":           activeOnly,
+		"terminal_metadata_ids": locked,
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("mark code review stale: %w", err)
 	}
-	metadata, err := collectOneCodeReviewMetadata(rows)
-	if err != nil {
-		return models.CodeReviewSessionMetadata{}, err
-	}
-	s.publishUpdated(ctx, metadata)
-	return metadata, nil
+	return firstCodeReviewTerminalMetadata(collectCodeReviewTerminalMetadata(ctx, orgID, tx, rows))
 }
 
 type CompleteCodeReviewParams struct {
@@ -1259,17 +1287,26 @@ type CompleteCodeReviewParams struct {
 }
 
 func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, params CompleteCodeReviewParams) (models.CodeReviewSessionMetadata, error) {
-	if err := params.Decision.Validate(); err != nil {
+	if _, err := validateCodeReviewCompletion(params); err != nil {
 		return models.CodeReviewSessionMetadata{}, err
 	}
+	return s.terminalMetadataOne(ctx, orgID, func(unitCtx context.Context, tx pgx.Tx) (models.CodeReviewSessionMetadata, error) {
+		return CompleteCodeReviewInTx(unitCtx, orgID, tx, params)
+	})
+}
+
+func validateCodeReviewCompletion(params CompleteCodeReviewParams) ([]byte, error) {
+	if err := params.Decision.Validate(); err != nil {
+		return nil, err
+	}
 	if params.Additions != nil && *params.Additions < 0 {
-		return models.CodeReviewSessionMetadata{}, fmt.Errorf("additions must be non-negative")
+		return nil, fmt.Errorf("additions must be non-negative")
 	}
 	if params.Deletions != nil && *params.Deletions < 0 {
-		return models.CodeReviewSessionMetadata{}, fmt.Errorf("deletions must be non-negative")
+		return nil, fmt.Errorf("deletions must be non-negative")
 	}
 	if (params.Additions == nil) != (params.Deletions == nil) {
-		return models.CodeReviewSessionMetadata{}, fmt.Errorf("additions and deletions must be provided together")
+		return nil, fmt.Errorf("additions and deletions must be provided together")
 	}
 	reasonDetails := params.RiskReasonDetails
 	if reasonDetails == nil {
@@ -1277,14 +1314,31 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 	}
 	for _, reason := range reasonDetails {
 		if err := reason.Code.Validate(); err != nil {
-			return models.CodeReviewSessionMetadata{}, err
+			return nil, err
 		}
 	}
 	encodedReasonDetails, err := json.Marshal(reasonDetails)
 	if err != nil {
-		return models.CodeReviewSessionMetadata{}, fmt.Errorf("marshal code review risk reasons: %w", err)
+		return nil, fmt.Errorf("marshal code review risk reasons: %w", err)
 	}
-	rows, err := s.db.Query(ctx, `
+	return encodedReasonDetails, nil
+}
+
+// CompleteCodeReviewInTx retains ordinary scoped completion semantics and
+// ancillary evidence. It settles only pending dispatch state, not coverage,
+// contribution status or PR ownership; effects/commit belong to its outer owner.
+func CompleteCodeReviewInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, params CompleteCodeReviewParams) (models.CodeReviewSessionMetadata, error) {
+	encodedReasonDetails, err := validateCodeReviewCompletion(params)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	locked, err := lockCodeReviewMetadataTerminal(ctx, tx, codeReviewMetadataTerminalSessionLocks, pgx.NamedArgs{
+		"org_id": orgID, "session_id": params.SessionID, "active_only": false,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	rows, err := tx.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'completed',
 		    phase = NULL,
@@ -1305,27 +1359,24 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 		    completed_at = now()
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
+		  AND id = ANY(@terminal_metadata_ids)
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
-		"org_id":              orgID,
-		"session_id":          params.SessionID,
-		"decision":            params.Decision,
-		"acceptable":          params.Acceptable,
-		"github_review_id":    params.GitHubReviewID,
-		"github_review_url":   params.GitHubReviewURL,
-		"final_review_body":   params.FinalReviewBody,
-		"additions":           params.Additions,
-		"deletions":           params.Deletions,
-		"risk_reason_details": encodedReasonDetails,
+		"org_id":                orgID,
+		"session_id":            params.SessionID,
+		"decision":              params.Decision,
+		"acceptable":            params.Acceptable,
+		"github_review_id":      params.GitHubReviewID,
+		"github_review_url":     params.GitHubReviewURL,
+		"final_review_body":     params.FinalReviewBody,
+		"additions":             params.Additions,
+		"deletions":             params.Deletions,
+		"risk_reason_details":   encodedReasonDetails,
+		"terminal_metadata_ids": locked,
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("complete code review: %w", err)
 	}
-	metadata, err := collectOneCodeReviewMetadata(rows)
-	if err != nil {
-		return models.CodeReviewSessionMetadata{}, err
-	}
-	s.publishUpdated(ctx, metadata)
-	return metadata, nil
+	return firstCodeReviewTerminalMetadata(collectCodeReviewTerminalMetadata(ctx, orgID, tx, rows))
 }
 
 func (s *CodeReviewStore) RecordGitHubReview(ctx context.Context, orgID, sessionID uuid.UUID, githubReviewID int64, githubReviewURL string, finalReviewBody string) (models.CodeReviewSessionMetadata, error) {
@@ -1370,7 +1421,40 @@ func (s *CodeReviewStore) FailReviewWithStatus(ctx context.Context, orgID uuid.U
 	if err := params.Code.Validate(); err != nil {
 		return models.CodeReviewSessionMetadata{}, err
 	}
-	rows, err := s.db.Query(ctx, `
+	return s.terminalMetadataOne(ctx, orgID, func(unitCtx context.Context, tx pgx.Tx) (models.CodeReviewSessionMetadata, error) {
+		return FailCodeReviewWithStatusInTx(unitCtx, orgID, tx, params)
+	})
+}
+
+// FailCodeReviewWithStatusInTx validates and updates active metadata, then
+// cancels only its pending reviewer intents in a later statement. It never
+// publishes or settles the supplied transaction; every error requires rollback.
+func FailCodeReviewWithStatusInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, params FailCodeReviewParams) (models.CodeReviewSessionMetadata, error) {
+	if err := params.Code.Validate(); err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	locked, err := lockCodeReviewMetadataTerminal(ctx, tx, codeReviewMetadataTerminalSessionLocks, pgx.NamedArgs{
+		"org_id": orgID, "session_id": params.SessionID, "active_only": true,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	changed, err := failCodeReviewMetadataLockedInTx(ctx, orgID, tx, params, locked)
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	if err := cancelCodeReviewMetadataPendingInTx(ctx, orgID, tx, changed); err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	return firstCodeReviewTerminalMetadata(changed, nil)
+}
+
+// The caller already owns ordered metadata locks and its complete transaction.
+// This private split retains the existing failure fields/predicates but takes
+// no result locks. Retirement must fence its job and assessment before the
+// later fresh pending-cancellation statement; ordinary wrappers compose both.
+func failCodeReviewMetadataLockedInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, params FailCodeReviewParams, locked []uuid.UUID) ([]models.CodeReviewSessionMetadata, error) {
+	rows, err := tx.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'failed',
 		    phase = NULL,
@@ -1386,23 +1470,20 @@ func (s *CodeReviewStore) FailReviewWithStatus(ctx context.Context, orgID uuid.U
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		  AND status IN ('queued', 'running')
+		  AND id = ANY(@terminal_metadata_ids)
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
-		"org_id":            orgID,
-		"session_id":        params.SessionID,
-		"failure_reason":    strings.TrimSpace(params.Reason),
-		"status_code":       params.Code,
-		"status_message":    strings.TrimSpace(params.Message),
-		"retryable_failure": params.Retryable,
+		"org_id":                orgID,
+		"session_id":            params.SessionID,
+		"failure_reason":        strings.TrimSpace(params.Reason),
+		"status_code":           params.Code,
+		"status_message":        strings.TrimSpace(params.Message),
+		"retryable_failure":     params.Retryable,
+		"terminal_metadata_ids": locked,
 	})
 	if err != nil {
-		return models.CodeReviewSessionMetadata{}, fmt.Errorf("fail code review: %w", err)
+		return nil, fmt.Errorf("fail code review: %w", err)
 	}
-	metadata, err := collectOneCodeReviewMetadata(rows)
-	if err != nil {
-		return models.CodeReviewSessionMetadata{}, err
-	}
-	s.publishUpdated(ctx, metadata)
-	return metadata, nil
+	return pgx.CollectRows(rows, pgx.RowToStructByName[models.CodeReviewSessionMetadata])
 }
 
 // MarkSupersededBy links a retryable terminal attempt to its replacement.
@@ -1432,7 +1513,22 @@ func (s *CodeReviewStore) MarkSupersededBy(ctx context.Context, orgID, sessionID
 }
 
 func (s *CodeReviewStore) CancelReview(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
-	rows, err := s.db.Query(ctx, `
+	return s.terminalMetadataOne(ctx, orgID, func(unitCtx context.Context, tx pgx.Tx) (models.CodeReviewSessionMetadata, error) {
+		return CancelCodeReviewInTx(unitCtx, orgID, tx, sessionID, reason)
+	})
+}
+
+// CancelCodeReviewInTx preserves the active-only metadata transition. Pending
+// admission is cancelled, but historical attempts/unknown work and business
+// contributions are retained. The explicit outer owner owns commit/effects.
+func CancelCodeReviewInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error) {
+	locked, err := lockCodeReviewMetadataTerminal(ctx, tx, codeReviewMetadataTerminalSessionLocks, pgx.NamedArgs{
+		"org_id": orgID, "session_id": sessionID, "active_only": true,
+	})
+	if err != nil {
+		return models.CodeReviewSessionMetadata{}, err
+	}
+	rows, err := tx.Query(ctx, `
 		UPDATE code_review_session_metadata
 		SET status = 'cancelled',
 		    phase = NULL,
@@ -1446,20 +1542,17 @@ func (s *CodeReviewStore) CancelReview(ctx context.Context, orgID, sessionID uui
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		  AND status IN ('queued', 'running')
+		  AND id = ANY(@terminal_metadata_ids)
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
-		"org_id":         orgID,
-		"session_id":     sessionID,
-		"failure_reason": reason,
+		"org_id":                orgID,
+		"session_id":            sessionID,
+		"failure_reason":        reason,
+		"terminal_metadata_ids": locked,
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("cancel code review: %w", err)
 	}
-	metadata, err := collectOneCodeReviewMetadata(rows)
-	if err != nil {
-		return models.CodeReviewSessionMetadata{}, err
-	}
-	s.publishUpdated(ctx, metadata)
-	return metadata, nil
+	return firstCodeReviewTerminalMetadata(collectCodeReviewTerminalMetadata(ctx, orgID, tx, rows))
 }
 
 // A session may have several immutable assessments. Project its latest

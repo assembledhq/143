@@ -76,7 +76,7 @@ func TestNewRouterRejectsMissingThreadSendPool(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{}
 	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexauth.NewService(nil, zerolog.Nop()), claudecodeauth.NewService(nil, zerolog.Nop()), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	require.EqualError(t, err, "construct API thread send dependencies: thread send transactions: pool is required", "missing mandatory thread send plumbing must fail router startup")
+	require.EqualError(t, err, "construct API code review terminal transactions: thread send transactions: pool is required", "missing mandatory transaction plumbing must fail at the first explicit router capability constructor")
 	require.Nil(t, router, "invalid router construction must expose no partial router")
 }
 

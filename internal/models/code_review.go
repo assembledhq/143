@@ -96,17 +96,19 @@ func (p CodeReviewPhase) Validate() error {
 type CodeReviewStatusCode string
 
 const (
-	CodeReviewStatusCodeGitHubRateLimited CodeReviewStatusCode = "github_rate_limited"
-	CodeReviewStatusCodeGitHubUnavailable CodeReviewStatusCode = "github_unavailable"
-	CodeReviewStatusCodeReviewerFailed    CodeReviewStatusCode = "reviewer_failed"
-	CodeReviewStatusCodeWorkerFailed      CodeReviewStatusCode = "worker_failed"
-	CodeReviewStatusCodeLoopDetected      CodeReviewStatusCode = "review_loop_detected"
+	CodeReviewStatusCodeGitHubRateLimited  CodeReviewStatusCode = "github_rate_limited"
+	CodeReviewStatusCodeGitHubUnavailable  CodeReviewStatusCode = "github_unavailable"
+	CodeReviewStatusCodeReviewerFailed     CodeReviewStatusCode = "reviewer_failed"
+	CodeReviewStatusCodeWorkerFailed       CodeReviewStatusCode = "worker_failed"
+	CodeReviewStatusCodeLoopDetected       CodeReviewStatusCode = "review_loop_detected"
+	CodeReviewStatusCodeDispatchUnresolved CodeReviewStatusCode = "code_reviewer_dispatch_unresolved"
 )
 
 func (c CodeReviewStatusCode) Validate() error {
 	switch c {
 	case CodeReviewStatusCodeGitHubRateLimited, CodeReviewStatusCodeGitHubUnavailable,
-		CodeReviewStatusCodeReviewerFailed, CodeReviewStatusCodeWorkerFailed, CodeReviewStatusCodeLoopDetected:
+		CodeReviewStatusCodeReviewerFailed, CodeReviewStatusCodeWorkerFailed, CodeReviewStatusCodeLoopDetected,
+		CodeReviewStatusCodeDispatchUnresolved:
 		return nil
 	default:
 		return fmt.Errorf("invalid CodeReviewStatusCode: %q", c)

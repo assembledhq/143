@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_cr_agent_results_dispatch_due;

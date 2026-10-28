@@ -19,6 +19,9 @@ var (
 	ErrMessageAdmissionAwaitingInput             = errors.New("ordinary message admission cannot answer an awaiting-input request")
 	ErrMessageAdmissionBackpressure              = errors.New("message admission inbox limit reached")
 	ErrMessageAdmissionNotAllowed                = errors.New("ordinary message admission is not authorized for this scope")
+	ErrMessageAdmissionNotResumable              = errors.New("ordinary message admission requires a resumable parent status")
+	ErrMessageAdmissionNotIdle                   = errors.New("ordinary message admission requires an idle or resumable lane status")
+	ErrMessageAdmissionChangesetNotFound         = errors.New("ordinary message admission changeset association was not found")
 	ErrMessageAdmissionIdempotencyConflict       = errors.New("message admission ingress identity has different semantic intent")
 	ErrMessageAdmissionActorForbidden            = errors.New("message admission actor lacks current tenant write access")
 	ErrMessageAdmissionSpecialistControlRequired = errors.New("message admission requires retained specialist control")
@@ -143,9 +146,12 @@ func AdmitMessageInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, command M
 		if state.claimDispatch != nil || state.claimToken != nil {
 			decision.reason = "retained_lane_claim"
 		}
-		if errors.Is(consumerErr, errLifecycleRepairConsumerReconciliation) {
-			decision.reason = "repair_reconciliation"
-		}
+	}
+	// A retained repair's scope is unproved independently of the ordinary
+	// lane/capacity decision. After a replay miss, every accepted input must wait
+	// for that reconciliation rather than hide it behind lane_running/capacity.
+	if errors.Is(consumerErr, errLifecycleRepairConsumerReconciliation) {
+		decision.disposition, decision.reason = MessageAdmissionWaiting, "repair_reconciliation"
 	}
 	if len(input.ResolveReviewCommentIDs) > 0 && decision.disposition != MessageAdmissionNewJob {
 		return AdmissionResult[Admission]{}, ErrMessageAdmissionBusy
@@ -155,6 +161,9 @@ func AdmitMessageInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, command M
 		// identity. Neither holder liveness nor workspace availability is read.
 		var id uuid.UUID
 		if err := tx.QueryRow(ctx, `SELECT id FROM session_changesets WHERE org_id=$1 AND session_id=$2 AND id=$3 FOR KEY SHARE NOWAIT`, orgID, input.Fence.SessionID(), *input.ChangesetID).Scan(&id); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return AdmissionResult[Admission]{}, fmt.Errorf("%w: %w", ErrMessageAdmissionChangesetNotFound, err)
+			}
 			return AdmissionResult[Admission]{}, fmt.Errorf("validate admission changeset scope: %w", err)
 		}
 	}
@@ -321,9 +330,9 @@ func decideMessageAdmission(scope lockedLifecycleScope, state messageAdmissionSt
 	if scope.session.epochs.EndEpoch != nil {
 		return messageAdmissionDecision{}, ErrMessageAdmissionConflict
 	}
-	allowedParent := scope.session.status == models.SessionStatusIdle || scope.session.status == models.SessionStatusRunning || scope.session.status == models.SessionStatusPending || slices.Contains(models.ResumableSessionStatuses, scope.session.status)
+	allowedParent := scope.session.status == models.SessionStatusIdle || scope.session.status == models.SessionStatusRunning || slices.Contains(models.ResumableSessionStatuses, scope.session.status)
 	if !allowedParent {
-		return messageAdmissionDecision{}, ErrMessageAdmissionNotAllowed
+		return messageAdmissionDecision{}, ErrMessageAdmissionNotResumable
 	}
 	decision := messageAdmissionDecision{disposition: MessageAdmissionNewJob}
 	offset := int64(1)
@@ -333,7 +342,7 @@ func decideMessageAdmission(scope lockedLifecycleScope, state messageAdmissionSt
 		}
 		decision.disposition, decision.reason, offset = MessageAdmissionQueued, "lane_running", 2
 	} else if state.status != models.ThreadStatusIdle && !slices.Contains(models.ResumableThreadStatuses, state.status) {
-		return messageAdmissionDecision{}, ErrMessageAdmissionNotAllowed
+		return messageAdmissionDecision{}, ErrMessageAdmissionNotIdle
 	}
 	active := 0
 	for _, lane := range scope.threads {

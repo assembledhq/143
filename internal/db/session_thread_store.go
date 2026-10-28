@@ -792,8 +792,9 @@ func (s *SessionThreadStore) claimForSessionRow(ctx context.Context, conn DBTX, 
 // claimForSessionMutationRow executes only the original CTE/UPDATE and scans
 // its returned row. The private flag preserves collection-stage no-row origin
 // for the legacy adapter, including wrapped rows.Err errors; query-stage errors
-// never set it. Diagnosing a supplied unit's miss belongs after its owner's
-// confirmed commit, never while retaining row locks or after uncertain commit.
+// never set it. The helper adds no diagnosis. An atomic owner may classify a
+// miss using its guarded supplied-transaction readers; standalone postcommit
+// diagnostics remain best effort and cannot resolve an uncertain commit.
 func (s *SessionThreadStore) claimForSessionMutationRow(ctx context.Context, conn DBTX, args claimForSessionArgs) (models.SessionThread, bool, error) {
 	maxRunning := args.maxRunning
 	if maxRunning <= 0 {
@@ -848,21 +849,6 @@ func (s *SessionThreadStore) claimForSessionMutationRow(ctx context.Context, con
 		return models.SessionThread{}, errors.Is(err, pgx.ErrNoRows), err
 	}
 	return thread, false, nil
-}
-
-// IsAtRunningLimitForIdleClaim is the legacy read-only idle-claim diagnostic.
-// It is best-effort current state, not a fence or admission decision. A caller
-// classifying an InTx miss must first confirm the entire owner's commit; false
-// or error retains that original pgx.ErrNoRows. Never use it after unknown commit.
-func (s *SessionThreadStore) IsAtRunningLimitForIdleClaim(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error) {
-	return s.isAtRunningLimit(ctx, s.db, orgID, sessionID, threadID, maxRunning, []string{string(models.ThreadStatusIdle)})
-}
-
-// IsAtRunningLimitForResumeClaim is the same read-only diagnostic with the
-// fixed legacy resumable statuses. It owns no transaction, acquires no row lock
-// and publishes nothing; it is not execution or lifecycle authority.
-func (s *SessionThreadStore) IsAtRunningLimitForResumeClaim(ctx context.Context, orgID, sessionID, threadID uuid.UUID, maxRunning int) (bool, error) {
-	return s.isAtRunningLimit(ctx, s.db, orgID, sessionID, threadID, maxRunning, threadStatusStrings(models.ResumableThreadStatuses))
 }
 
 // isAtRunningLimit returns true when the target thread is in a claimable

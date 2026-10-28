@@ -75,7 +75,13 @@ SELECT jsonb_build_object('kind',s.kind,'id',s.id,'source',s.source,'legacy_alia
  CASE WHEN formal_events.review_id IS DISTINCT FROM events.review_id THEN COALESCE(formal_events.observations,'[]'::jsonb) ELSE '[]'::jsonb END,
  'pull_request',CASE WHEN pr.id IS NULL THEN NULL ELSE jsonb_build_object('id',pr.id,'number',pr.github_pr_number,'repository',pr.github_repo,
      'status',pr.status,'merged_at',pr.merged_at,'github_state_synced_at',pr.github_state_synced_at) END,
- 'agent_results',COALESCE((SELECT jsonb_agg(to_jsonb(ar)-'org_id'-'raw_output' ORDER BY ar.created_at,ar.id)
+ 'agent_results',COALESCE((SELECT jsonb_agg(to_jsonb(ar)-ARRAY[
+     'org_id','raw_output',
+     'dispatch_version','dispatch_key','dispatch_input','dispatch_digest','dispatch_thread_id','dispatch_state',
+     'dispatch_attempt_id','dispatch_attempt_seq','dispatch_attempted_at','dispatch_due_at',
+     'dispatch_observe_deadline','dispatch_attention_at','dispatch_observed_at','dispatch_message_id',
+     'dispatch_resolution','dispatch_detail','dispatch_writer_seq','dispatch_updated_at','dispatch_wake'
+   ] ORDER BY ar.created_at,ar.id)
    FROM code_review_agent_results ar WHERE ar.org_id=@org_id
      AND ar.session_id=(s.source->>'session_id')::uuid
      AND ((s.kind='assessment' AND ar.assessment_id=s.id) OR (s.kind='legacy' AND ar.assessment_id IS NULL))),'[]'::jsonb)) AS payload,

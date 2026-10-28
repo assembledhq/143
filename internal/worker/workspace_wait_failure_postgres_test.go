@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
@@ -51,6 +52,9 @@ func TestWorkspaceWaitDeadLetterPostgres(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := seedStrandedReview(t, pool, "running")
+			terminalReviews, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, f.stores.ThreadSendDependencies.Transactions)
+			require.NoError(t, err, "compose this fixture's terminal metadata store with the same real pool-owned configured transaction capability")
+			f.stores.CodeReviews = terminalReviews
 			threadID, waitJobID, token := uuid.New(), uuid.New(), uuid.New()
 			execSQL := func(query string, args ...any) {
 				t.Helper()

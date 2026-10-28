@@ -18,7 +18,7 @@ import (
 )
 
 // These pinned synthetic version-zero rows exercise the REAL protocol resolver
-// and per-unit scope guards in the five existing handler/service send cases.
+// and the entry/atomic-send scope guards in the handler/service send cases.
 // This is CPU emulation, not PostgreSQL locking, commit or contention evidence.
 const handlerSendPolicySQL = `SELECT
 		current_setting('transaction_isolation'),
@@ -112,75 +112,118 @@ func (f *handlerSendFixtureTx) Query(ctx context.Context, query string, args ...
 }
 
 type handlerSendFixture struct {
-	t       *testing.T
-	deps    *threadTestDeps
-	settled bool
+	t         *testing.T
+	deps      *threadTestDeps
+	settled   bool
+	committed bool
+	activeTx  *handlerSendFixtureTx
+	activeCtx context.Context
 }
+
+var _ thread.SendTransactions = (*handlerSendFixture)(nil)
+var _ thread.LegacySendPersistence = (*handlerSendFixture)(nil)
+var _ thread.SendEffects = (*handlerSendFixture)(nil)
 
 func (f *handlerSendFixture) Run(ctx context.Context, work func(context.Context, pgx.Tx) error) error {
 	f.t.Helper()
 	f.settled = false
+	f.committed = false
 	guard, err := pgxmock.NewPool()
-	require.NoError(f.t, err, "each original unit owns an independent synthetic guard fixture")
+	require.NoError(f.t, err, "each entry or atomic send unit owns an independent synthetic guard fixture")
 	defer guard.Close()
 	tx := &handlerSendFixtureTx{t: f.t, guard: guard}
 	unitCtx, cancel := context.WithTimeout(ctx, db.LifecycleTransactionTimeout)
 	defer cancel()
+	f.activeTx, f.activeCtx = tx, unitCtx
 	err = work(unitCtx, tx)
 	require.Contains(f.t, []int{3, 7}, tx.stage, "completed CPU units must execute entry observation or full fixed-branch mutation guards")
 	require.NoError(f.t, guard.ExpectationsWereMet(), "real resolver/scope queries must consume all pinned responses")
 	f.settled = true
+	f.committed = err == nil
 	return err
 }
 
-func (f *handlerSendFixture) ClaimIdleThreadInTx(ctx context.Context, tx pgx.Tx, org, session, lane uuid.UUID, max int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
+func (f *handlerSendFixture) scope(ctx context.Context, tx pgx.Tx) {
+	f.t.Helper()
+	require.Same(f.t, f.activeTx, tx, "every legacy read and write must use the exact supplied atomic transaction")
+	require.Equal(f.t, f.activeCtx, ctx, "every legacy read and write must retain the atomic callback context")
+	require.False(f.t, f.settled, "legacy reads and writes must run before their transaction settles")
 	tx.(*handlerSendFixtureTx).guarded()
+}
+
+func (f *handlerSendFixture) RejectIfOwnedInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) error {
+	f.scope(ctx, tx)
+	if err := f.deps.sessionStore.RejectIfCodeReviewOwned(ctx, org, session); err != nil {
+		return err
+	}
+	return f.deps.sessionStore.RejectIfAutomationOwned(ctx, org, session)
+}
+func (f *handlerSendFixture) GetSessionInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (models.Session, error) {
+	f.scope(ctx, tx)
+	return f.deps.sessionStore.GetByID(ctx, org, session)
+}
+func (f *handlerSendFixture) GetThreadInTx(ctx context.Context, tx pgx.Tx, org, lane uuid.UUID) (models.SessionThread, error) {
+	f.scope(ctx, tx)
+	return f.deps.threadStore.GetByID(ctx, org, lane)
+}
+func (f *handlerSendFixture) CountActiveThreadsInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (int, error) {
+	f.scope(ctx, tx)
+	return db.NewSessionThreadStore(tx).CountActive(ctx, org, session)
+}
+func (f *handlerSendFixture) GetInboxByClientMessageIDInTx(ctx context.Context, tx pgx.Tx, org, lane uuid.UUID, key string) (models.ThreadInboxEntry, error) {
+	f.scope(ctx, tx)
+	return db.NewThreadInboxStore(tx).GetByClientMessageID(ctx, org, lane, key)
+}
+func (f *handlerSendFixture) GetMessageByIDInTx(ctx context.Context, tx pgx.Tx, org uuid.UUID, id int64) (models.SessionMessage, error) {
+	f.scope(ctx, tx)
+	return f.deps.messageStore.GetByID(ctx, org, id)
+}
+func (f *handlerSendFixture) CountPendingInboxByThreadInTx(ctx context.Context, tx pgx.Tx, org, lane uuid.UUID) (int, error) {
+	f.scope(ctx, tx)
+	return db.NewThreadInboxStore(tx).CountPendingByThread(ctx, org, lane)
+}
+func (f *handlerSendFixture) CountPendingInboxBySessionInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (int, error) {
+	f.scope(ctx, tx)
+	return db.NewThreadInboxStore(tx).CountPendingBySession(ctx, org, session)
+}
+func (f *handlerSendFixture) GetActiveThreadRuntimeInTx(ctx context.Context, tx pgx.Tx, org, lane uuid.UUID) (models.ThreadRuntime, error) {
+	f.scope(ctx, tx)
+	return db.NewThreadRuntimeStore(tx).GetActiveByThread(ctx, org, lane)
+}
+
+func (f *handlerSendFixture) ClaimIdleThreadInTx(ctx context.Context, tx pgx.Tx, org, session, lane uuid.UUID, max int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
+	f.scope(ctx, tx)
 	row, err := f.deps.threadStore.ClaimIdleForSession(ctx, org, session, lane, max)
 	return row, db.ThreadClaimPersistenceEffects{}, err
 }
 func (f *handlerSendFixture) ClaimResumeThreadInTx(ctx context.Context, tx pgx.Tx, org, session, lane uuid.UUID, max int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
-	tx.(*handlerSendFixtureTx).guarded()
+	f.scope(ctx, tx)
 	row, err := f.deps.threadStore.ClaimForResumeInSession(ctx, org, session, lane, max)
 	return row, db.ThreadClaimPersistenceEffects{}, err
 }
-func (f *handlerSendFixture) IsAtIdleClaimLimit(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int) (bool, error) {
-	require.True(f.t, f.settled, "claim diagnostics must be outside the guarded unit")
-	return false, nil
-}
-func (f *handlerSendFixture) IsAtResumeClaimLimit(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, int) (bool, error) {
-	require.True(f.t, f.settled, "resume diagnostics must be outside the guarded unit")
-	return false, nil
-}
 func (f *handlerSendFixture) ClaimIdleSessionInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (models.Session, error) {
-	tx.(*handlerSendFixtureTx).guarded()
+	f.scope(ctx, tx)
 	return f.deps.sessionStore.ClaimIdle(ctx, org, session)
 }
 func (f *handlerSendFixture) ClaimResumeSessionInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (models.Session, error) {
-	tx.(*handlerSendFixtureTx).guarded()
+	f.scope(ctx, tx)
 	return f.deps.sessionStore.ClaimForResume(ctx, org, session)
 }
-func (f *handlerSendFixture) UpdateThreadStatusInTx(ctx context.Context, tx pgx.Tx, org, lane uuid.UUID, status models.ThreadStatus) (db.ThreadPersistenceEffects, error) {
-	tx.(*handlerSendFixtureTx).guarded()
-	return db.ThreadPersistenceEffects{}, f.deps.threadStore.UpdateStatus(ctx, org, lane, status)
-}
-func (f *handlerSendFixture) UpdateSessionStatusInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID, status models.SessionStatus) (models.Session, error) {
-	tx.(*handlerSendFixtureTx).guarded()
-	return models.Session{}, f.deps.sessionStore.UpdateStatus(ctx, org, session, status)
-}
 func (f *handlerSendFixture) IncrementPendingMessagesInTx(ctx context.Context, tx pgx.Tx, org, lane uuid.UUID) (db.ThreadPendingMessagePersistenceEffects, error) {
-	tx.(*handlerSendFixtureTx).guarded()
+	f.scope(ctx, tx)
 	return db.ThreadPendingMessagePersistenceEffects{}, f.deps.threadStore.IncrementPendingMessages(ctx, org, lane)
 }
 func (f *handlerSendFixture) CreateMessageInTx(ctx context.Context, tx pgx.Tx, _ uuid.UUID, message *models.SessionMessage) error {
-	tx.(*handlerSendFixtureTx).guarded()
+	f.scope(ctx, tx)
 	return f.deps.messageStore.Create(ctx, message)
 }
-func (f *handlerSendFixture) AppendInboxInTx(context.Context, pgx.Tx, uuid.UUID, db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error) {
+func (f *handlerSendFixture) AppendInboxInTx(ctx context.Context, tx pgx.Tx, _ uuid.UUID, _ db.AppendThreadInboxEntryParams) (models.ThreadInboxEntry, error) {
+	f.scope(ctx, tx)
 	f.t.Fatal("legacy handler cases have no inbox configured")
 	return models.ThreadInboxEntry{}, fmt.Errorf("unexpected inbox mutation")
 }
 func (f *handlerSendFixture) EnqueueInTx(ctx context.Context, tx pgx.Tx, org uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
-	tx.(*handlerSendFixtureTx).guarded()
+	f.scope(ctx, tx)
 	return f.deps.jobStore.EnqueueWithOpts(ctx, org, opts)
 }
 
@@ -188,19 +231,13 @@ func (f *handlerSendFixture) PublishLifecycle(context.Context, uuid.UUID, []db.L
 	f.t.Fatal("synthetic v0 handler cannot publish canonical v1 effects")
 }
 func (f *handlerSendFixture) PublishThreadClaim(context.Context, uuid.UUID, db.ThreadClaimPersistenceEffects) {
-	require.True(f.t, f.settled, "claim effects must follow their completed original unit")
+	require.True(f.t, f.settled && f.committed, "claim effects must follow the whole known atomic commit")
 }
 func (f *handlerSendFixture) PublishThreadPending(context.Context, uuid.UUID, db.ThreadPendingMessagePersistenceEffects) {
-	require.True(f.t, f.settled, "pending effects must follow their completed original unit")
-}
-func (f *handlerSendFixture) PublishThreadStatus(context.Context, uuid.UUID, db.ThreadPersistenceEffects) {
-	require.True(f.t, f.settled, "status effects must follow their completed original unit")
-}
-func (f *handlerSendFixture) PublishSessionStatus(context.Context, uuid.UUID, models.Session) {
-	require.True(f.t, f.settled, "parent effects must follow their completed original unit")
+	require.True(f.t, f.settled && f.committed, "pending effects must follow the whole known atomic commit")
 }
 func (f *handlerSendFixture) NotifyJob(context.Context, uuid.UUID) {
-	require.True(f.t, f.settled, "job notifications must follow their completed original unit")
+	require.True(f.t, f.settled && f.committed, "job notifications must follow the whole known atomic commit")
 }
 
 func newThreadSendHandler(t *testing.T) (*SessionThreadHandler, *threadTestDeps) {

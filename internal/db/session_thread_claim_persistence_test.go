@@ -221,9 +221,9 @@ func TestThreadClaimPersistenceInTx(t *testing.T) {
 
 func callThreadClaimLimitDiagnostic(ctx context.Context, store *SessionThreadStore, f threadPersistenceFixture, kind string, maxRunning int) (bool, error) {
 	if kind == "idle" {
-		return store.IsAtRunningLimitForIdleClaim(ctx, f.orgID, f.sessionID, f.threadID, maxRunning)
+		return store.isAtRunningLimit(ctx, store.db, f.orgID, f.sessionID, f.threadID, maxRunning, []string{string(models.ThreadStatusIdle)})
 	}
-	return store.IsAtRunningLimitForResumeClaim(ctx, f.orgID, f.sessionID, f.threadID, maxRunning)
+	return store.isAtRunningLimit(ctx, store.db, f.orgID, f.sessionID, f.threadID, maxRunning, threadStatusStrings(models.ResumableThreadStatuses))
 }
 
 func TestThreadClaimReadOnlyLimitDiagnostics(t *testing.T) {

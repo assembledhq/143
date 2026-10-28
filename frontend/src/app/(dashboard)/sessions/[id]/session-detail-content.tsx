@@ -117,6 +117,7 @@ import {
   MIN_REVIEW_MAX_PASSES,
 } from "@/lib/review-loop-constants";
 import { api, ApiError } from "@/lib/api";
+import { ReviewLoopStartupNotice } from "@/components/review-loop-startup-notice";
 import { AGENTS, AGENTS_BY_KEY } from "@/lib/agents";
 import { getActiveOrgId } from "@/lib/active-org";
 import { maybeNotifySessionCompleted } from "@/lib/browser-notifications";
@@ -592,8 +593,8 @@ function buildReviewLoopThreadPreview(loop: SessionReviewLoop, session?: Session
     org_id: loop.org_id,
     agent_type: loop.agent_type,
     label: reviewLoopThreadLabel(loop.agent_type),
-    status: "running",
-    current_turn: 1,
+    status: loop.admission_state == null ? "running" : "idle",
+    current_turn: loop.admission_state == null ? 1 : 0,
     created_at: loop.started_at,
     cost_cents: 0,
     pending_message_count: 0,
@@ -3749,6 +3750,8 @@ export function SessionDetailContent({ id }: { id: string }) {
   const canManagePR = user?.role === "admin" || user?.role === "member";
   const terminalStatuses = new Set<SessionStatus>(["completed", "pr_created", "failed", "cancelled", "skipped"]);
   const [reviewParam, setReviewParam] = useQueryState("review");
+  const [retainedReviewID, setRetainedReviewID] = useQueryState("review_start");
+  const [confirmedReview, setConfirmedReview] = useState<SessionReviewLoop | null>(null);
   const [previewParam, setPreviewParam] = useQueryState("preview");
   const [resumePRParam, setResumePRParam] = useQueryState("resume_pr");
   const [resumeActionParam, setResumeActionParam] = useQueryState("resume_action");
@@ -3956,6 +3959,7 @@ export function SessionDetailContent({ id }: { id: string }) {
     setMobileRenameOpen(false);
     setKeyboardHelpOpen(false);
     setReviewConfigOpen(false);
+    setConfirmedReview(null);
     setReviewPasses(2);
     setReviewFixMode("minimal");
     setActiveFileIndex(0);
@@ -5075,15 +5079,44 @@ export function SessionDetailContent({ id }: { id: string }) {
   const canCreatePR = canAttemptCreatePR && builderReviewAllowsPR;
   const canCreateBranch = canAttemptCreatePR;
   const needsGitHubStatus = canCreatePR || (hasPR && selectedPR?.status === "open");
-  const reviewLoopRunning = latestReviewLoop?.status === "running";
-  const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopRunning;
-  const reviewUnavailableReason = reviewLoopRunning
-    ? "Review loop is running"
-    : !hasSnapshot
-      ? "A reusable sandbox snapshot is required before review"
-      : isRunning
-        ? "Review can start after the current turn finishes"
-        : undefined;
+  const reviewStartupUnresolved = (loop: SessionReviewLoop) =>
+    !!loop.admission_state && ["pending", "attempting", "unknown", "attention"].includes(loop.admission_state);
+  const unresolvedReview = (reviewLoopsData?.data ?? []).find(reviewStartupUnresolved);
+  // List responses are current durable evidence. A saved mutation response is
+  // only a fallback until that original loop becomes visible to the list.
+  const retainedReview = (reviewLoopsData?.data ?? []).find((loop) => loop.id === retainedReviewID)
+    ?? (confirmedReview?.session_id === id && confirmedReview.id === retainedReviewID ? confirmedReview : undefined);
+  const retainedReviewResolved = !!retainedReview?.admission_state && !reviewStartupUnresolved(retainedReview);
+  const followupReviewID = (!retainedReviewResolved ? retainedReviewID : null) ?? unresolvedReview?.id;
+  const followupReview = (reviewLoopsData?.data ?? []).find((loop) => loop.id === followupReviewID)
+    ?? (confirmedReview?.session_id === id && confirmedReview.id === followupReviewID ? confirmedReview : undefined);
+  useEffect(() => {
+    if (retainedReviewID && retainedReviewResolved) void setRetainedReviewID(null);
+  }, [retainedReviewID, retainedReviewResolved, setRetainedReviewID]);
+  const reviewLoopSlotOccupied = latestReviewLoop?.status === "running";
+  const reviewStartupStopped = reviewLoopSlotOccupied &&
+    (latestReviewLoop.admission_state === "refused" || latestReviewLoop.admission_state === "cancelled");
+  const reviewLoopRunning = reviewLoopSlotOccupied &&
+    (!latestReviewLoop.admission_state || (latestReviewLoop.admission_state === "accepted" &&
+      threads.some((thread) => thread.id === latestReviewLoop.thread_id && thread.status === "running")));
+  const reviewStartupAwaitingActivity = reviewLoopSlotOccupied && latestReviewLoop.admission_state === "accepted" && !reviewLoopRunning;
+  const showReviewStartupNotice = reviewStartupStopped || reviewStartupAwaitingActivity;
+  const canStartReviewLoop = !!session && canManageSession && canUseNativeReviewLoop && hasSnapshot && !isRunning && !reviewLoopSlotOccupied && !followupReviewID;
+  const reviewUnavailableReason = reviewStartupStopped
+    ? latestReviewLoop.admission_state === "refused"
+      ? "Review startup was refused; the existing review is still open"
+      : "Review startup was cancelled; the existing review is still open"
+    : reviewLoopSlotOccupied
+      ? reviewLoopRunning
+        ? "Review loop is running"
+        : reviewStartupAwaitingActivity
+          ? "Review startup was accepted; the existing review is still open"
+          : "Review startup is awaiting confirmation"
+      : !hasSnapshot
+        ? "A reusable sandbox snapshot is required before review"
+        : isRunning
+          ? "Review can start after the current turn finishes"
+          : undefined;
 
   const { data: ghStatus } = useQuery({
     queryKey: ["github-status"],
@@ -5194,28 +5227,42 @@ export function SessionDetailContent({ id }: { id: string }) {
     createPRMutation.mutate(options);
   }, [createPRMutation]);
 
-  const startReviewLoopMutation = useMutation({
-    mutationFn: () =>
-      api.sessions.startReviewLoop(id, {
-        agent_type: reviewAgentType,
-        model: session?.agent_type === reviewAgentType ? session?.model_override : undefined,
-        max_passes: reviewPasses,
-        fix_mode: reviewFixMode,
-      }),
-    onSuccess: (response) => {
-      toast.success("Review loop started");
-      setReviewConfigOpen(false);
-      const reviewThread = buildReviewLoopThreadPreview(response.data, session);
+  type ReviewRequestScope = { sessionID: string; queryClient: typeof queryClient };
+  const reviewRequestScopeRef = useRef<ReviewRequestScope | null>(null);
+  useLayoutEffect(() => {
+    reviewRequestScopeRef.current = { sessionID: id, queryClient };
+    return () => { reviewRequestScopeRef.current = null; };
+  }, [id, queryClient]);
+  const reviewRequestIsCurrent = (request: ReviewRequestScope) =>
+    request.sessionID === reviewRequestScopeRef.current?.sessionID && request.queryClient === reviewRequestScopeRef.current?.queryClient;
+  const handleReviewLoopCreated = (response: SingleResponse<SessionReviewLoop>, request: ReviewRequestScope) => {
+      if (!reviewRequestIsCurrent(request)) return;
+      const admission = response.data.admission_state;
+      const unresolved = admission && ["pending", "attempting", "unknown", "attention"].includes(admission);
+      setConfirmedReview(response.data);
+      void setRetainedReviewID(unresolved ? response.data.id : null);
+      if (!admission || admission === "accepted") toast.success("Review startup accepted");
+      if (admission === "refused") toast.error("Review startup was refused");
+      if (admission === "cancelled") toast.error("Review startup was cancelled");
+      setReviewConfigOpen(!!unresolved);
+      queryClient.setQueryData<ListResponse<SessionReviewLoop>>(queryKeys.sessions.reviewLoops(id), (existing) => ({
+        data: [response.data, ...(existing?.data ?? []).filter((loop) => loop.id !== response.data.id)],
+        meta: existing?.meta ?? {},
+      }));
+      // Startup admission cannot reset later thread activity, model or label.
+      // Keep any existing thread whole and synthesize only while it is absent.
+      const existingReviewThread = queryClient.getQueryData<SingleResponse<SessionDetail>>(queryKeys.sessions.detail(id))
+        ?.data.threads?.find((thread) => thread.id === response.data.thread_id);
+      const reviewThread = existingReviewThread ?? buildReviewLoopThreadPreview(response.data, session);
       if (reviewThread) {
-        setPendingThreadPreview(reviewThread);
+        setPendingThreadPreview(existingReviewThread ? null : reviewThread);
         queryClient.setQueryData<SingleResponse<SessionDetail>>(queryKeys.sessions.detail(id), (existing) => {
-          if (!existing) return existing;
-          const existingThreads = existing.data.threads ?? [];
+          if (!existing || existing.data.threads?.some((thread) => thread.id === reviewThread.id)) return existing;
           return {
             ...existing,
             data: {
               ...existing.data,
-              threads: [...existingThreads.filter((thread) => thread.id !== reviewThread.id), reviewThread],
+              threads: [...(existing.data.threads ?? []), reviewThread],
             },
           };
         });
@@ -5225,13 +5272,39 @@ export function SessionDetailContent({ id }: { id: string }) {
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.reviewLoops(id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.threads(id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.sessions.detail(id) });
-    },
-    onError: (err) => {
-      const msg = err instanceof Error ? err.message : "Review loop could not be started";
-      toast.error(msg);
-    },
+  };
+  const handleReviewLoopError = (err: unknown, request: ReviewRequestScope) => {
+    if (!reviewRequestIsCurrent(request)) return;
+    if (err instanceof ApiError && err.code === "REVIEW_LOOP_START_PENDING_CONFIRMATION") {
+      const details = err.details;
+      if (details && typeof details === "object" && "loop_id" in details && typeof details.loop_id === "string" && details.loop_id) {
+        void setRetainedReviewID(details.loop_id);
+        setReviewConfigOpen(true);
+        return;
+      }
+    }
+    if (err instanceof ApiError && err.code === "REVIEW_LOOP_START_REFUSED") {
+      void setRetainedReviewID(null);
+    }
+    toast.error(err instanceof Error ? err.message : "Review status could not be confirmed");
+  };
+  const recoverReviewLoopMutation = useMutation({
+    mutationFn: (request: ReviewRequestScope & { loopID: string }) => api.sessions.recoverReviewLoop(request.sessionID, request.loopID),
+    onSuccess: handleReviewLoopCreated,
+    onError: handleReviewLoopError,
   });
-  const reviewActionDisabled = !canStartReviewLoop || startReviewLoopMutation.isPending;
+  const startReviewLoopMutation = useMutation({
+    mutationFn: (request: ReviewRequestScope) =>
+      api.sessions.startReviewLoop(request.sessionID, {
+        agent_type: reviewAgentType,
+        model: session?.agent_type === reviewAgentType ? session?.model_override : undefined,
+        max_passes: reviewPasses,
+        fix_mode: reviewFixMode,
+      }),
+    onSuccess: handleReviewLoopCreated,
+    onError: handleReviewLoopError,
+  });
+  const reviewActionDisabled = (!followupReviewID && !canStartReviewLoop) || startReviewLoopMutation.isPending;
   const reviewActionDisabledReason = startReviewLoopMutation.isPending
     ? "Starting review loop..."
     : reviewUnavailableReason;
@@ -6646,7 +6719,7 @@ export function SessionDetailContent({ id }: { id: string }) {
         stopAutoRepairPending={stopAutoRepairMutation.isPending}
         reviewAction={selectedIsPrimary && canManageSession && canUseNativeReviewLoop ? {
           disabled: reviewActionDisabled,
-          spinning: startReviewLoopMutation.isPending || reviewLoopRunning,
+          spinning: startReviewLoopMutation.isPending || (!followupReviewID && reviewLoopRunning),
           title: reviewActionDisabledReason,
           onClick: () => setReviewConfigOpen(true),
         } : undefined}
@@ -6935,7 +7008,13 @@ export function SessionDetailContent({ id }: { id: string }) {
               </CardContent>
             </Card>
           )}
-          {showOverviewReviewSection ? (
+          {followupReviewID || showReviewStartupNotice ? (
+            <div className="space-y-2">
+              <ReviewLoopStartupNotice state={followupReviewID ? followupReview?.admission_state : latestReviewLoop?.admission_state} />
+              {followupReviewID ? <Button size="sm" variant="outline" onClick={() => setReviewConfigOpen(true)}>Check review status</Button> : null}
+            </div>
+          ) : null}
+          {showOverviewReviewSection && !followupReviewID ? (
             reviewLoopRunning ? (
               <OverviewRow
                 slot="overview-review-status"
@@ -7486,6 +7565,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               Run a selected agent&apos;s native review loop in this session&apos;s sandbox. The loop opens a dedicated review tab and keeps changes on the same branch.
             </DialogDescription>
           </DialogHeader>
+          {followupReviewID || showReviewStartupNotice ? <ReviewLoopStartupNotice state={followupReviewID ? followupReview?.admission_state : latestReviewLoop?.admission_state} /> : (
           <div className="space-y-3">
             <div className="space-y-2">
               <Label htmlFor="review-agent-type">Coding agent</Label>
@@ -7597,6 +7677,7 @@ export function SessionDetailContent({ id }: { id: string }) {
               </div>
             </div>
           </div>
+          )}
           <DialogFooter>
             <Button
               type="button"
@@ -7606,14 +7687,19 @@ export function SessionDetailContent({ id }: { id: string }) {
             >
               Cancel
             </Button>
+            <DisabledTooltip
+              disabled={!canManageSession || recoverReviewLoopMutation.isPending || startReviewLoopMutation.isPending || (!followupReviewID && !canStartReviewLoop)}
+              content={!canManageSession ? "Write access is required to recover this review" : recoverReviewLoopMutation.isPending || startReviewLoopMutation.isPending ? "Wait for the current request to finish" : reviewUnavailableReason}
+            >
             <Button
               type="button"
-              disabled={reviewActionDisabled}
-              onClick={() => startReviewLoopMutation.mutate()}
+              disabled={!canManageSession || (followupReviewID ? recoverReviewLoopMutation.isPending : !canStartReviewLoop || startReviewLoopMutation.isPending)}
+              onClick={() => followupReviewID ? recoverReviewLoopMutation.mutate({ loopID: followupReviewID, sessionID: id, queryClient }) : startReviewLoopMutation.mutate({ sessionID: id, queryClient })}
             >
               {startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              Start review
+              {followupReviewID ? "Check review status" : "Start review"}
             </Button>
+            </DisabledTooltip>
           </DialogFooter>
         </DialogContent>
       </Dialog>
