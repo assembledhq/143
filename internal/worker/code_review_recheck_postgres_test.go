@@ -350,7 +350,10 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.True(t, owned, "second continuation owns current turn")
 	noEscalation := false
 	requirements := []models.CodeReviewRequirementReassessment{{Key: "screenshot", Status: models.CodeReviewRequirementSatisfied, EvidenceCitations: []models.CodeReviewEvidenceCitation{{EvidenceID: "image-1"}}, Reason: "The current screenshot shows the changed UI"}}
-	findings := []models.CodeReviewFindingReassessment{{FindingID: findingID, Status: models.CodeReviewFindingResolved, Reason: "Current passing browser test addresses the original coverage concern", EvidenceCitations: []models.CodeReviewEvidenceCitation{{EvidenceID: "test-log", Quote: "The browser test passes with the changed UI."}}}}
+	findings := []models.CodeReviewFindingReassessment{{FindingID: findingID, Status: models.CodeReviewFindingResolved, Reason: "Current passing browser test addresses the original coverage concern", EvidenceCitations: []models.CodeReviewEvidenceCitation{
+		{EvidenceID: "test-log", Quote: "The browser test passes with the changed UI."},
+		{EvidenceID: "test-log", Quote: "browser test passes"},
+	}}}
 	response, err := json.Marshal(codeReviewRecheckResponse{BaselineAssessmentID: baseline, InputDigest: manifest.InputDigest, EscalateFullReview: &noEscalation, Requirements: &requirements, Findings: &findings})
 	require.NoError(t, err, "encode exact evidence answer")
 	baselineFindings, err := stores.CodeReviewAssessments.ListFindings(ctx, org, baseline)

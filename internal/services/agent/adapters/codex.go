@@ -253,15 +253,23 @@ func (a *CodexAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox, prom
 		if len(snippet) > 600 {
 			snippet = snippet[:600]
 		}
+		// Keep the provider's structured failure independently visible when
+		// unrelated MCP shutdown diagnostics fill the stderr snippet.
+		providerSnippet := parsedError
+		if len(providerSnippet) > 600 {
+			providerSnippet = providerSnippet[:600]
+		}
 		a.logger.Warn().
 			Str("session_id", sandbox.SessionID).
 			Str("org_id", sandbox.OrgID).
 			Str("agent", "codex").
 			Int("exit_code", exitCode).
 			Bool("resume", prompt.Continuation).
+			Bool("model_capacity", agent.IsUpstreamModelCapacityError(result.Error)).
 			Bool("transport_failure", agent.IsUpstreamTransportError(result.Error)).
 			Str("egress_mode", sandbox.Metadata[agent.SandboxMetadataEgressMode]).
 			Str("stderr_snippet", snippet).
+			Str("provider_error_snippet", providerSnippet).
 			Msg("codex CLI exited abnormally")
 	}
 

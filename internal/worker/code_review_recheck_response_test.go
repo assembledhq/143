@@ -45,6 +45,39 @@ func TestValidateCodeReviewRecheckResponse(t *testing.T) {
 		valid  bool
 	}{
 		{"current text and image resolve an original finding", nil, true},
+		{"requirement may cite distinct quotes from one text source", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			(*r.Requirements)[1].EvidenceCitations = append((*r.Requirements)[1].EvidenceCitations, models.CodeReviewEvidenceCitation{EvidenceID: "text-new", Quote: "on this commit: PASS"})
+		}, true},
+		{"finding may cite distinct quotes from one text source", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			(*r.Findings)[0].EvidenceCitations = append((*r.Findings)[0].EvidenceCitations, models.CodeReviewEvidenceCitation{EvidenceID: "text-new", Quote: "on this commit: PASS"})
+		}, true},
+		{"repeated text source still requires every quote to match", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			(*r.Requirements)[1].EvidenceCitations = append((*r.Requirements)[1].EvidenceCitations, models.CodeReviewEvidenceCitation{EvidenceID: "text-new", Quote: "a result that was never captured"})
+		}, false},
+		{"repeated text source cannot use an empty quote", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			(*r.Findings)[0].EvidenceCitations = append((*r.Findings)[0].EvidenceCitations, models.CodeReviewEvidenceCitation{EvidenceID: "text-new"})
+		}, false},
+		{"duplicate text citation is rejected", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			(*r.Requirements)[1].EvidenceCitations = append((*r.Requirements)[1].EvidenceCitations, (*r.Requirements)[1].EvidenceCitations[0])
+		}, false},
+		{"duplicate image citation is rejected", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			(*r.Requirements)[0].EvidenceCitations = append((*r.Requirements)[0].EvidenceCitations, (*r.Requirements)[0].EvidenceCitations[0])
+		}, false},
+		{"image cannot evade duplicate check with a quote", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			(*r.Requirements)[0].EvidenceCitations = append((*r.Requirements)[0].EvidenceCitations, models.CodeReviewEvidenceCitation{EvidenceID: "image-new", Quote: "invented image text"})
+		}, false},
+		{"empty citation ID is rejected", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			(*r.Requirements)[1].EvidenceCitations[0].EvidenceID = ""
+		}, false},
+		{"padded citation ID is rejected", func(_ *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			(*r.Requirements)[1].EvidenceCitations[0].EvidenceID = " text-new "
+		}, false},
+		{"distinct quotes still respect citation count bound", func(in *codeReviewRecheckValidationInput, r *codeReviewRecheckResponse) {
+			in.CurrentManifest.TextEvidence.Items[0].Content = "Test run on this commit: PASS\na\nb\nc\nd\ne\nf\ng\nh"
+			for _, quote := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+				(*r.Requirements)[1].EvidenceCitations = append((*r.Requirements)[1].EvidenceCitations, models.CodeReviewEvidenceCitation{EvidenceID: "text-new", Quote: quote})
+			}
+		}, false},
 		{"legacy discussion prose is not new evidence", func(in *codeReviewRecheckValidationInput, _ *codeReviewRecheckResponse) {
 			in.BaselineManifest.TextEvidence.FullDiscussionCaptured = false
 			in.CurrentManifest.TextEvidence.Items[0].Surface = "issue_comment"
@@ -130,6 +163,8 @@ func TestValidateCodeReviewRecheckResponse(t *testing.T) {
 				return
 			}
 			require.NoError(t, err, "complete exact dispositions should validate")
+			require.Equal(t, *response.Requirements, result.RequirementReassessments, "validated requirement citations must retain every exact quote for the assessment audit")
+			require.Equal(t, *response.Findings, result.FindingReassessments, "validated finding citations must retain every exact quote for the assessment audit")
 			require.True(t, result.Synthesis.ScopeMismatch, "nonfinding blocker must remain intact")
 			if tt.name == "retained high finding stays in effective set" {
 				require.Equal(t, input.BaselineFindings, result.EffectiveFindings, "retained blocker must still be counted")

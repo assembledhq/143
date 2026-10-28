@@ -105,6 +105,24 @@ func TestClassifyFailure(t *testing.T) {
 			wantRetryAdvised: true,
 		},
 		{
+			name: "model capacity with unrelated MCP shutdown",
+			run: models.Session{
+				Error: strPtr("codex CLI exited with code 1: Selected model is at capacity. Please try a different model.: ERROR rmcp::transport::worker: Transport channel closed, when AuthRequired"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "model_capacity",
+			wantRetryAdvised: true,
+		},
+		{
+			name: "rate limit retains precedence over model capacity",
+			run: models.Session{
+				Error: strPtr("HTTP 429 rate limit: model is at capacity; transport channel closed"),
+			},
+			wantCategory:     "tooling",
+			wantSubType:      "api_error",
+			wantRetryAdvised: true,
+		},
+		{
 			name: "codex responses stream disconnected",
 			run: models.Session{
 				Error: strPtr(`{"type":"turn.failed","error":{"message":"stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)"}}`),
@@ -236,6 +254,57 @@ func TestClassifyFailure(t *testing.T) {
 			require.NotEmpty(t, summary.Explanation, "explanation should not be empty")
 			require.GreaterOrEqual(t, len(summary.NextSteps), 2, "should have at least 2 next steps")
 			require.LessOrEqual(t, len(summary.NextSteps), 3, "should have at most 3 next steps")
+		})
+	}
+}
+
+func TestUpstreamFailureClassification(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		message       string
+		wantCapacity  bool
+		wantTransport bool
+	}{
+		{
+			name:         "capacity",
+			message:      "Selected model is at capacity. Please try a different model.",
+			wantCapacity: true,
+		},
+		{
+			name:         "capacity followed by MCP shutdown",
+			message:      "Selected model is at capacity. Please try a different model.: Transport channel closed, when AuthRequired",
+			wantCapacity: true,
+		},
+		{
+			name:         "model overload is case insensitive",
+			message:      "The MODEL IS OVERLOADED; Transport channel closed",
+			wantCapacity: true,
+		},
+		{
+			name:          "genuine transport error",
+			message:       "stream disconnected before completion: error sending request for url",
+			wantTransport: true,
+		},
+		{
+			name:          "MCP transport failure without a model failure",
+			message:       "Transport channel closed, when Client(HttpRequest failed)",
+			wantTransport: true,
+		},
+		{
+			name:    "sandbox capacity is not model capacity",
+			message: "sandbox capacity reached",
+		},
+		{
+			name:    "unrelated failure",
+			message: "validation failed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.wantCapacity, IsUpstreamModelCapacityError(tt.message), "capacity classification should require an explicit model-capacity signal")
+			require.Equal(t, tt.wantTransport, IsUpstreamTransportError(tt.message), "an explicit model failure should outrank incidental MCP shutdown diagnostics")
 		})
 	}
 }
