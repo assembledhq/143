@@ -345,12 +345,12 @@
     },
     {
       "id": "internal/db/code_review_disputes.go:CodeReviewDisputeStore.CompleteReassessmentOnce:sql:1",
-      "source_sha256": "2bf3ca9db98ec7f306fd47a1cee50c5fb8f852e8c5de1991fc0b0c19f249a478",
+      "source_sha256": "7e2ab2f447bc52f0a2ff272eb5f6d3ae149b4a04aad08fb26da0637519668b8b",
       "classification": "unrelated-domain",
-      "action_0a": "Retain pending/running for start_code_review_reassessment capture-handoff jobs: that controller is not a first-release parked run_agent/continue_session input. Guard any future parked eligibility expansion with a fresh domain policy review, not automatic status-set widening.",
-      "reason": "This predicate protects reassessment capture replacement admission, not the lifecycle request-consumer lane.",
+      "action_0a": "Retain pending/running for live start_code_review_reassessment capture handoffs. The additional status-independent exact replacement history classifies stopped reassessments; it does not admit or claim work. This controller is not a first-release parked run_agent/continue_session input. Guard future parked eligibility expansion with a fresh domain policy review, not automatic status-set widening.",
+      "reason": "This query distinguishes historical capture replacement outcomes from live handoff protection, outside the lifecycle request-consumer lane.",
       "evidence": [
-        "internal/db/code_review_disputes.go:963",
+        "internal/db/code_review_disputes.go:1008",
         "replacement . status in ( 'pending' , 'running' )"
       ]
     },
