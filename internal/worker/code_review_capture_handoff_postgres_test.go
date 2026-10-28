@@ -131,7 +131,10 @@ func TestFullAssessmentPublicationCaptureHandoffPostgres(t *testing.T) {
 	}
 	// Model one worker's shared publication admission instead of creating an
 	// independent publication slot for every tenant in this shared pool.
-	reviews := db.NewCodeReviewStore(pool)
+	transactions, err := db.NewThreadSendTransactions(pool)
+	require.NoError(t, err, "own terminal publication updates with the existing bounded pool runner")
+	reviews, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, transactions)
+	require.NoError(t, err, "share terminal-capable review storage across publication capture cases")
 	providerFailure := errors.New("fresh provider capture failed")
 	tests := []struct {
 		name     string

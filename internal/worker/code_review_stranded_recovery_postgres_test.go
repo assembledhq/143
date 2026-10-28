@@ -57,14 +57,23 @@ func seedStrandedReview(t *testing.T, pool *pgxpool.Pool, parent string) strande
 		_, err := pool.Exec(ctx, row.sql, row.args...)
 		require.NoError(t, err, "seed stranded controller state")
 	}
-	stores := &Stores{CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(pool), CodeReviews: db.NewCodeReviewStore(pool), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool), Sessions: db.NewSessionStore(pool), Repositories: db.NewRepositoryStore(pool), PullRequests: db.NewPullRequestStore(pool), Jobs: db.NewJobStore(pool), SessionThreads: db.NewSessionThreadStore(pool), SessionMessages: db.NewSessionMessageStore(pool), SessionLogs: db.NewSessionLogStore(pool), ThreadSendTx: pool}
+	stores := &Stores{CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(pool), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool), Sessions: db.NewSessionStore(pool), Repositories: db.NewRepositoryStore(pool), PullRequests: db.NewPullRequestStore(pool), Jobs: db.NewJobStore(pool), SessionThreads: db.NewSessionThreadStore(pool), SessionMessages: db.NewSessionMessageStore(pool), SessionLogs: db.NewSessionLogStore(pool), ThreadSendTx: pool}
 	stores.ThreadSendDependencies, err = threadsvc.NewSendDependencies(pool, stores.Sessions, stores.SessionThreads, stores.Jobs)
 	require.NoError(t, err, "wire real-pool thread-send dependencies for recovery and retired-controller replay")
+	stores.CodeReviews, err = db.NewCodeReviewStoreWithTerminalTransactions(pool, stores.ThreadSendDependencies.Transactions)
+	require.NoError(t, err, "share the real owned-pool transaction capability with terminal review recovery")
 	return strandedReviewFixture{job: job, assessment: assessment, jobID: jobID, token: token, manifest: manifest, stores: stores}
 }
 
 func (f strandedReviewFixture) ctx() context.Context {
 	return jobctx.WithJobID(jobctx.WithLockToken(context.Background(), f.token), f.jobID)
+}
+
+func (f strandedReviewFixture) newWorker(t *testing.T, pool *pgxpool.Pool, nodeID string) *Worker {
+	t.Helper()
+	jobs, err := db.NewJobStoreWithCodeReviewTerminalTransactions(pool, f.stores.ThreadSendDependencies.Transactions)
+	require.NoError(t, err, "compose terminal job settlement with the fixture's original owned-pool transaction capability")
+	return New(pool, zerolog.Nop(), nodeID, WithCodeReviewTerminalStore(jobs))
 }
 
 func seedSavedReviewResults(t *testing.T, pool *pgxpool.Pool, f strandedReviewFixture) {

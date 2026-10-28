@@ -216,7 +216,7 @@ func fullAssessmentDispatchObject(t *testing.T, raw json.RawMessage) map[string]
 
 func fullAssessmentDispatchFixture(t *testing.T, pool *pgxpool.Pool, route string, coverage bool) (strandedReviewFixture, map[string]uuid.UUID) {
 	t.Helper()
-	f, _ := seedConfirmedDrainReview(t, pool, "failed")
+	f := seedStrandedReview(t, pool, "failed")
 	ctx := f.ctx()
 	thread := uuid.New()
 	for _, row := range []struct {
@@ -224,9 +224,7 @@ func fullAssessmentDispatchFixture(t *testing.T, pool *pgxpool.Pool, route strin
 		args  []any
 	}{
 		{`UPDATE caller_send_intent_control SET intents_enabled=true WHERE singleton AND schema_ready`, nil},
-		{`UPDATE code_review_session_metadata SET status='running',phase='reviewing',failure_reason=NULL WHERE org_id=$1 AND id=$2`, []any{f.job.OrgID, f.job.MetadataID}},
 		{`INSERT INTO session_threads(id,org_id,session_id,agent_type,label,status,completed_at) VALUES($1,$2,$3,'claude_code','Synthetic drained caller lane','completed',statement_timestamp())`, []any{thread, f.job.OrgID, f.job.SessionID}},
-		{`UPDATE code_review_revision_assessments SET coverage_complete=$3,structured_outcome=jsonb_build_object('coverage_complete',$3::boolean,'description_assessments','[]'::jsonb) WHERE org_id=$1 AND id=$2`, []any{f.job.OrgID, f.assessment, coverage}},
 		{`INSERT INTO code_review_findings(org_id,session_id,dedupe_key,severity,confidence,path,summary,body) VALUES($1,$2,'synthetic-dispatch-finding','info','high','synthetic.go','Synthetic retained finding','Synthetic retained evidence')`, []any{f.job.OrgID, f.job.SessionID}},
 		{`INSERT INTO code_review_prompt_records(org_id,session_id,record_key,role,content) VALUES($1,$2,'synthetic-dispatch-prompt','reviewer','Synthetic retained prompt')`, []any{f.job.OrgID, f.job.SessionID}},
 	} {
@@ -237,6 +235,18 @@ func fullAssessmentDispatchFixture(t *testing.T, pool *pgxpool.Pool, route strin
 	children := make(map[string]uuid.UUID)
 	for _, state := range []string{"pending", "retry pending", "attempting", "unknown", "attention", "accepted"} {
 		children[state] = fullAssessmentDispatchChild(t, ctx, pool, f, thread, state)
+	}
+	// Retain children before publication confirmation closes fresh dispatch.
+	stageConfirmedDrainReview(t, pool, f)
+	for _, row := range []struct {
+		query string
+		args  []any
+	}{
+		{`UPDATE code_review_session_metadata SET status='running',phase='reviewing',failure_reason=NULL WHERE org_id=$1 AND id=$2`, []any{f.job.OrgID, f.job.MetadataID}},
+		{`UPDATE code_review_revision_assessments SET coverage_complete=$3,structured_outcome=jsonb_build_object('coverage_complete',$3::boolean,'description_assessments','[]'::jsonb) WHERE org_id=$1 AND id=$2`, []any{f.job.OrgID, f.assessment, coverage}},
+	} {
+		_, err := pool.Exec(ctx, row.query, row.args...)
+		require.NoError(t, err, "retain the exact confirmed assessment and metadata state after its original reviewer history")
 	}
 	if route != "complete" {
 		_, err := pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='completed',phase=NULL,decision='blocked',acceptable=false,

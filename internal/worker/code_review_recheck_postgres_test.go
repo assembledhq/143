@@ -519,6 +519,12 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 	require.NoError(t, err, "read retired session owner")
 	require.Nil(t, retiredOwner, "completed replacement should release the drained old session")
 
+	terminalRun, err := db.NewThreadSendTransactions(pool)
+	require.NoError(t, err, "construct the actual bounded retirement runner for this supervisor fixture")
+	stores.ThreadSendDependencies.Transactions = terminalRun
+	terminalJobs, err := db.NewJobStoreWithCodeReviewTerminalTransactions(pool, terminalRun)
+	require.NoError(t, err, "compose retirement and scheduler cleanup with the same actual bounded owner")
+	retirementWorker := New(pool, zerolog.Nop(), "synthetic-recheck-retirement", WithCodeReviewTerminalStore(terminalJobs))
 	for i, tt := range []struct {
 		name             string
 		priorUncertainty bool
@@ -541,10 +547,10 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 			}
 			_, err = pool.Exec(ctx, `UPDATE code_review_pr_state SET active_assessment_id=$3,active_session_id=$4 WHERE org_id=$1 AND pull_request_id=$2`, org, pr, rejectedID, session)
 			require.NoError(t, err, "point scheduler at the evidence review")
-			_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token) VALUES($1,$2,'agent','run_code_review_recheck','{}','running',$3)`, rejectedJobID, org, rejectedLease)
-			require.NoError(t, err, "lease rejected evidence supervisor")
 			payload, err := json.Marshal(codeReviewRecheckJob{OrgID: org, AssessmentID: rejectedID})
 			require.NoError(t, err, "encode evidence supervisor payload")
+			_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token) VALUES($1,$2,'agent','run_code_review_recheck',$3,'running',$4)`, rejectedJobID, org, payload, rejectedLease)
+			require.NoError(t, err, "lease rejected evidence supervisor with its complete original assessment payload")
 			capture.changedManifest = nil
 			publisher.submitErr = fmt.Errorf("%w: %w", codereviewsvc.ErrReviewPublicationRejected, &ghservice.GitHubAPIError{StatusCode: 422})
 			hookCtx := jobctx.WithDeadLetterHooks(jobctx.WithJobID(jobctx.WithLockToken(ctx, rejectedLease), rejectedJobID))
@@ -552,7 +558,13 @@ func TestCodeReviewRecheckSupervisorPostgres(t *testing.T) {
 			require.ErrorIs(t, err, codereviewsvc.ErrReviewPublicationRejected, "rejection should reach the supervisor")
 			var fatal *FatalError
 			require.ErrorAs(t, err, &fatal, "definitive rejection must dead-letter on the first attempt instead of retrying eight times")
-			jobctx.RunDeadLetterHooks(hookCtx, err)
+			retirementWorker.deadLetterJob(ctx, hookCtx, &models.Job{ID: rejectedJobID, OrgID: org,
+				Queue: "agent", JobType: models.JobTypeRunCodeReviewRecheck, Payload: payload, LockToken: &rejectedLease}, err)
+			var retiredStatus models.JobStatus
+			var retiredLease *uuid.UUID
+			require.NoError(t, pool.QueryRow(ctx, `SELECT status,lock_token FROM jobs WHERE org_id=$1 AND id=$2`, org, rejectedJobID).Scan(&retiredStatus, &retiredLease), "independently read the actual committed original supervisor retirement")
+			require.Equal(t, models.JobStatusDeadLetter, retiredStatus, "the real worker must retire this exact rejected supervisor before its hooks run")
+			require.Nil(t, retiredLease, "known committed retirement must clear the original supervisor lease")
 			got, err := stores.CodeReviewAssessments.GetByID(ctx, org, rejectedID)
 			require.NoError(t, err, "read evidence assessment after terminal hooks")
 			wantStatus, wantPublication := models.CodeReviewAssessmentFailed, models.CodeReviewPublicationReserved
