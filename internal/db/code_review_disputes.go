@@ -889,12 +889,40 @@ const codeReviewDisputeCaptureHandoffSQL = `EXISTS (
 	  AND replacement.payload->>'triggering_dispute_id' = @id::text
 )`
 
+// A stale owner with a recorded capture replacement is not ordinary scheduling
+// supersession. If that exact replacement stops without acquiring ownership,
+// the requested reassessment failed to start. Retain that distinction after the
+// live handoff fence no longer applies; unrelated PR or dispute work does not
+// establish capture replacement history for this owner.
+const codeReviewDisputeCaptureHistorySQL = `EXISTS (
+	SELECT 1 FROM code_review_requests request
+	JOIN code_review_session_metadata source
+	  ON source.org_id = request.org_id AND source.pull_request_id = request.pull_request_id
+	JOIN code_review_decision_disputes handoff_dispute
+	  ON handoff_dispute.org_id = source.org_id AND handoff_dispute.pull_request_id = source.pull_request_id
+	WHERE request.org_id = @org_id AND request.source_kind = 'github'
+	  AND source.org_id = @org_id AND source.session_id = @session_id
+	  AND handoff_dispute.org_id = @org_id AND handoff_dispute.id = @id
+	  AND request.source_identity = 'capture_identity:' || @session_id::text
+) OR EXISTS (
+	SELECT 1 FROM jobs replacement
+	JOIN code_review_session_metadata source
+	  ON source.org_id = replacement.org_id AND source.session_id = @session_id
+	JOIN code_review_decision_disputes handoff_dispute
+	  ON handoff_dispute.org_id = source.org_id AND handoff_dispute.pull_request_id = source.pull_request_id
+	WHERE replacement.org_id = @org_id AND source.org_id = @org_id
+	  AND handoff_dispute.org_id = @org_id AND handoff_dispute.id = @id
+	  AND replacement.job_type = 'start_code_review_reassessment'
+	  AND replacement.dedupe_key = 'code_review_reassessment:' || source.pull_request_id::text || ':capture_identity:' || @session_id::text
+	  AND replacement.payload->>'triggering_dispute_id' = @id::text
+)`
+
 // SettleRetiredCapturedIdentityReassessments resolves a capture replacement
 // request that stopped before its dispute acquired a replacement owner. The
 // caller holds the PR transaction; request retirement, dispute settlement and
 // its reply job must commit together.
 func SettleRetiredCapturedIdentityReassessments(ctx context.Context, tx pgx.Tx, orgID, prID uuid.UUID) error {
-	const detail = "The reassessment was stopped before a replacement review could start. The objection remains recorded for a policy owner."
+	const detail = "The reassessment was stopped before a replacement review could start. The objection remains recorded."
 	_, err := tx.Exec(ctx, `WITH retired AS (
 	 SELECT DISTINCT dispute.id, source.session_id
 	 FROM code_review_requests request
@@ -957,20 +985,44 @@ func (s *CodeReviewDisputeStore) IsCapturedIdentityReassessmentSource(ctx contex
 
 func (s *CodeReviewDisputeStore) CompleteReassessmentOnce(ctx context.Context, orgID, disputeID, sessionID uuid.UUID, status models.CodeReviewSessionStatus, decision *models.CodeReviewDecision, detail string) (bool, error) {
 	reassessmentStatus := models.CodeReviewDisputeReassessmentFailed
-	if status == models.CodeReviewSessionStatusCompleted && decision != nil {
-		reassessmentStatus = models.CodeReviewDisputeReassessmentCompleted
+	var completedDecision *models.CodeReviewDecision
+	switch status {
+	case models.CodeReviewSessionStatusCompleted:
+		if decision != nil {
+			reassessmentStatus = models.CodeReviewDisputeReassessmentCompleted
+			completedDecision = decision
+		}
+	case models.CodeReviewSessionStatusStale:
+		reassessmentStatus = models.CodeReviewDisputeReassessmentSuperseded
+		if strings.TrimSpace(detail) == "" {
+			detail = "The reassessment was superseded because the review target changed. The objection remains recorded."
+		}
+	case models.CodeReviewSessionStatusFailed, models.CodeReviewSessionStatusCancelled:
+		// A stopped owner has no completed reassessment verdict, even when
+		// metadata retains an earlier published decision for provenance.
+	default:
+		// Terminal callbacks can race newer lifecycle state. Do not settle
+		// active work just because a caller requested terminal publication.
+		return false, nil
 	}
-	result, err := s.db.Exec(ctx, `UPDATE code_review_decision_disputes
+	result, err := s.db.Exec(ctx, `WITH capture_outcome AS (
+		SELECT @session_status::text = 'stale' AND (`+codeReviewDisputeCaptureHistorySQL+`) AS stopped_replacement
+	)
+		UPDATE code_review_decision_disputes
 		SET reassessment_session_id = @session_id, reassessment_decision = @decision,
 		    reassessment_flipped = CASE WHEN @decision::text IS NULL THEN NULL ELSE decision IS DISTINCT FROM @decision END,
-		    reassessment_status = @reassessment_status, status_detail = NULLIF(@detail, ''),
+		    reassessment_status = CASE WHEN capture_outcome.stopped_replacement THEN 'failed' ELSE @reassessment_status END,
+		    status_detail = CASE WHEN capture_outcome.stopped_replacement
+		      THEN 'The reassessment was stopped before a replacement review could start. The objection remains recorded.'
+		      ELSE NULLIF(@detail, '') END,
 		    reply_status = CASE WHEN (source = 'github_comment' OR direction = 'should_not_have_approved') AND reply_status <> 'published' THEN 'pending' ELSE reply_status END,
 		    updated_at = now(), version = version + 1
+		FROM capture_outcome
 		WHERE org_id = @org_id AND id = @id
 		  AND reassessment_status IN ('queued', 'running')
 		  AND (reassessment_session_id IS NULL OR reassessment_session_id = @session_id)
 		  AND (@session_status::text NOT IN ('stale', 'failed') OR NOT (`+codeReviewDisputeCaptureHandoffSQL+`))`, pgx.NamedArgs{
-		"org_id": orgID, "id": disputeID, "session_id": sessionID, "decision": decision,
+		"org_id": orgID, "id": disputeID, "session_id": sessionID, "decision": completedDecision,
 		"reassessment_status": reassessmentStatus, "detail": strings.TrimSpace(detail), "session_status": status,
 	})
 	if err != nil {
