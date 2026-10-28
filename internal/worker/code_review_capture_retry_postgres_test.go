@@ -58,7 +58,7 @@ func TestFullAssessmentCaptureRateLimitLifecyclePostgres(t *testing.T) {
 			publisher := &inlineRecoveryPublisher{}
 			visual := models.CodeReviewVisualEvidenceSnapshot{Version: 1, AssessmentID: &f.assessment, RepositoryID: f.job.RepositoryID, PullRequestNumber: 9, HeadSHA: f.job.HeadSHA, Complete: true}
 			services := &Services{CodeReviewInputCapture: capture, CodeReviewAssessmentsEnabled: true, CodeReviewVisualEvidence: &assessmentVisualCheckpoint{snapshot: visual}, CodeReviews: publisher}
-			worker := New(pool, zerolog.Nop(), node)
+			worker := f.newWorker(t, pool, node)
 			worker.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(f.stores, services, zerolog.Nop()))
 			worker.poll(ctx)
 			var status models.JobStatus

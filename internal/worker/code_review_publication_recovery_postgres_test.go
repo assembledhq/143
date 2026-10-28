@@ -16,8 +16,10 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	threadsvc "github.com/assembledhq/143/internal/services/thread"
 	testpostgres "github.com/assembledhq/143/internal/testutil/postgres"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -83,6 +85,9 @@ func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing
 			org, integration, repo, pr, policy, session, metadata, assessment, findingID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			jobID, lease := uuid.New(), uuid.New()
 			repoName, key := "test/inline-recovery", "inline-publication-key"
+			job := runCodeReviewPayload{OrgID: org, SessionID: session, MetadataID: metadata, RepositoryID: repo, PullRequestID: pr, PolicyID: policy, PolicyVersion: 1, HeadSHA: "head", OutputKey: key}
+			jobPayload, err := json.Marshal(job)
+			require.NoError(t, err, "retain the complete original controller command before lease-owned retirement")
 			manifest := codereviewsvc.ReviewInputManifest{
 				InputVersion: codereviewsvc.ReviewInputManifestVersion, ReuseEligible: true,
 				InputDigest: "all", CodeDigest: "code", ContractDigest: "contract", IntentDigest: "intent", VisualDigest: "visual", RequestDigest: "request", GateDigest: "gates",
@@ -110,7 +115,7 @@ func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing
 				{`INSERT INTO code_review_revision_assessments(id,org_id,repository_id,repository_full_name,pull_request_id,metadata_id,session_id,policy_id,generation,base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,coverage_complete,status,result_origin,decision,acceptable,risk_reason_details,structured_outcome,rendered_body,publication_key,publication_state,submitted_commit_sha) VALUES($1,$2,$3,$4,$5,$6,$7,$8,1,'base','main','head',$9,'code','contract','intent','visual','request','gates','all',$10,'full','initial_full',false,$11,'executed','needs_human_review',false,'[]','{}',$12,$13,$14,'head')`, []any{assessment, org, repo, repoName, pr, metadata, session, policy, manifest.InputVersion, manifestJSON, status, body, key, tt.publicationState}},
 				{`INSERT INTO code_review_findings(id,org_id,session_id,dedupe_key,severity,confidence,path,start_line,end_line,summary,body,selected_for_inline) VALUES($1,$2,$3,'stable-key','high','high','file.go',347,354,'Unresolved blocker','Fix this defect',true)`, []any{findingID, org, session}},
 				{`INSERT INTO code_review_pr_state(org_id,repository_id,pull_request_id,head_sha,base_sha,base_ref,active_session_id,active_assessment_id,state) VALUES($1,$2,$3,'head','base','main',$4,$5,'running')`, []any{org, repo, pr, session, assessment}},
-				{`INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token) VALUES($1,$2,'agent','run_code_review','{}','running',$3)`, []any{jobID, org, lease}},
+				{`INSERT INTO jobs(id,org_id,queue,job_type,payload,status,lock_token) VALUES($1,$2,'agent','run_code_review',$3,'running',$4)`, []any{jobID, org, jobPayload, lease}},
 			} {
 				_, err := pool.Exec(ctx, seed.sql, seed.args...)
 				require.NoError(t, err, "seed staged publication recovery state")
@@ -121,9 +126,8 @@ func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing
 				publisher.fileErr = &ghservice.GitHubAPIError{StatusCode: http.StatusServiceUnavailable}
 			}
 			capture := &fixedRecheckCapture{result: codereviewsvc.AssessmentInputCaptureResult{Manifest: manifest, Policy: models.CodeReviewPolicyRecord{ID: policy}, Files: files}}
-			stores := &Stores{CodeReviews: db.NewCodeReviewStore(pool), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool), Repositories: db.NewRepositoryStore(pool), PullRequests: db.NewPullRequestStore(pool), ThreadSendTx: pool}
+			stores := publicationRecoveryStores(t, pool)
 			services := &Services{CodeReviews: publisher, CodeReviewInputCapture: capture}
-			job := runCodeReviewPayload{OrgID: org, SessionID: session, MetadataID: metadata, RepositoryID: repo, PullRequestID: pr, PolicyID: policy, PolicyVersion: 1, HeadSHA: "head", OutputKey: key}
 			handlerCtx, cancelHandler := context.WithCancel(jobctx.WithDeadLetterHooks(jobctx.WithJobID(jobctx.WithLockToken(ctx, lease), jobID)))
 			defer cancelHandler()
 			if tt.cancelOnReject {
@@ -137,7 +141,19 @@ func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing
 				err = newRunCodeReviewHandler(stores, services, zerolog.Nop())(handlerCtx, "run_code_review", payload)
 				var fatal *FatalError
 				require.ErrorAs(t, err, &fatal, "definitive rejection should immediately invoke the worker terminal path")
-				jobctx.RunDeadLetterHooks(context.WithoutCancel(handlerCtx), err)
+				terminalJobs, terminalErr := db.NewJobStoreWithCodeReviewTerminalTransactions(pool, stores.ThreadSendDependencies.Transactions)
+				require.NoError(t, terminalErr, "compose retirement with the same actual bounded pool owner")
+				rows, readErr := pool.Query(ctx, `SELECT * FROM jobs WHERE org_id=$1 AND id=$2 AND status='running' AND lock_token=$3`, org, jobID, lease)
+				require.NoError(t, readErr, "read the original persisted controller command and its exact running lease")
+				persisted, readErr := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.Job])
+				require.NoError(t, readErr, "retirement must use the actual durable controller carrier")
+				w := New(pool, zerolog.Nop(), "synthetic-publication-recovery", WithCodeReviewTerminalStore(terminalJobs))
+				w.deadLetterJob(context.WithoutCancel(handlerCtx), handlerCtx, &persisted, err)
+				var retiredStatus models.JobStatus
+				var retiredLease *uuid.UUID
+				require.NoError(t, pool.QueryRow(ctx, `SELECT status,lock_token FROM jobs WHERE org_id=$1 AND id=$2`, org, jobID).Scan(&retiredStatus, &retiredLease), "independently observe the committed controller retirement")
+				require.Equal(t, models.JobStatusDeadLetter, retiredStatus, "definitive rejection must retire the exact controller before guarded cleanup hooks")
+				require.Nil(t, retiredLease, "known retirement must release the original controller lease")
 				currentMetadata, metadataErr := stores.CodeReviews.GetBySessionID(ctx, org, session)
 				require.NoError(t, metadataErr, "read metadata after full review terminal hook")
 				require.Equal(t, models.CodeReviewSessionStatusFailed, currentMetadata.Status, "terminal hook must fail the running review metadata")
@@ -250,7 +266,7 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 
 			capture := &fixedRecheckCapture{}
 			publisher := &fakeRecheckPublisher{}
-			stores := &Stores{CodeReviews: db.NewCodeReviewStore(pool), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool), ThreadSendTx: pool}
+			stores := publicationRecoveryStores(t, pool)
 			services := &Services{CodeReviewInputCapture: capture, CodeReviews: publisher}
 			job := runCodeReviewPayload{OrgID: org, SessionID: session, MetadataID: metadata, RepositoryID: repo, PullRequestID: pr, PolicyID: policy, PolicyVersion: 1, HeadSHA: "old-head", OutputKey: key}
 			if tt.wrongIdentity {
@@ -310,4 +326,21 @@ func fullRecoveryPostgresPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 func fullRecoveryPostgresPoolWithMaxConns(t *testing.T, ctx context.Context, maxConns int32) *pgxpool.Pool {
 	t.Helper()
 	return testpostgres.NewPool(t, ctx, "../../migrations", maxConns)
+}
+
+// Publication recovery uses the same explicitly owned capabilities as workers.
+func publicationRecoveryStores(t *testing.T, pool *pgxpool.Pool) *Stores {
+	t.Helper()
+	stores := &Stores{
+		CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool),
+		Sessions:              db.NewSessionStore(pool), SessionThreads: db.NewSessionThreadStore(pool),
+		Jobs: db.NewJobStore(pool), Repositories: db.NewRepositoryStore(pool),
+		PullRequests: db.NewPullRequestStore(pool), ThreadSendTx: pool,
+	}
+	var err error
+	stores.ThreadSendDependencies, err = threadsvc.NewSendDependencies(pool, stores.Sessions, stores.SessionThreads, stores.Jobs)
+	require.NoError(t, err, "compose publication recovery with the actual bounded thread-send owner")
+	stores.CodeReviews, err = db.NewCodeReviewStoreWithTerminalTransactions(pool, stores.ThreadSendDependencies.Transactions)
+	require.NoError(t, err, "terminal publication recovery must share the explicit owned-pool transaction capability")
+	return stores
 }
