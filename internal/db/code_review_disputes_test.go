@@ -456,7 +456,7 @@ func TestCodeReviewDisputeStore_CompleteReassessmentOnceTerminalMapping(t *testi
 	}{
 		{name: "completed verdict", status: models.CodeReviewSessionStatusCompleted, decision: &approved, expectedStatus: models.CodeReviewDisputeReassessmentCompleted, expectedDecision: &approved},
 		{name: "completed without verdict remains failed", status: models.CodeReviewSessionStatusCompleted, expectedStatus: models.CodeReviewDisputeReassessmentFailed},
-		{name: "stale owner is superseded without a verdict", status: models.CodeReviewSessionStatusStale, decision: &approved, expectedStatus: models.CodeReviewDisputeReassessmentSuperseded, expectedDetail: "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."},
+		{name: "stale owner is superseded without a verdict", status: models.CodeReviewSessionStatusStale, decision: &approved, expectedStatus: models.CodeReviewDisputeReassessmentSuperseded, expectedDetail: "The reassessment was superseded because the review target changed. The objection remains recorded."},
 		{name: "failed owner cannot project an old verdict", status: models.CodeReviewSessionStatusFailed, decision: &approved, expectedStatus: models.CodeReviewDisputeReassessmentFailed},
 		{name: "cancelled owner cannot project an old verdict", status: models.CodeReviewSessionStatusCancelled, decision: &approved, expectedStatus: models.CodeReviewDisputeReassessmentFailed},
 		{name: "queued callback preserves active work", status: models.CodeReviewSessionStatusQueued},

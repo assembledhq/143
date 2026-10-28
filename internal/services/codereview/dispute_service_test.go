@@ -912,7 +912,7 @@ func TestBuildCodeReviewDisputeReply(t *testing.T) {
 				ReassessmentStatus: models.CodeReviewDisputeReassessmentSuperseded,
 				StatusDetail:       stringPtrForDisputeTest("private diagnostic must not become a GitHub reply"),
 			},
-			expected: "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner. " +
+			expected: "The reassessment was superseded because the review target changed. The objection remains recorded. " +
 				"[View the dispute](https://app.example.com/code-reviews?evidence=" + sessionID.String() + ")\n\n" +
 				ghservice.PRFeedbackHiddenMarker("code-review-dispute:"+disputeID.String()),
 		},

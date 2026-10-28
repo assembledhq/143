@@ -4534,8 +4534,9 @@ function CodeReviewDisputeReassessment({ dispute }: { dispute: CodeReviewDispute
   // deliberate "Not run".
   const failed = dispute.reassessment_status === "failed";
   const superseded = dispute.reassessment_status === "superseded";
-  const attention = dispute.reassessment_flipped || failed;
-  const detail = dispute.reassessment_flipped
+  const changed = dispute.reassessment_status === "completed" && dispute.reassessment_flipped === true;
+  const attention = changed || failed;
+  const detail = changed
     ? "Decision changed"
     : superseded
       ? "Review target changed"

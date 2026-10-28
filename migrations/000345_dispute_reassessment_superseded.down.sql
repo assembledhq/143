@@ -1,3 +1,5 @@
+SET LOCAL lock_timeout = '5s';
+
 -- Older workers understand failed as the terminal state for a retired owner.
 UPDATE code_review_decision_disputes
 SET reassessment_status = 'failed', updated_at = now(), version = version + 1

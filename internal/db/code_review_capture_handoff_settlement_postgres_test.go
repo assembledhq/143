@@ -152,7 +152,7 @@ func TestRetiredCapturedIdentityReassessmentSettlementPostgres(t *testing.T) {
 				expected.ReassessmentSessionID = &f.sourceSessionID
 				expected.ReassessmentStatus = models.CodeReviewDisputeReassessmentFailed
 				expected.ReassessmentDecision, expected.ReassessmentFlipped = nil, nil
-				detail := "The reassessment was stopped before a replacement review could start. The objection remains recorded for a policy owner."
+				detail := "The reassessment was stopped before a replacement review could start. The objection remains recorded."
 				expected.StatusDetail = &detail
 				if (expected.Source == models.CodeReviewDisputeSourceGitHubComment || expected.Direction != nil && *expected.Direction == models.CodeReviewDisputeDirectionShouldNotHaveApproved) && expected.ReplyStatus != models.CodeReviewDisputeReplyPublished {
 					expected.ReplyStatus = models.CodeReviewDisputeReplyPending
@@ -258,8 +258,8 @@ func TestCaptureHandoffProtectionRequiresLiveWorkPostgres(t *testing.T) {
 	pool := newFeedbackLifecyclePool(t)
 	ctx := context.Background()
 	tests := []struct {
-		name, provider, status string
-		protected              bool
+		name, provider, status, historyFence string
+		protected, newOwner, superseded      bool
 	}{
 		{name: "pending scheduled request protects handoff", provider: "request", status: "pending", protected: true},
 		{name: "joined scheduled request does not protect handoff", provider: "request", status: "joined"},
@@ -267,11 +267,16 @@ func TestCaptureHandoffProtectionRequiresLiveWorkPostgres(t *testing.T) {
 		{name: "superseded scheduled request does not protect handoff", provider: "request", status: "superseded"},
 		{name: "satisfied scheduled request does not protect handoff", provider: "request", status: "satisfied"},
 		{name: "failed scheduled request does not protect handoff", provider: "request", status: "failed"},
+		{name: "failed request cannot settle a newer dispute owner", provider: "request", status: "failed", newOwner: true},
+		{name: "unrelated request source permits ordinary supersession", provider: "request", status: "failed", historyFence: "session", superseded: true},
 		{name: "pending legacy starter protects handoff", provider: "job", status: "pending", protected: true},
 		{name: "running legacy starter protects handoff", provider: "job", status: "running", protected: true},
 		{name: "succeeded legacy starter does not protect handoff", provider: "job", status: "succeeded"},
 		{name: "dead-lettered legacy starter does not protect handoff", provider: "job", status: "dead_letter"},
+		{name: "failed legacy starter does not protect handoff", provider: "job", status: "failed"},
 		{name: "cancelled legacy starter does not protect handoff", provider: "job", status: "cancelled"},
+		{name: "dead-lettered starter cannot settle a newer dispute owner", provider: "job", status: "dead_letter", newOwner: true},
+		{name: "unrelated starter dispute permits ordinary supersession", provider: "job", status: "dead_letter", historyFence: "dispute", superseded: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -286,6 +291,18 @@ func TestCaptureHandoffProtectionRequiresLiveWorkPostgres(t *testing.T) {
 				_, err = pool.Exec(ctx, `INSERT INTO jobs(org_id,queue,job_type,payload,dedupe_key,status) VALUES($1,'agent','start_code_review_reassessment',jsonb_build_object('org_id',$1::uuid::text,'triggering_dispute_id',$2::uuid::text),$3,$4)`, f.orgID, f.disputeID, "code_review_reassessment:"+f.pullRequestID.String()+":capture_identity:"+f.sourceSessionID.String(), tt.status)
 				require.NoError(t, err, "seed the exact durable legacy handoff and lifecycle state")
 			}
+			switch tt.historyFence {
+			case "session":
+				_, err := pool.Exec(ctx, `UPDATE code_review_requests SET source_identity=$3 WHERE org_id=$1 AND id=$2`, f.orgID, f.requestID, "capture_identity:"+uuid.NewString())
+				require.NoError(t, err, "retain capture history for a different source owner")
+			case "dispute":
+				_, err := pool.Exec(ctx, `UPDATE jobs SET payload=jsonb_build_object('triggering_dispute_id',$2::text) WHERE org_id=$1 AND job_type='start_code_review_reassessment'`, f.orgID, uuid.NewString())
+				require.NoError(t, err, "retain legacy capture history for a different dispute")
+			}
+			if tt.newOwner {
+				_, err := pool.Exec(ctx, `UPDATE code_review_decision_disputes SET reassessment_session_id=$3 WHERE org_id=$1 AND id=$2`, f.orgID, f.disputeID, f.replacementSessionID)
+				require.NoError(t, err, "bind the replacement before the obsolete source callback arrives")
+			}
 			store := NewCodeReviewDisputeStore(pool)
 			before, err := store.GetByID(ctx, f.orgID, f.disputeID)
 			require.NoError(t, err, "read reassessment before evaluating real SQL handoff protection")
@@ -294,14 +311,23 @@ func TestCaptureHandoffProtectionRequiresLiveWorkPostgres(t *testing.T) {
 			require.Equal(t, tt.protected, protected, "only pending scheduled requests and pending or running legacy starters may suppress source failure")
 			transitioned, err := store.CompleteReassessmentOnce(ctx, f.orgID, f.disputeID, f.sourceSessionID, models.CodeReviewSessionStatusStale, nil, "Synthetic source stopped.")
 			require.NoError(t, err, "attempt the actual stale-source reassessment completion")
-			require.Equal(t, !tt.protected, transitioned, "terminal replacement work must no longer suppress matching source completion")
+			require.Equal(t, !tt.protected && !tt.newOwner, transitioned, "only a matching old owner without live replacement work may settle")
 			after, err := store.GetByID(ctx, f.orgID, f.disputeID)
 			require.NoError(t, err, "read durable reassessment after protection check")
-			if tt.protected {
-				require.Equal(t, before, after, "live handoff protection must preserve every reassessment field")
+			if tt.protected || tt.newOwner {
+				require.Equal(t, before, after, "live handoff protection and newer ownership must preserve every reassessment field")
 			} else {
-				require.Equal(t, models.CodeReviewDisputeReassessmentSuperseded, after.ReassessmentStatus, "retired handoff protection must permit matching stale-owner settlement")
-				require.Equal(t, &f.sourceSessionID, after.ReassessmentSessionID, "stale-owner settlement must retain its exact source owner")
+				expectedStatus := models.CodeReviewDisputeReassessmentFailed
+				detail := "The reassessment was stopped before a replacement review could start. The objection remains recorded."
+				if tt.superseded {
+					expectedStatus = models.CodeReviewDisputeReassessmentSuperseded
+					detail = "Synthetic source stopped."
+				}
+				require.Equal(t, expectedStatus, after.ReassessmentStatus, "only exact capture history may turn ordinary supersession into replacement-start failure")
+				require.Equal(t, &f.sourceSessionID, after.ReassessmentSessionID, "failed replacement settlement must retain its exact source owner")
+				require.Equal(t, &detail, after.StatusDetail, "the explanation must distinguish exact failed replacement history from unrelated work")
+				require.Nil(t, after.ReassessmentDecision, "failed replacement work must not retain a completed verdict")
+				require.Nil(t, after.ReassessmentFlipped, "failed replacement work must not claim that the decision changed")
 			}
 		})
 	}

@@ -80,7 +80,7 @@ func TestCapturedIdentityDisputeHandoffPostgres(t *testing.T) {
 				dispute, err := f.stores.CodeReviewDisputes.GetByID(ctx, f.job.OrgID, disputeID)
 				require.NoError(t, err, "read normal stale reassessment settlement")
 				require.Equal(t, models.CodeReviewDisputeReassessmentSuperseded, dispute.ReassessmentStatus, "an ordinary stale owner should supersede its reassessment without claiming a new verdict")
-				detail := "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."
+				detail := "The reassessment was superseded because the review target changed. The objection remains recorded."
 				require.Equal(t, &detail, dispute.StatusDetail, "the worker must retain a safe explanation for stale reassessment retirement")
 				return
 			}

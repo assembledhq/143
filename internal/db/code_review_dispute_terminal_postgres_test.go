@@ -107,10 +107,12 @@ func TestDisputeReassessmentSupersededMigrationPostgres(t *testing.T) {
 	}
 	tests := []struct {
 		name, ownerStatus, fence, detail string
+		historyKind, historyStatus       string
+		historyFence                     string
 		initialStatus, expectedStatus    models.CodeReviewDisputeReassessmentStatus
 	}{
 		{name: "matching stale owner", ownerStatus: "stale", expectedStatus: models.CodeReviewDisputeReassessmentSuperseded},
-		{name: "replacement start failure survives", ownerStatus: "stale", detail: "The reassessment was stopped before a replacement review could start. The objection remains recorded for a policy owner.", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "replacement start failure survives", ownerStatus: "stale", detail: "The reassessment was stopped before a replacement review could start. The objection remains recorded.", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
 		{name: "unrelated stale reason stays failed", ownerStatus: "stale", fence: "reason", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
 		{name: "failed owner stays failed", ownerStatus: "failed", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
 		{name: "cancelled owner stays failed", ownerStatus: "cancelled", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
@@ -121,6 +123,19 @@ func TestDisputeReassessmentSupersededMigrationPostgres(t *testing.T) {
 		{name: "queued reassessment stays queued", ownerStatus: "stale", initialStatus: models.CodeReviewDisputeReassessmentQueued, expectedStatus: models.CodeReviewDisputeReassessmentQueued},
 		{name: "running reassessment stays running", ownerStatus: "stale", initialStatus: models.CodeReviewDisputeReassessmentRunning, expectedStatus: models.CodeReviewDisputeReassessmentRunning},
 		{name: "completed reassessment stays completed", ownerStatus: "stale", initialStatus: models.CodeReviewDisputeReassessmentCompleted, expectedStatus: models.CodeReviewDisputeReassessmentCompleted},
+		{name: "pending capture request is not backfilled", ownerStatus: "stale", historyKind: "request", historyStatus: "pending", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "failed capture request is not backfilled", ownerStatus: "stale", historyKind: "request", historyStatus: "failed", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "joined capture request is not backfilled", ownerStatus: "stale", historyKind: "request", historyStatus: "joined", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "pending capture starter is not backfilled", ownerStatus: "stale", historyKind: "job", historyStatus: "pending", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "running capture starter is not backfilled", ownerStatus: "stale", historyKind: "job", historyStatus: "running", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "dead capture starter is not backfilled", ownerStatus: "stale", historyKind: "job", historyStatus: "dead_letter", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "failed capture starter is not backfilled", ownerStatus: "stale", historyKind: "job", historyStatus: "failed", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "cancelled capture starter is not backfilled", ownerStatus: "stale", historyKind: "job", historyStatus: "cancelled", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "succeeded capture starter is not backfilled", ownerStatus: "stale", historyKind: "job", historyStatus: "succeeded", expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "other tenant capture history does not block repair", ownerStatus: "stale", historyKind: "request", historyStatus: "failed", historyFence: "org", expectedStatus: models.CodeReviewDisputeReassessmentSuperseded},
+		{name: "other PR capture history does not block repair", ownerStatus: "stale", historyKind: "request", historyStatus: "failed", historyFence: "pr", expectedStatus: models.CodeReviewDisputeReassessmentSuperseded},
+		{name: "other owner capture history does not block repair", ownerStatus: "stale", historyKind: "request", historyStatus: "failed", historyFence: "session", expectedStatus: models.CodeReviewDisputeReassessmentSuperseded},
+		{name: "other dispute capture starter does not block repair", ownerStatus: "stale", historyKind: "job", historyStatus: "dead_letter", historyFence: "dispute", expectedStatus: models.CodeReviewDisputeReassessmentSuperseded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -129,6 +144,9 @@ func TestDisputeReassessmentSupersededMigrationPostgres(t *testing.T) {
 			tx, orgID, disputeID := newDisputeTriagePostgres(t, databaseURL, models.CodeReviewDisputeIntakeTriaged)
 			_, err := tx.Exec(ctx, `ALTER TABLE code_review_session_metadata ADD COLUMN session_id uuid, ADD COLUMN pull_request_id uuid, ADD COLUMN repository_id uuid, ADD COLUMN status text, ADD COLUMN failure_reason text`)
 			require.NoError(t, err, "add only the owner identity fields read by the real migration")
+			_, err = tx.Exec(ctx, `CREATE TABLE code_review_requests(org_id uuid,pull_request_id uuid,source_kind text,source_identity text,status text);
+CREATE TABLE jobs(org_id uuid,job_type text,dedupe_key text,payload jsonb,status text)`)
+			require.NoError(t, err, "add only the historical replacement fields read by the real migration")
 			var prID, repoID uuid.UUID
 			require.NoError(t, tx.QueryRow(ctx, `SELECT pull_request_id,repository_id FROM code_review_decision_disputes WHERE org_id=$1 AND id=$2`, orgID, disputeID).Scan(&prID, &repoID), "load the owning synthetic dispute identity")
 			ownerID := uuid.New()
@@ -157,6 +175,25 @@ func TestDisputeReassessmentSupersededMigrationPostgres(t *testing.T) {
 			}
 			_, err = tx.Exec(ctx, `INSERT INTO code_review_session_metadata(org_id,session_id,pull_request_id,repository_id,status,trigger_source,failure_reason) VALUES($1,$2,$3,$4,$5,'app_reviewer',$6)`, ownerOrgID, metadataSessionID, ownerPRID, ownerRepoID, tt.ownerStatus, reason)
 			require.NoError(t, err, "seed a matching or explicitly unrelated terminal owner")
+			if tt.historyKind != "" {
+				historyOrgID, historyPRID, historyOwnerID, historyDisputeID := orgID, prID, ownerID, disputeID
+				switch tt.historyFence {
+				case "org":
+					historyOrgID = uuid.New()
+				case "pr":
+					historyPRID = uuid.New()
+				case "session":
+					historyOwnerID = uuid.New()
+				case "dispute":
+					historyDisputeID = uuid.New()
+				}
+				if tt.historyKind == "request" {
+					_, err = tx.Exec(ctx, `INSERT INTO code_review_requests(org_id,pull_request_id,source_kind,source_identity,status) VALUES($1,$2,'github',$3,$4)`, historyOrgID, historyPRID, "capture_identity:"+historyOwnerID.String(), tt.historyStatus)
+				} else {
+					_, err = tx.Exec(ctx, `INSERT INTO jobs(org_id,job_type,dedupe_key,payload,status) VALUES($1,'start_code_review_reassessment',$2,jsonb_build_object('triggering_dispute_id',$3::text),$4)`, historyOrgID, "code_review_reassessment:"+historyPRID.String()+":capture_identity:"+historyOwnerID.String(), historyDisputeID.String(), tt.historyStatus)
+				}
+				require.NoError(t, err, "retain exact or unrelated replacement history without implying successful execution")
+			}
 			store := NewCodeReviewDisputeStore(tx)
 			before, err := store.GetByID(ctx, orgID, disputeID)
 			require.NoError(t, err, "read the entire historical record before migration")
@@ -171,7 +208,7 @@ func TestDisputeReassessmentSupersededMigrationPostgres(t *testing.T) {
 				expected.ReassessmentStatus = tt.expectedStatus
 				expected.ReassessmentDecision, expected.ReassessmentFlipped = nil, nil
 				if tt.detail == "" {
-					detail := "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."
+					detail := "The reassessment was superseded because the review target changed. The objection remains recorded."
 					expected.StatusDetail = &detail
 				}
 				expected.Version++

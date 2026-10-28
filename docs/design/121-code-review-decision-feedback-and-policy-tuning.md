@@ -302,6 +302,8 @@ If a started reassessment's review target is retired, its terminal status is
 empty, and `reassessment_session_id` continues to identify the retired attempt. A newer
 review does not implicitly resolve the objection or inherit its ownership.
 Captured-input replacement handoffs retain their existing ownership fences.
+If an admitted capture replacement stops before acquiring ownership, the
+reassessment remains failed rather than reporting ordinary supersession.
 Queued or running review metadata cannot terminalize a reassessment.
 
 The dispute text goes in as **untrusted evidence**, screened the same way PR

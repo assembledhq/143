@@ -31,9 +31,9 @@ func TestDisputeService_BuildReplyTerminalDetail(t *testing.T) {
 		completed bool
 	}{
 		{name: "stale with cleared status message", status: models.CodeReviewSessionStatusStale, completed: true,
-			expected: "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."},
+			expected: "The reassessment was superseded because the review target changed. The objection remains recorded."},
 		{name: "stale does not retain an earlier wait", status: models.CodeReviewSessionStatusStale, message: "Waiting for sandbox capacity.", completed: true,
-			expected: "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."},
+			expected: "The reassessment was superseded because the review target changed. The objection remains recorded."},
 		{name: "failed preserves actionable status", status: models.CodeReviewSessionStatusFailed, message: "  The provider is unavailable. Try again later.  ", completed: true,
 			expected: "The provider is unavailable. Try again later."},
 		{name: "failed without a public status", status: models.CodeReviewSessionStatusFailed, completed: true,

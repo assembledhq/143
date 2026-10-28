@@ -1169,7 +1169,7 @@ func codeReviewDisputeReviewTerminal(status models.CodeReviewSessionStatus) bool
 // outcome. FailureReason is diagnostic and must not flow into GitHub replies.
 func DisputeReassessmentDetail(metadata models.CodeReviewSessionMetadata) string {
 	if metadata.Status == models.CodeReviewSessionStatusStale {
-		return "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."
+		return "The reassessment was superseded because the review target changed. The objection remains recorded."
 	}
 	if detail := strings.TrimSpace(stringPtr(metadata.StatusMessage)); detail != "" {
 		return detail
@@ -1203,7 +1203,7 @@ func buildCodeReviewDisputeReply(dispute models.CodeReviewDispute, frontendURL s
 	case models.CodeReviewDisputeReassessmentFailed:
 		message = "The reassessment could not complete. The objection remains recorded and can be retried from 143."
 	case models.CodeReviewDisputeReassessmentSuperseded:
-		message = "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."
+		message = "The reassessment was superseded because the review target changed. The objection remains recorded."
 	}
 	if dispute.EscalatedAt != nil {
 		message = "This objection was sent to a policy owner for review."

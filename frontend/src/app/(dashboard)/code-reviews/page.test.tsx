@@ -1985,6 +1985,7 @@ describe("CodeReviewsPage", () => {
     expect(within(disputeSheet).getByText("Approved")).toBeInTheDocument();
     // The queue row behind the sheet tracks the same refresh.
     expect(within(disputeTable).getByText("Approved")).toBeInTheDocument();
+    expect(within(disputeTable).getByText("Decision changed")).toBeInTheDocument();
 
     await user.click(within(disputeSheet).getByRole("button", { name: "Uphold" }));
     await waitFor(() => expect(updateBody).toEqual({
@@ -2005,7 +2006,7 @@ describe("CodeReviewsPage", () => {
       author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
       trusted: true, source: "app_ui", body: "The reassessment never produced a result.",
       contested_reason_codes: [], intake_status: "triaged", routing: "reassess",
-      reassessment_status: "failed", adjudication_status: "pending",
+      reassessment_status: "failed", reassessment_flipped: true, reassessment_decision: "approved", adjudication_status: "pending",
       queue_signals: {}, queue_priority: 0,
       reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
     };
@@ -2019,6 +2020,8 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("tab", { name: "Disputes" }));
     const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
     expect(within(disputeTable).getByText("Failed")).toBeInTheDocument();
+    expect(within(disputeTable).queryByText("Decision changed")).not.toBeInTheDocument();
+    expect(within(disputeTable).queryByText("Approved")).not.toBeInTheDocument();
     expect(within(disputeTable).getByText("Evidence unavailable")).toBeInTheDocument();
     // Falls back to the reviewed commit when the PR context is missing.
     expect(within(disputeTable).getByRole("button", { name: `Review dispute on commit ${review.head_sha.slice(0, 7)}` })).toBeInTheDocument();
