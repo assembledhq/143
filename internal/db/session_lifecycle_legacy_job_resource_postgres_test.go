@@ -100,7 +100,9 @@ func runLifecycleConsumerLegacyJobHistoryWork(t *testing.T, pool *pgxpool.Pool, 
 	}
 	for _, phase := range phases {
 		if phase.vacuum {
-			predicateExec(t, pool, "VACUUM (ANALYZE) jobs")
+			// Default vacuum may skip contended pages; this owned fixture phase
+			// requires every page to be all-visible before measuring query work.
+			predicateExec(t, pool, "VACUUM (ANALYZE, DISABLE_PAGE_SKIPPING) jobs")
 		}
 		var allVisible, pages int
 		require.NoError(t, pool.QueryRow(context.Background(), "SELECT relallvisible,relpages FROM pg_class WHERE oid='jobs'::regclass").Scan(&allVisible, &pages), "observe the actual isolated heap visibility state before measuring planner work")

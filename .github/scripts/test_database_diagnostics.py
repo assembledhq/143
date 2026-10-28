@@ -3,6 +3,7 @@
 
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -27,6 +28,12 @@ name = Path(sys.argv[0]).name
 with (root / "calls.jsonl").open("a") as calls:
     calls.write(json.dumps([name, *sys.argv[1:]]) + "\n")
 if name == "go":
+    if "-list" in sys.argv:
+        print("\n".join([f"TestSynthetic{i}" for i in range(8)] + ["ok\texample/db\t0.01s"]))
+        sys.exit(0)
+    for arg in sys.argv:
+        if arg.startswith("-coverprofile="):
+            Path(arg.split("=", 1)[1]).write_text("mode: count\nexample/db.go:1.1,1.2 1 1\n")
     sys.stdout.write(os.environ["TEST_EVENT"])
     sys.stderr.write("synthetic non-JSON warning\n")
     sys.exit(int(os.environ["GO_STATUS"]))
@@ -69,6 +76,10 @@ def run_script(name):
 
 class DatabaseDiagnosticsTests(unittest.TestCase):
     def environment(self, root, **overrides):
+        scripts = root / ".github/scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        for name in ("run_go_test_shards.py", "merge_go_coverage.py"):
+            shutil.copyfile(Path(__file__).with_name(name), scripts / name)
         for name in ("go", "tee", "timeout", "docker"):
             path = root / name
             path.write_text(STUB)
@@ -83,7 +94,7 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
 
     def test_original_test_status_and_json_capture(self):
         suites = [
-            ("Run database tests", "ci-db-diagnostics", ["go", "test", "-json", "./internal/db", "-parallel=2", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-db.out", "-covermode=count", "-timeout=300s"]),
+            ("Run database tests", "ci-db-diagnostics", None),
             ("Run command tests", "ci-command-diagnostics", ["go", "test", "-json", "./cmd/...", "-p=1", "-parallel=2", "-count=1", "-timeout=300s"]),
         ]
         cases = [(suite, go, tee, expected) for suite in suites for go, tee, expected in [(0, 0, 0), (7, 0, 7), (0, 9, 9), (7, 9, 7)]]
@@ -97,14 +108,25 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
                 diagnostics = root / folder
-                self.assertEqual((diagnostics / "go-test.jsonl").read_text(), EVENT, "stderr must not corrupt per-test JSON")
-                self.assertEqual(json.loads((diagnostics / "go-test.jsonl").read_text())["Test"], "TestSynthetic")
-                self.assertEqual((diagnostics / "go-test.stderr.log").read_text(), "synthetic non-JSON warning\n")
+                expected_events = 4 if step == "Run database tests" else 1
+                self.assertEqual((diagnostics / "go-test.jsonl").read_text(), EVENT * expected_events, "stderr must not corrupt per-test JSON")
+                self.assertEqual([json.loads(line)["Test"] for line in (diagnostics / "go-test.jsonl").read_text().splitlines()], ["TestSynthetic"] * expected_events)
+                self.assertEqual((diagnostics / "go-test.stderr.log").read_text(), "synthetic non-JSON warning\n" * expected_events)
                 self.assertIn("synthetic non-JSON warning", result.stderr, "stderr must remain visible in CI")
                 self.assertEqual((diagnostics / "exit-status.txt").read_text(), f"go_test={go_status}\njson_capture={tee_status}\n")
                 calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
-                go = next(call for call in calls if call[0] == "go")
-                self.assertEqual(go, arguments, "diagnostics must preserve PR test coverage, budgets, and bounded fixture overlap")
+                go = [call for call in calls if call[0] == "go"]
+                if arguments is not None:
+                    self.assertEqual(go, [arguments], "diagnostics must preserve PR test coverage, budgets, and bounded fixture overlap")
+                else:
+                    self.assertEqual(go[0], ["go", "test", "-list", ".", "./internal/db"])
+                    self.assertEqual(len(go), 5, "discovery must be followed by all four shards even when one fails")
+                    for command in go[1:]:
+                        for required in ("-parallel=2", "-count=1", "-coverpkg=./internal/...", "-covermode=count", "-timeout=300s"):
+                            self.assertIn(required, command)
+                    manifest = json.loads((diagnostics / "shard-status.json").read_text())
+                    self.assertEqual([shard["exit_status"] for shard in manifest["shards"]], [go_status] * 4)
+                    self.assertEqual(sorted(name for shard in manifest["shards"] for name in shard["roots"]), [f"TestSynthetic{i}" for i in range(8)])
 
     def test_bounded_aggregate_only_postgres_snapshot(self):
         cases = [(scope, folder, status) for scope, folder in [("database", "ci-db-diagnostics"), ("command", "ci-command-diagnostics")] for status in (0, 1, 124)]

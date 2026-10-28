@@ -18,9 +18,9 @@ import (
 // classification is erased to make a later migration or test succeed.
 func TestCodeReviewDispatchUnresolvedStatusAllowancePostgres(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	t.Cleanup(cancel)
-	pool := testpostgres.NewPool(t, ctx, "../../migrations", 2)
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), time.Minute)
+	t.Cleanup(setupCancel)
+	pool := testpostgres.NewPool(t, setupCtx, "../../migrations", 2)
 	// This existing fixture assigns repository IDs with max()+1. Serialize only
 	// seeding; the actual status attempts use independent tenant rows/transactions.
 	var seedMu sync.Mutex
@@ -41,6 +41,9 @@ func TestCodeReviewDispatchUnresolvedStatusAllowancePostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			// Start the operation budget after this parallel leaf is scheduled.
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cancel()
 			org, in := func() (uuid.UUID, CodeReviewDispatchPreparation) {
 				seedMu.Lock()
 				defer seedMu.Unlock()

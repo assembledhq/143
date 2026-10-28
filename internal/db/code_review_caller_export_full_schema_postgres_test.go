@@ -106,7 +106,7 @@ VALUES($1,$2,$3,$4,$5,$6,'synthetic-base','synthetic-head','slash_command','comp
 				"dispatch_version", "dispatch_key", "dispatch_input", "dispatch_digest", "dispatch_thread_id", "dispatch_state", "dispatch_attempt_id", "dispatch_attempt_seq", "dispatch_attempted_at", "dispatch_due_at", "dispatch_observe_deadline", "dispatch_attention_at", "dispatch_observed_at", "dispatch_message_id", "dispatch_resolution", "dispatch_detail", "dispatch_writer_seq", "dispatch_updated_at", "dispatch_wake",
 			}
 			var populated []string
-			err = pool.QueryRow(ctx, `SELECT array_agg(field ORDER BY field) FROM unnest($3::text[]) AS fields(field)
+			err = pool.QueryRow(ctx, `SELECT array_agg(field ORDER BY field COLLATE "C") FROM unnest($3::text[]) AS fields(field)
 WHERE EXISTS (SELECT 1 FROM code_review_agent_results ar WHERE ar.org_id=$1 AND ar.session_id=$2
 AND to_jsonb(ar)->field IS NOT NULL AND to_jsonb(ar)->field <> 'null'::jsonb)`, f.org, f.session, privateDispatchFields).Scan(&populated)
 			require.NoError(t, err, "positively inspect private reviewer values committed through real constraints")
