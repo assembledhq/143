@@ -39,7 +39,7 @@ const repairLoopStartupWakesSQL = `WITH due AS MATERIALIZED (
 ), wakes AS (SELECT DISTINCT ON(org_id,thread_id) org_id,thread_id FROM due ORDER BY org_id,thread_id)
  INSERT INTO jobs(org_id,queue,job_type,payload,priority,dedupe_key,max_attempts)
  SELECT org_id,'agent','reconcile_session_review_loop',jsonb_build_object('org_id',org_id,'limit',50),5,
- 'reconcile_session_review_loop:'||thread_id::text,8 FROM wakes ON CONFLICT DO NOTHING`
+ 'reconcile_session_review_loop:'||thread_id::text,8 FROM wakes ON CONFLICT DO NOTHING` // #nosec G101 -- Fixed job-repair SQL and dedupe keys, not credentials.
 
 const repairPreparedStartWakesSQL = `WITH due AS MATERIALIZED (
  SELECT s.org_id,s.thread_id FROM review_loop_start_intents s

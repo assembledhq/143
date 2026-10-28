@@ -3,6 +3,7 @@ package thread
 import (
 	"context"
 	"errors"
+	"math"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
@@ -25,13 +26,20 @@ func (s *Service) validateLegacyCallerStamp(input SendMessageInput) error {
 // The caller already checked the opaque proof against the complete effective
 // input. This maps its immutable descriptor to storage without minting an
 // identity, reading current owner status, or adding admission authority.
-func legacyCallerStampInput(input SendMessageInput, messageID int64) db.CallerSendStampInput {
+func legacyCallerStampInput(input SendMessageInput, messageID int64) (db.CallerSendStampInput, error) {
 	proof := input.CallerCommand
+	if proof == nil {
+		return db.CallerSendStampInput{}, &CallerCommandMismatchError{}
+	}
+	version := proof.Version()
+	if version < math.MinInt16 || version > math.MaxInt16 {
+		return db.CallerSendStampInput{}, &CallerCommandMismatchError{}
+	}
 	return db.CallerSendStampInput{
 		Scope: db.CallerSendStampScope{SessionID: input.SessionID, ThreadID: input.ThreadID,
 			ClientMessageID: input.ClientMessageID, Purpose: db.CallerSendStampPurpose(proof.Purpose()), OwnerID: proof.OwnerID()},
-		Version: int16(proof.Version()), Digest: proof.Digest(), MessageID: messageID,
-	}
+		Version: int16(version), Digest: proof.Digest(), MessageID: messageID,
+	}, nil
 }
 
 func legacyCallerMessageScopeMatches(input SendMessageInput, message *models.SessionMessage) bool {
@@ -55,7 +63,11 @@ func recordLegacyCallerStampInTx(ctx context.Context, tx pgx.Tx, input SendMessa
 	if !legacyCallerMessageScopeMatches(input, message) || !legacyCallerInboxScopeMatches(input, inbox, message.ID) {
 		return &CallerCommandMismatchError{}
 	}
-	_, err := db.RecordCallerSendStampInTx(ctx, input.OrgID, tx, legacyCallerStampInput(input, message.ID))
+	stamp, err := legacyCallerStampInput(input, message.ID)
+	if err != nil {
+		return err
+	}
+	_, err = db.RecordCallerSendStampInTx(ctx, input.OrgID, tx, stamp)
 	return err
 }
 
@@ -70,7 +82,10 @@ func verifyLegacyCallerStampReplayInTx(ctx context.Context, tx pgx.Tx, input Sen
 	if !legacyCallerMessageScopeMatches(input, message) {
 		return &CallerCommandMismatchError{}
 	}
-	expected := legacyCallerStampInput(input, message.ID)
+	expected, err := legacyCallerStampInput(input, message.ID)
+	if err != nil {
+		return err
+	}
 	stamp, found, err := db.ReadCallerSendStampInTx(ctx, input.OrgID, tx, expected.Scope)
 	if err != nil {
 		if errors.Is(err, db.ErrCallerSendStampMismatch) || errors.Is(err, db.ErrCallerSendStampInvalid) {
