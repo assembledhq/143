@@ -1844,6 +1844,8 @@ describe("CodeReviewsPage", () => {
     await user.click(within(disputeRow as HTMLTableRowElement).getByRole("button", { name: "Review dispute on acme/api #428" }));
     const disputeSheet = await screen.findByRole("dialog", { name: "Review dispute" });
     expect(within(disputeSheet).getByText("Human reviewer disagreed")).toBeInTheDocument();
+    expect(within(disputeSheet).queryByRole("link", { name: /View reassessment/ })).not.toBeInTheDocument();
+    expect(within(disputeSheet).queryByRole("heading", { name: "Status detail" })).not.toBeInTheDocument();
     expect(within(disputeSheet).getByText("Same result after reassessment")).toBeInTheDocument();
     expect(within(disputeSheet).getByText("Filed by another contributor")).toBeInTheDocument();
     expect(within(disputeSheet).getByText("3 similar objections")).toBeInTheDocument();
@@ -2021,6 +2023,74 @@ describe("CodeReviewsPage", () => {
     // Falls back to the reviewed commit when the PR context is missing.
     expect(within(disputeTable).getByRole("button", { name: `Review dispute on commit ${review.head_sha.slice(0, 7)}` })).toBeInTheDocument();
     expect(within(disputeTable).getByText("Asks not to approve")).toBeInTheDocument();
+  });
+
+  it.each<{ stage: string; state: Partial<CodeReviewDispute>; detail: string }>([
+    {
+      stage: "intake failure",
+      state: { intake_status: "failed" },
+      detail: "The objection could not be classified.",
+    },
+    {
+      stage: "reassessment failure",
+      state: { reassessment_status: "failed", reassessment_session_id: "session-reassessment" },
+      detail: "The reassessment could not load the latest revision.",
+    },
+    {
+      stage: "reply failure",
+      state: { reassessment_status: "completed", reassessment_decision: "approved", reassessment_session_id: "session-reassessment", reply_status: "failed" },
+      detail: "GitHub reply delivery exhausted its attempts.",
+    },
+    {
+      stage: "superseded reassessment",
+      state: { reassessment_status: "superseded", reassessment_session_id: "session-reassessment" },
+      detail: "The review target changed before reassessment completed.",
+    },
+  ])("shows $stage details without confusing the original review and reassessment", async ({ state, detail }) => {
+    const user = userEvent.setup();
+    const dispute: CodeReviewDispute = {
+      id: "dispute-diagnostic-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "Please reconsider the original decision.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "reassess",
+      reassessment_status: "not_requested", adjudication_status: "pending",
+      queue_signals: {}, queue_priority: 0, reply_status: "not_applicable", status_detail: detail,
+      version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+      ...state,
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [dispute], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
+    expect(within(disputeTable).queryByText("Evidence unavailable")).not.toBeInTheDocument();
+    expect(within(disputeTable).queryByText(detail)).not.toBeInTheDocument();
+    if (dispute.reassessment_status === "superseded") {
+      expect(within(disputeTable).getByText("Superseded")).toBeInTheDocument();
+      expect(within(disputeTable).getByText("Review target changed")).toBeInTheDocument();
+      expect(within(disputeTable).queryByText("Failed")).not.toBeInTheDocument();
+    }
+
+    await user.click(within(disputeTable).getByRole("button", { name: `Review dispute on commit ${review.head_sha.slice(0, 7)}` }));
+    const disputeSheet = await screen.findByRole("dialog", { name: "Review dispute" });
+    expect(within(disputeSheet).getByRole("heading", { name: "Status detail" })).toBeInTheDocument();
+    expect(within(disputeSheet).getByText(detail)).toBeInTheDocument();
+    const evidenceLink = within(disputeSheet).getByRole("link", { name: /View evidence/ });
+    expect(evidenceLink).toHaveAttribute("href", "/code-reviews?evidence=session-1");
+    expect(evidenceLink).toHaveAttribute("target", "_blank");
+    if (dispute.reassessment_session_id) {
+      const reassessmentLink = within(disputeSheet).getByRole("link", { name: /View reassessment/ });
+      expect(reassessmentLink).toHaveAttribute("href", `/sessions/${dispute.reassessment_session_id}`);
+      expect(reassessmentLink).toHaveAttribute("target", "_blank");
+    } else {
+      expect(within(disputeSheet).queryByRole("link", { name: /View reassessment/ })).not.toBeInTheDocument();
+    }
   });
 
   it("closes the dispute sheet when the dispute leaves the pending queue", async () => {

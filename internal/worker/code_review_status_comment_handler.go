@@ -339,11 +339,14 @@ func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, ser
 				Str("session_id", job.SessionID.String()).
 				Str("dispute_id", job.TriggeringDisputeID.String()).
 				Msg("failed to load terminal reassessment for dispute reconciliation")
+		} else if !codeReviewMetadataTerminal(metadata.Status) {
+			logger.Debug().Str("session_id", job.SessionID.String()).
+				Msg("skipping dispute completion for a nonterminal review")
 		} else if deferred, handoffErr := codeReviewCapturedDisputeHandoff(ctx, stores, job.OrgID, *job.TriggeringDisputeID, job.SessionID, metadata.Status); handoffErr != nil {
 			logger.Warn().Err(handoffErr).Str("session_id", job.SessionID.String()).
 				Msg("failed to check captured-identity reassessment handoff")
 		} else if !deferred {
-			detail := strings.TrimSpace(stringPtrValue(metadata.StatusMessage))
+			detail := codereviewsvc.DisputeReassessmentDetail(metadata)
 			transitioned, completeErr := stores.CodeReviewDisputes.CompleteReassessmentOnce(ctx, job.OrgID, *job.TriggeringDisputeID, job.SessionID, metadata.Status, metadata.Decision, detail)
 			if completeErr != nil {
 				logger.Warn().Err(completeErr).

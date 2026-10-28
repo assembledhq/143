@@ -4460,6 +4460,17 @@ function CodeReviewDisputeQueue({
                   </div>
                 </SectionGroup>
 
+                {selectedDispute.status_detail && (
+                  selectedDispute.intake_status === "failed"
+                  || selectedDispute.reassessment_status === "failed"
+                  || selectedDispute.reassessment_status === "superseded"
+                  || selectedDispute.reply_status === "failed"
+                ) ? (
+                  <SectionGroup title="Status detail" headingLevel={3}>
+                    <p className="whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">{selectedDispute.status_detail}</p>
+                  </SectionGroup>
+                ) : null}
+
                 <SectionGroup
                   title="Queue context"
                   description="Signals explain this dispute's position in the queue; they do not determine the outcome."
@@ -4522,11 +4533,19 @@ function CodeReviewDisputeReassessment({ dispute }: { dispute: CodeReviewDispute
   // evidence that was meant to be there, so it cannot read as quietly as the
   // deliberate "Not run".
   const failed = dispute.reassessment_status === "failed";
+  const superseded = dispute.reassessment_status === "superseded";
   const attention = dispute.reassessment_flipped || failed;
+  const detail = dispute.reassessment_flipped
+    ? "Decision changed"
+    : superseded
+      ? "Review target changed"
+      : failed && !dispute.status_detail
+        ? "Evidence unavailable"
+        : undefined;
   return (
     <StatusLabel
       label={label}
-      detail={dispute.reassessment_flipped ? "Decision changed" : failed ? "Evidence unavailable" : undefined}
+      detail={detail}
       tone={attention ? "warning" : "neutral"}
       indicator={attention ? "dot" : "none"}
     />
@@ -4585,6 +4604,15 @@ function CodeReviewDisputeContextLinks({ dispute }: { dispute: CodeReviewDispute
           <span className="sr-only">(opens in a new tab)</span>
         </Link>
       </Button>
+      {dispute.reassessment_session_id ? (
+        <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
+          <Link href={`/sessions/${dispute.reassessment_session_id}`} target="_blank" rel="noreferrer">
+            View reassessment
+            <SquareArrowOutUpRight aria-hidden="true" className="size-3" />
+            <span className="sr-only">(opens in a new tab)</span>
+          </Link>
+        </Button>
+      ) : null}
     </div>
   );
 }

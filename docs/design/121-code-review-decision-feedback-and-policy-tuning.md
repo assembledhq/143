@@ -297,6 +297,13 @@ an in-flight review and refuses to publish a stale decision; the ordinary
 head-change event then requests a review of the newer revision. This keeps the
 approval safety invariant while making reconsideration answer the current code.
 
+If a started reassessment's review target is retired, its terminal status is
+`superseded`, not `failed` or `completed`. Its decision and flip fields remain
+empty, and `reassessment_session_id` continues to identify the retired attempt. A newer
+review does not implicitly resolve the objection or inherit its ownership.
+Captured-input replacement handoffs retain their existing ownership fences.
+Queued or running review metadata cannot terminalize a reassessment.
+
 The dispute text goes in as **untrusted evidence**, screened the same way PR
 descriptions and diffs already are. It's a claim to check against the code, not
 an instruction. "Approve this" is prompt injection, not information.
@@ -556,6 +563,7 @@ listed.
 | `routing` | text | `reassess` \| `policy_signal_only` \| `answer_only` \| `not_a_dispute` \| `review_request` |
 | `intake_status`, `intake_confidence` | text | `pending` \| `triaged` \| `discarded` \| `failed`; confidence is nullable until triage |
 | `reassessment_session_id`, `reassessment_decision`, `reassessment_flipped` | uuid / text / bool | Rerun linkage |
+| `reassessment_status` | text | `not_requested` \| `queued` \| `running` \| `completed` \| `deduped` \| `failed` \| `superseded`. Superseded identifies a retired owner, with no decision or flip |
 | `semantic_input_hash_at_filing`, `semantic_input_hash_at_rerun` | text | Both hashes, so a reader can tell a flip caused by changed input from an unstable judge. Makes the "exclude flips as evidence" rule auditable rather than asserted |
 | `adjudication_status` | text | NULL when not adjudication-eligible; otherwise `pending` \| `upheld` \| `rejected` \| `expired` \| `needs_context`. `upheld` is the only status eligible to draft a proposal when Phase 2 is enabled |
 | `adjudicated_by_user_id`, `adjudicated_at`, `adjudication_note` | uuid / timestamptz / text | Who decided, and why |

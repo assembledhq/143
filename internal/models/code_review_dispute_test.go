@@ -55,6 +55,7 @@ func TestCodeReviewDisputeEnumsValidate(t *testing.T) {
 		{name: "valid adjudication status", validate: CodeReviewDisputeAdjudicationUpheld.Validate},
 		{name: "invalid adjudication status", validate: CodeReviewDisputeAdjudicationStatus("approved").Validate, expectErr: true},
 		{name: "valid reassessment status", validate: CodeReviewDisputeReassessmentRunning.Validate},
+		{name: "superseded reassessment status", validate: CodeReviewDisputeReassessmentSuperseded.Validate},
 		{name: "invalid reassessment status", validate: CodeReviewDisputeReassessmentStatus("started").Validate, expectErr: true},
 		{name: "valid reply status", validate: CodeReviewDisputeReplyPublished.Validate},
 		{name: "invalid reply status", validate: CodeReviewDisputeReplyStatus("sent").Validate, expectErr: true},

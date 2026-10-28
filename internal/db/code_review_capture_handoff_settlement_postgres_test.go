@@ -300,8 +300,8 @@ func TestCaptureHandoffProtectionRequiresLiveWorkPostgres(t *testing.T) {
 			if tt.protected {
 				require.Equal(t, before, after, "live handoff protection must preserve every reassessment field")
 			} else {
-				require.Equal(t, models.CodeReviewDisputeReassessmentFailed, after.ReassessmentStatus, "retired handoff protection must permit the matching failure settlement")
-				require.Equal(t, &f.sourceSessionID, after.ReassessmentSessionID, "failure settlement must retain its exact source owner")
+				require.Equal(t, models.CodeReviewDisputeReassessmentSuperseded, after.ReassessmentStatus, "retired handoff protection must permit matching stale-owner settlement")
+				require.Equal(t, &f.sourceSessionID, after.ReassessmentSessionID, "stale-owner settlement must retain its exact source owner")
 			}
 		})
 	}

@@ -442,6 +442,49 @@ func TestCodeReviewDisputeStore_CompleteReassessmentOnceReportsTransition(t *tes
 	require.NoError(t, mock.ExpectationsWereMet(), "all database expectations should be met")
 }
 
+func TestCodeReviewDisputeStore_CompleteReassessmentOnceTerminalMapping(t *testing.T) {
+	t.Parallel()
+
+	approved := models.CodeReviewDecisionApproved
+	tests := []struct {
+		name             string
+		status           models.CodeReviewSessionStatus
+		decision         *models.CodeReviewDecision
+		expectedStatus   models.CodeReviewDisputeReassessmentStatus
+		expectedDecision *models.CodeReviewDecision
+		expectedDetail   string
+	}{
+		{name: "completed verdict", status: models.CodeReviewSessionStatusCompleted, decision: &approved, expectedStatus: models.CodeReviewDisputeReassessmentCompleted, expectedDecision: &approved},
+		{name: "completed without verdict remains failed", status: models.CodeReviewSessionStatusCompleted, expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "stale owner is superseded without a verdict", status: models.CodeReviewSessionStatusStale, decision: &approved, expectedStatus: models.CodeReviewDisputeReassessmentSuperseded, expectedDetail: "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."},
+		{name: "failed owner cannot project an old verdict", status: models.CodeReviewSessionStatusFailed, decision: &approved, expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "cancelled owner cannot project an old verdict", status: models.CodeReviewSessionStatusCancelled, decision: &approved, expectedStatus: models.CodeReviewDisputeReassessmentFailed},
+		{name: "queued callback preserves active work", status: models.CodeReviewSessionStatusQueued},
+		{name: "running callback preserves active work", status: models.CodeReviewSessionStatusRunning},
+		{name: "unknown callback preserves active work", status: models.CodeReviewSessionStatus("unknown")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create the independent database mock")
+			defer mock.Close()
+			orgID, disputeID, sessionID := uuid.New(), uuid.New(), uuid.New()
+			if tt.expectedStatus != "" {
+				mock.ExpectExec("UPDATE code_review_decision_disputes").WithArgs(pgx.NamedArgs{
+					"org_id": orgID, "id": disputeID, "session_id": sessionID,
+					"decision": tt.expectedDecision, "reassessment_status": tt.expectedStatus,
+					"detail": tt.expectedDetail, "session_status": tt.status,
+				}).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+			}
+			transitioned, err := NewCodeReviewDisputeStore(mock).CompleteReassessmentOnce(context.Background(), orgID, disputeID, sessionID, tt.status, tt.decision, "  ")
+			require.NoError(t, err, "terminal mapping should accept or safely ignore the callback")
+			require.Equal(t, tt.expectedStatus != "", transitioned, "only a terminal review may settle reassessment state")
+			require.NoError(t, mock.ExpectationsWereMet(), "nonterminal callbacks must perform no database mutation")
+		})
+	}
+}
+
 func TestCodeReviewDisputeStore_AdjudicateDemotesUntrustedPendingItem(t *testing.T) {
 	t.Parallel()
 

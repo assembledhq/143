@@ -46,7 +46,7 @@ func TestCapturedIdentityDisputeHandoffPostgres(t *testing.T) {
 		{name: "legacy source terminal sync precedes replacement dispatch"},
 		{name: "normal parent cancellation still fails reassessment", cancel: true},
 		{name: "unbound reassessment accepts its owning completion", cancel: true, nullOwner: true},
-		{name: "normal stale failure still settles owning reassessment", normalStale: true},
+		{name: "ordinary stale owner settles as superseded", normalStale: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,7 +79,9 @@ func TestCapturedIdentityDisputeHandoffPostgres(t *testing.T) {
 				enqueueCodeReviewStatusCommentSync(ctx, f.stores, services, zerolog.Nop(), f.job, "terminal")
 				dispute, err := f.stores.CodeReviewDisputes.GetByID(ctx, f.job.OrgID, disputeID)
 				require.NoError(t, err, "read normal stale reassessment settlement")
-				require.Equal(t, models.CodeReviewDisputeReassessmentFailed, dispute.ReassessmentStatus, "ordinary stale failures must still fail the owning reassessment")
+				require.Equal(t, models.CodeReviewDisputeReassessmentSuperseded, dispute.ReassessmentStatus, "an ordinary stale owner should supersede its reassessment without claiming a new verdict")
+				detail := "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."
+				require.Equal(t, &detail, dispute.StatusDetail, "the worker must retain a safe explanation for stale reassessment retirement")
 				return
 			}
 			if tt.cancel {

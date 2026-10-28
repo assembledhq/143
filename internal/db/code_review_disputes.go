@@ -957,8 +957,25 @@ func (s *CodeReviewDisputeStore) IsCapturedIdentityReassessmentSource(ctx contex
 
 func (s *CodeReviewDisputeStore) CompleteReassessmentOnce(ctx context.Context, orgID, disputeID, sessionID uuid.UUID, status models.CodeReviewSessionStatus, decision *models.CodeReviewDecision, detail string) (bool, error) {
 	reassessmentStatus := models.CodeReviewDisputeReassessmentFailed
-	if status == models.CodeReviewSessionStatusCompleted && decision != nil {
-		reassessmentStatus = models.CodeReviewDisputeReassessmentCompleted
+	var completedDecision *models.CodeReviewDecision
+	switch status {
+	case models.CodeReviewSessionStatusCompleted:
+		if decision != nil {
+			reassessmentStatus = models.CodeReviewDisputeReassessmentCompleted
+			completedDecision = decision
+		}
+	case models.CodeReviewSessionStatusStale:
+		reassessmentStatus = models.CodeReviewDisputeReassessmentSuperseded
+		if strings.TrimSpace(detail) == "" {
+			detail = "The reassessment was superseded because the review target changed. The objection remains recorded for a policy owner."
+		}
+	case models.CodeReviewSessionStatusFailed, models.CodeReviewSessionStatusCancelled:
+		// A stopped owner has no completed reassessment verdict, even when
+		// metadata retains an earlier published decision for provenance.
+	default:
+		// Terminal callbacks can race newer lifecycle state. Do not settle
+		// active work just because a caller requested terminal publication.
+		return false, nil
 	}
 	result, err := s.db.Exec(ctx, `UPDATE code_review_decision_disputes
 		SET reassessment_session_id = @session_id, reassessment_decision = @decision,
@@ -970,7 +987,7 @@ func (s *CodeReviewDisputeStore) CompleteReassessmentOnce(ctx context.Context, o
 		  AND reassessment_status IN ('queued', 'running')
 		  AND (reassessment_session_id IS NULL OR reassessment_session_id = @session_id)
 		  AND (@session_status::text NOT IN ('stale', 'failed') OR NOT (`+codeReviewDisputeCaptureHandoffSQL+`))`, pgx.NamedArgs{
-		"org_id": orgID, "id": disputeID, "session_id": sessionID, "decision": decision,
+		"org_id": orgID, "id": disputeID, "session_id": sessionID, "decision": completedDecision,
 		"reassessment_status": reassessmentStatus, "detail": strings.TrimSpace(detail), "session_status": status,
 	})
 	if err != nil {
