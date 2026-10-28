@@ -261,16 +261,18 @@ jobs:
           package_timeout=300s
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             mode=atomic
-            race=(-race)
+            race=(--race)
             package_timeout=360s
           fi
           diagnostics="${RUNNER_TEMP:?}/ci-db-diagnostics"
           mkdir -p "$diagnostics"
+          # Partition root tests so suite growth cannot exhaust one package budget.
+          # Every root (including fuzz seeds and examples) runs in exactly one shard.
           # Keep stderr separate so compiler/Redis warnings cannot corrupt JSONL.
           # Disable errexit only while copying both pipeline statuses immediately.
           set +e
-          go test -json ./internal/db -parallel=2 -coverpkg=./internal/... -coverprofile=coverage-unit-db.out \
-            -covermode="$mode" "${race[@]}" -timeout="$package_timeout" \
+          python3 -B .github/scripts/run_go_test_shards.py --shards=4 --diagnostics="$diagnostics" \
+            --coverprofile=coverage-unit-db.out --covermode="$mode" --timeout="$package_timeout" "${race[@]}" \
             2>"$diagnostics/go-test.stderr.log" | tee "$diagnostics/go-test.jsonl"
           statuses=("${PIPESTATUS[@]}")
           set -e

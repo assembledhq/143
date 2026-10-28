@@ -24,9 +24,10 @@ func TestCIUnitPartitionsAndCoverage(t *testing.T) {
 	var workflow struct {
 		Jobs map[string]struct {
 			Steps []struct {
-				Name string `yaml:"name"`
-				Run  string `yaml:"run"`
-				With struct {
+				Name           string `yaml:"name"`
+				Run            string `yaml:"run"`
+				TimeoutMinutes int    `yaml:"timeout-minutes"`
+				With           struct {
 					Path string `yaml:"path"`
 				} `yaml:"with"`
 			} `yaml:"steps"`
@@ -35,12 +36,14 @@ func TestCIUnitPartitionsAndCoverage(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal(raw, &workflow), "CI workflow must remain valid YAML")
 	steps := make(map[string]string)
 	stepIndexes := make(map[string]int)
+	stepTimeouts := make(map[string]int)
 	var coverageArtifacts string
 	for i, step := range workflow.Jobs["backend-test"].Steps {
 		if step.Run != "" {
 			require.NotContains(t, steps, step.Name, "test steps must have unambiguous names")
 			steps[step.Name] = step.Run
 			stepIndexes[step.Name] = i
+			stepTimeouts[step.Name] = step.TimeoutMinutes
 		}
 		if step.Name == "Upload coverage report" {
 			coverageArtifacts = step.With.Path
@@ -59,12 +62,15 @@ func TestCIUnitPartitionsAndCoverage(t *testing.T) {
 	for i := 1; i < len(unitSteps); i++ {
 		require.Less(t, stepIndexes[unitSteps[i-1]], stepIndexes[unitSteps[i]], "unit partitions must finish before their shared coverage merge")
 	}
+	require.Equal(t, 10, stepTimeouts["Run database tests"], "sharding must retain the existing aggregate database step budget")
 	require.Less(t, stepIndexes["Combine backend unit coverage"], stepIndexes["Combine backend coverage"], "final coverage must consume the completed unit merge")
 	for _, profile := range []string{"coverage-unit-other.out", "coverage-unit-db.out", "coverage-unit-worker.out", "coverage-unit-agent.out"} {
 		require.Contains(t, strings.Fields(coverageArtifacts), profile, "each unit partition must retain its coverage evidence")
 	}
 	merger, err := os.ReadFile("../.github/scripts/merge_go_coverage.py")
 	require.NoError(t, err, "test must use the actual coverage merger")
+	shardRunner, err := os.ReadFile("../.github/scripts/run_go_test_shards.py")
+	require.NoError(t, err, "test must exercise the actual database root-discovery and shard runner")
 	python, err := exec.LookPath("python3")
 	require.NoError(t, err, "coverage merging requires Python like the CI runner")
 
@@ -86,12 +92,15 @@ func TestCIUnitPartitionsAndCoverage(t *testing.T) {
 				require.NoError(t, os.MkdirAll(path, 0o755), "each parallel case must have isolated fixture commands")
 			}
 			require.NoError(t, os.WriteFile(filepath.Join(scripts, "merge_go_coverage.py"), merger, 0o600), "fixture must execute the real merger without accessing the repository")
+			require.NoError(t, os.WriteFile(filepath.Join(scripts, "run_go_test_shards.py"), shardRunner, 0o600), "fixture must execute the real shard runner without accessing the repository")
 			fakeGo := fmt.Sprintf(`#!%s
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
+roots = ["ExampleSynthetic", "FuzzSynthetic", "TestAlpha", "TestAlphaLonger", "TestBravo", "TestCharlie", "TestDelta", "TestEcho"]
 args = sys.argv[1:]
 with open(os.environ["MOCK_GO_LOG"], "a") as log:
     log.write(json.dumps(args) + "\n")
@@ -103,10 +112,20 @@ if args == ["list", "./internal/..."]:
         "github.com/assembledhq/143/internal/db",
         "github.com/assembledhq/143/internal/services/preview",
     ]))
+elif args[:4] == ["test", "-list", ".", "./internal/db"]:
+    print("\n".join(roots + ["BenchmarkIgnored", "ok\tgithub.com/assembledhq/143/internal/db\t0.01s"]))
 elif args and args[0] == "test":
     profile = next(a.split("=", 1)[1] for a in args if a.startswith("-coverprofile="))
     mode = next(a.split("=", 1)[1] for a in args if a.startswith("-covermode="))
-    suite = {"coverage-unit-other.out": "other", "coverage-unit-db.out": "db", "coverage-unit-worker.out": "worker", "coverage-unit-agent.out": "agent"}[profile]
+    if Path(profile).name.startswith("coverage-shard-"):
+        suite = "db"
+        pattern = args[args.index("-run") + 1]
+        selected = [name for name in roots if re.fullmatch(pattern, name)]
+        assert len(selected) == 2, "each database invocation must select a nonempty balanced root shard"
+        for name in selected:
+            print(json.dumps({"Action": "pass", "Package": "example/db", "Test": name}))
+    else:
+        suite = {"coverage-unit-other.out": "other", "coverage-unit-worker.out": "worker", "coverage-unit-agent.out": "agent"}[profile]
     Path(profile).write_text("mode: " + mode + "\nexample/" + suite + ".go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 1\n")
 elif args == ["tool", "cover", "-func=coverage.out"]:
     assert Path("coverage.out").is_file()
@@ -118,10 +137,11 @@ else:
 			// when the developer's Python lives outside the system PATH.
 			require.NoError(t, os.Symlink(python, filepath.Join(bin, "python3")), "fixture must expose the CI coverage interpreter")
 			logPath := filepath.Join(directory, "go.jsonl")
+			diagnosticsRoot := t.TempDir()
 			env := []string{
 				"PATH=" + bin + ":/usr/bin:/bin",
 				"HOME=" + directory,
-				"RUNNER_TEMP=" + t.TempDir(),
+				"RUNNER_TEMP=" + diagnosticsRoot,
 				"GITHUB_EVENT_NAME=" + tt.event,
 				"MOCK_GO_LOG=" + logPath,
 				"PYTHONDONTWRITEBYTECODE=1",
@@ -140,7 +160,7 @@ else:
 			}
 			unitCoverage, err := os.ReadFile(filepath.Join(directory, "coverage-unit.out"))
 			require.NoError(t, err, "unit partition merge must produce coverage")
-			require.Equal(t, fmt.Sprintf("mode: %s\nexample/agent.go:1.1,2.1 1 1\nexample/db.go:1.1,2.1 1 1\nexample/other.go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 4\nexample/worker.go:1.1,2.1 1 1\n", tt.mode), string(unitCoverage), "unit coverage must include all four suites without duplicating the statement denominator")
+			require.Equal(t, fmt.Sprintf("mode: %s\nexample/agent.go:1.1,2.1 1 1\nexample/db.go:1.1,2.1 1 4\nexample/other.go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 7\nexample/worker.go:1.1,2.1 1 1\n", tt.mode), string(unitCoverage), "unit coverage must include all four suites without duplicating the statement denominator")
 
 			// Exercise the real browser/integration mode branches without
 			// starting Chrome or Postgres, then feed their profiles through the
@@ -157,7 +177,7 @@ else:
 			run(steps["Combine backend coverage"])
 			finalCoverage, err := os.ReadFile(filepath.Join(directory, "coverage.out"))
 			require.NoError(t, err, "final coverage merge must consume the unit partition output")
-			require.Equal(t, fmt.Sprintf("mode: %s\nexample/agent.go:1.1,2.1 1 1\nexample/browser.go:1.1,2.1 1 1\nexample/db.go:1.1,2.1 1 1\nexample/integration.go:1.1,2.1 1 1\nexample/other.go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 6\nexample/worker.go:1.1,2.1 1 1\n", tt.mode), string(finalCoverage), "final coverage must retain database and worker evidence and agree with browser and integration modes")
+			require.Equal(t, fmt.Sprintf("mode: %s\nexample/agent.go:1.1,2.1 1 1\nexample/browser.go:1.1,2.1 1 1\nexample/db.go:1.1,2.1 1 4\nexample/integration.go:1.1,2.1 1 1\nexample/other.go:1.1,2.1 1 1\nexample/shared.go:1.1,2.1 1 9\nexample/worker.go:1.1,2.1 1 1\n", tt.mode), string(finalCoverage), "final coverage must retain database and worker evidence and agree with browser and integration modes")
 
 			logged, err := os.ReadFile(logPath)
 			require.NoError(t, err, "fixture must retain every actual Go invocation")
@@ -172,25 +192,54 @@ else:
 			otherArgs = append(otherArgs, "-timeout="+tt.otherTimeout)
 			boundedArgs := func(pkg, profile string) []string {
 				args := []string{"test"}
-				if pkg == "./internal/db" || pkg == "./internal/worker" {
+				if pkg == "./internal/worker" {
 					args = append(args, "-json")
 				}
 				args = append(args, pkg)
-				if pkg == "./internal/db" {
-					args = append(args, "-parallel=2")
-				}
 				args = append(args, "-coverpkg=./internal/...", "-coverprofile="+profile, "-covermode="+tt.mode)
 				args = append(args, tt.race...)
 				return append(args, "-timeout="+tt.boundedTimeout)
 			}
-			require.Equal(t, [][]string{
-				{"list", "./internal/..."},
-				otherArgs,
-				boundedArgs("./internal/db", "coverage-unit-db.out"),
+			discoveryArgs := append([]string{"test", "-list", ".", "./internal/db"}, tt.race...)
+			expectedCalls := [][]string{{"list", "./internal/..."}, otherArgs, discoveryArgs}
+			expectedRoots := [][]string{
+				{"ExampleSynthetic", "TestBravo"},
+				{"FuzzSynthetic", "TestCharlie"},
+				{"TestAlpha", "TestDelta"},
+				{"TestAlphaLonger", "TestEcho"},
+			}
+			for index, roots := range expectedRoots {
+				profile := filepath.Join(diagnosticsRoot, "ci-db-diagnostics", fmt.Sprintf("coverage-shard-%d.out", index+1))
+				args := []string{"test", "-json", "./internal/db", "-parallel=2", "-count=1", "-coverpkg=./internal/...",
+					"-coverprofile=" + profile, "-covermode=" + tt.mode, "-timeout=" + tt.boundedTimeout,
+					"-run", "^(?:" + strings.Join(roots, "|") + ")$"}
+				expectedCalls = append(expectedCalls, append(args, tt.race...))
+			}
+			expectedCalls = append(expectedCalls,
 				boundedArgs("./internal/worker", "coverage-unit-worker.out"),
 				boundedArgs("./internal/services/agent", "coverage-unit-agent.out"),
-				{"tool", "cover", "-func=coverage.out"},
-			}, calls, "database and worker must each run exactly once with bounded budgets while ordinary packages, agent coverage, and race settings remain intact")
+				[]string{"tool", "cover", "-func=coverage.out"})
+			require.Equal(t, expectedCalls, calls, "database roots must run in four fresh bounded shards while ordinary packages, worker, agent coverage, and race settings remain intact")
+			manifestRaw, err := os.ReadFile(filepath.Join(diagnosticsRoot, "ci-db-diagnostics", "shard-status.json"))
+			require.NoError(t, err, "the actual shard runner must retain complete per-shard execution evidence")
+			var manifest struct {
+				CoverageStatus int `json:"coverage_status"`
+				Shards         []struct {
+					Roots      []string `json:"roots"`
+					RootCount  int      `json:"root_count"`
+					ExitStatus *int     `json:"exit_status"`
+				} `json:"shards"`
+			}
+			require.NoError(t, json.Unmarshal(manifestRaw, &manifest), "shard evidence must be valid structured output")
+			require.Equal(t, 0, manifest.CoverageStatus, "every shard profile must be validated before the database aggregate is accepted")
+			actualRoots := make([][]string, 0, len(manifest.Shards))
+			for _, shard := range manifest.Shards {
+				require.NotNil(t, shard.ExitStatus, "every planned database shard must have actually finished")
+				require.Equal(t, 0, *shard.ExitStatus, "each database shard must report its actual successful command status")
+				require.Equal(t, 2, shard.RootCount, "all roots must be assigned to nonempty balanced shards")
+				actualRoots = append(actualRoots, shard.Roots)
+			}
+			require.Equal(t, expectedRoots, actualRoots, "discovery must cover current tests, prefix-sharing names, fuzz seeds, and examples exactly once")
 		})
 	}
 }
