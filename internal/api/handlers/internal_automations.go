@@ -18,6 +18,7 @@ import (
 type internalAutomationDelegate interface {
 	Create(w http.ResponseWriter, r *http.Request)
 	Update(w http.ResponseWriter, r *http.Request)
+	UpdatePersonalBaseBranch(w http.ResponseWriter, r *http.Request, automationID uuid.UUID, actor models.AutomationActionActor, baseBranch string)
 	RunNow(w http.ResponseWriter, r *http.Request)
 	Pause(w http.ResponseWriter, r *http.Request)
 	Resume(w http.ResponseWriter, r *http.Request)
@@ -60,7 +61,15 @@ func (h *InternalAutomationHandler) Update(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if !h.authorizeAutomationID(w, r, claims) {
+	automation, ok := h.lookupAutomation(w, r, claims)
+	if !ok {
+		return
+	}
+	if automation.IdentityScope == models.AutomationIdentityScopePersonal {
+		h.updatePersonalBaseBranch(w, r, claims, session, automation.ID)
+		return
+	}
+	if !authorizeAutomationIdentity(w, r, automation) {
 		return
 	}
 	body, ok := h.readAndAuthorizePayloadRepository(w, r, claims, session, false)
@@ -87,7 +96,8 @@ func (h *InternalAutomationHandler) forwardAutomationAction(w http.ResponseWrite
 	if !ok {
 		return
 	}
-	if !h.authorizeAutomationID(w, r, claims) {
+	automation, ok := h.lookupAutomation(w, r, claims)
+	if !ok || !authorizeAutomationIdentity(w, r, automation) {
 		return
 	}
 	next(w, h.requestWithOrgAndBody(r, session.OrgID, nil))
@@ -199,29 +209,56 @@ func (h *InternalAutomationHandler) authorizePayloadCapabilities(w http.Response
 	return true
 }
 
-func (h *InternalAutomationHandler) authorizeAutomationID(w http.ResponseWriter, r *http.Request, claims *auth.InternalTokenClaims) bool {
+func (h *InternalAutomationHandler) lookupAutomation(w http.ResponseWriter, r *http.Request, claims *auth.InternalTokenClaims) (models.Automation, bool) {
 	automationID, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "INVALID_ID", "invalid automation ID")
-		return false
+		return models.Automation{}, false
 	}
 	automation, err := h.automation.GetByID(r.Context(), claims.OrgID, automationID)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "NOT_FOUND", "automation not found", err)
-		return false
+		return models.Automation{}, false
 	}
 	if automation.RepositoryID == nil || *automation.RepositoryID != claims.RepoID {
 		writeError(w, r, http.StatusForbidden, "REPO_MISMATCH", "session automation tools may only manage automations for the session repository")
-		return false
+		return models.Automation{}, false
 	}
-	// Personal-identity automations execute as a specific human user. A
-	// repo-scoped session must not run, pause, resume, or edit them, since that
-	// would act under that user's identity. Creation already forces org scope.
+	return automation, true
+}
+
+func authorizeAutomationIdentity(w http.ResponseWriter, r *http.Request, automation models.Automation) bool {
 	if automation.IdentityScope != "" && automation.IdentityScope != models.AutomationIdentityScopeOrg {
 		writeError(w, r, http.StatusForbidden, "IDENTITY_SCOPE_FORBIDDEN", "session automation tools may only manage org-identity automations")
 		return false
 	}
 	return true
+}
+
+func (h *InternalAutomationHandler) updatePersonalBaseBranch(w http.ResponseWriter, r *http.Request, claims *auth.InternalTokenClaims, session models.Session, automationID uuid.UUID) {
+	if claims.SessionOrigin != string(models.SessionOriginAutomation) || session.Origin != models.SessionOriginAutomation ||
+		claims.AutomationRunID == nil || claims.AutomationJobID == nil || claims.AutomationAttemptToken == nil || claims.ThreadID == nil {
+		writeError(w, r, http.StatusForbidden, "IDENTITY_SCOPE_FORBIDDEN", "personal automation base updates require its executing automation attempt")
+		return
+	}
+	var payload map[string]json.RawMessage
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil || json.Unmarshal(body, &payload) != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BODY", "request body must be a JSON object", err)
+		return
+	}
+	var baseBranch string
+	if len(payload) != 1 || json.Unmarshal(payload["base_branch"], &baseBranch) != nil || baseBranch == "" {
+		writeError(w, r, http.StatusForbidden, "IDENTITY_SCOPE_FORBIDDEN", "personal automation self-updates may only set base_branch")
+		return
+	}
+	if err := validateBaseBranch(baseBranch); err != nil {
+		writeError(w, r, http.StatusBadRequest, "INVALID_BASE_BRANCH", err.Error())
+		return
+	}
+	actor := models.AutomationActionActor{OrgID: claims.OrgID, RepositoryID: claims.RepoID, SessionID: *claims.SessionID, ThreadID: *claims.ThreadID,
+		RunID: *claims.AutomationRunID, JobID: *claims.AutomationJobID, AttemptToken: *claims.AutomationAttemptToken}
+	h.delegate.UpdatePersonalBaseBranch(w, h.requestWithOrgAndBody(r, claims.OrgID, nil), automationID, actor, baseBranch)
 }
 
 func (h *InternalAutomationHandler) requestWithOrgAndBody(r *http.Request, orgID uuid.UUID, body []byte) *http.Request {

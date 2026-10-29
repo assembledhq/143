@@ -21,10 +21,15 @@ import (
 const internalAutomationSecret = "test-secret-32-chars-long-enough-auto"
 
 type fakeInternalAutomationDelegate struct {
-	createCalled bool
-	runCalled    bool
-	gotOrgID     uuid.UUID
-	gotBody      map[string]any
+	createCalled     bool
+	updateCalled     bool
+	selfUpdateCalled bool
+	gotActor         models.AutomationActionActor
+	gotAutomationID  uuid.UUID
+	gotBaseBranch    string
+	runCalled        bool
+	gotOrgID         uuid.UUID
+	gotBody          map[string]any
 }
 
 func (f *fakeInternalAutomationDelegate) Create(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +40,17 @@ func (f *fakeInternalAutomationDelegate) Create(w http.ResponseWriter, r *http.R
 }
 
 func (f *fakeInternalAutomationDelegate) Update(w http.ResponseWriter, r *http.Request) {
+	f.updateCalled = true
 	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]any]{Data: map[string]any{"id": chi.URLParam(r, "id")}})
+}
+
+func (f *fakeInternalAutomationDelegate) UpdatePersonalBaseBranch(w http.ResponseWriter, r *http.Request, automationID uuid.UUID, actor models.AutomationActionActor, baseBranch string) {
+	f.selfUpdateCalled = true
+	f.gotOrgID = middleware.OrgIDFromContext(r.Context())
+	f.gotActor = actor
+	f.gotAutomationID = automationID
+	f.gotBaseBranch = baseBranch
+	writeJSON(w, http.StatusOK, models.SingleResponse[map[string]any]{Data: map[string]any{"id": automationID}})
 }
 
 func (f *fakeInternalAutomationDelegate) RunNow(w http.ResponseWriter, r *http.Request) {
