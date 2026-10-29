@@ -21,8 +21,11 @@ BEGIN
         SELECT j.id FROM jobs j
         WHERE j.status IN ('succeeded','failed')
           AND j.updated_at < now() - make_interval(days => p_retention_days)
+          -- Executor history retains its exact job beyond normal TTL,
+          -- including terminal executors and single-column cross-org FKs.
           AND NOT EXISTS (SELECT 1 FROM session_executors e WHERE e.job_id=j.id)
           AND NOT EXISTS (SELECT 1 FROM code_review_recheck_dispatches d WHERE d.org_id=j.org_id AND d.job_id=j.id)
+          -- Recovery needs the original controller even before a result is staged.
           AND NOT EXISTS (SELECT 1 FROM code_review_revision_assessments a
               WHERE a.org_id=j.org_id AND a.review_scope='full' AND a.status IN ('reserved','running','publishing')
               AND j.job_type='run_code_review'
