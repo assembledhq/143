@@ -36,11 +36,12 @@ for name in json.loads(os.environ["ROOTS"]):
     if re.fullmatch(pattern, name):
         print(json.dumps({"Action": "pass", "Test": name}))
 print("synthetic compiler warning", file=sys.stderr)
-profile = Path(next(arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("-coverprofile=")))
-mode = next(arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("-covermode="))
-if str(index) != os.environ.get("MISSING_PROFILE_SHARD"):
-    text = "invalid profile\n" if str(index) == os.environ.get("BAD_PROFILE_SHARD") else f"mode: {mode}\nexample/db.go:1.1,1.2 1 {index}\n"
-    profile.write_text(text)
+profiles = [arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("-coverprofile=")]
+if profiles:
+    mode = next(arg.split("=", 1)[1] for arg in sys.argv if arg.startswith("-covermode="))
+    if str(index) != os.environ.get("MISSING_PROFILE_SHARD"):
+        text = "invalid profile\n" if str(index) == os.environ.get("BAD_PROFILE_SHARD") else f"mode: {mode}\nexample/db.go:1.1,1.2 1 {index}\n"
+        Path(profiles[0]).write_text(text)
 statuses = json.loads(os.environ.get("GO_STATUSES", "[0,0,0,0]"))
 sys.exit(statuses[index - 1])
 '''
@@ -75,18 +76,20 @@ class SelectionTests(unittest.TestCase):
 
 
 class ExecutionTests(unittest.TestCase):
-    def invoke(self, root, race=False, **overrides):
+    def invoke(self, root, race=False, package="./internal/db", coverage=True, extra_args=(), **overrides):
         go = root / "go"
         go.write_text(STUB)
         go.chmod(0o755)
         env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}", "STUB_ROOT": str(root),
                "ROOTS": json.dumps(ROOTS), "DISCOVERY": "\n".join(ROOTS + ["ok\texample/db\t0.01s"]),
                **overrides}
-        command = [sys.executable, "-B", str(SCRIPT), "--diagnostics", str(root / "diagnostics"),
-                   "--coverprofile", str(root / "coverage.out"), "--covermode", "atomic" if race else "count",
-                   "--timeout", "360s" if race else "300s"]
+        command = [sys.executable, "-B", str(SCRIPT), "--package", package, "--diagnostics", str(root / "diagnostics"),
+                   "--timeout", "360s" if race and package == "./internal/db" else "300s"]
+        if coverage:
+            command.extend(["--coverprofile", str(root / "coverage.out"), "--covermode", "atomic" if race else "count"])
         if race:
             command.append("--race")
+        command.extend(extra_args)
         return subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, timeout=10, check=False)
 
     def test_all_shards_run_and_coverage_is_complete(self):
@@ -106,6 +109,49 @@ class ExecutionTests(unittest.TestCase):
                 for required in ("-json", "./internal/db", "-parallel=2", "-count=1", "-coverpkg=./internal/...", "-covermode=count", "-timeout=300s"):
                     self.assertIn(required, command)
             self.assertNotIn(str(root), json.dumps(manifest), "artifact command manifests must omit machine-local output paths")
+
+    def test_migration_shards_run_every_root_without_adding_coverage(self):
+        for race in (False, True):
+            with self.subTest(race=race), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = self.invoke(root, race=race, package="./cmd/migrate", coverage=False)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(sorted(json.loads(line)["Test"] for line in result.stdout.splitlines()), sorted(ROOTS), "every migration test, fuzz seed and example must execute exactly once")
+                calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
+                race_args = ["-race"] if race else []
+                self.assertEqual(calls[0], ["test", "-list", ".", "./cmd/migrate", "-p=1", *race_args])
+                groups = runner.partition_roots(ROOTS, 4)
+                self.assertEqual(calls[1:], [["test", "-json", "./cmd/migrate", "-p=1", "-parallel=2", "-count=1", "-timeout=300s", "-run", runner.root_pattern(group), *race_args] for group in groups], "fresh processes must retain the existing command test concurrency, timeout and race build")
+                manifest = json.loads((root / "diagnostics/shard-status.json").read_text())
+                self.assertEqual(manifest["package"], "./cmd/migrate")
+                self.assertEqual(manifest["coverage_status"], "not_requested")
+                self.assertEqual([shard["exit_status"] for shard in manifest["shards"]], [0] * 4)
+                self.assertEqual([shard["profile"] for shard in manifest["shards"]], [None] * 4)
+                self.assertEqual(sorted(name for shard in manifest["shards"] for name in shard["roots"]), sorted(ROOTS))
+                self.assertEqual(list(root.rglob("*.out")), [], "command sharding must not add coverage instrumentation")
+
+    def test_migration_failure_survives_capture_failure_and_runs_later_shards(self):
+        for capture_failure in (False, True):
+            with self.subTest(capture_failure=capture_failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                if capture_failure:
+                    (root / "diagnostics/shard-status.json").mkdir(parents=True)
+                result = self.invoke(root, package="./cmd/migrate", coverage=False, GO_STATUSES="[7,9,0,0]")
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertEqual((root / "invocations.txt").read_text(), "4", "later migration shards must still run after an earlier failure")
+                if not capture_failure:
+                    manifest = json.loads((root / "diagnostics/shard-status.json").read_text())
+                    self.assertEqual([shard["exit_status"] for shard in manifest["shards"]], [7, 9, 0, 0])
+                    self.assertEqual(manifest["test_status"], 7)
+
+    def test_package_and_coverage_configuration_fail_closed(self):
+        cases = [("./cmd/...", ()), ("./internal/db", ()), ("./cmd/migrate", ("--covermode=count",)), ("./cmd/migrate", ("--coverprofile=partial.out",))]
+        for package, extra in cases:
+            with self.subTest(package=package, extra=extra), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = self.invoke(root, package=package, coverage=False, extra_args=extra)
+                self.assertEqual(result.returncode, 2, "only the two fixed packages and complete coverage configurations may execute")
+                self.assertFalse((root / "calls.jsonl").exists(), "invalid configuration must fail before invoking Go")
 
     def test_race_discovery_matches_execution_build_and_preserves_non_pr_budgets(self):
         with tempfile.TemporaryDirectory() as directory:

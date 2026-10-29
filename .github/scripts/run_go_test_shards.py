@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run every database test in bounded, deterministic sequential root-test shards."""
+"""Run every root in a selected fixture-heavy package in sequential shards."""
 
 import argparse
 import json
@@ -13,7 +13,7 @@ from merge_go_coverage import merge_profiles
 ROOT_NAME = re.compile(r"(?:Test|Fuzz|Example)(?:[A-Z0-9_][A-Za-z0-9_]*)?")
 BENCHMARK_NAME = re.compile(r"Benchmark(?:[A-Z0-9_][A-Za-z0-9_]*)?")
 SUMMARY = re.compile(r"ok\s+\S+\s+\S+(?:\s+.*)?")
-PACKAGE = "./internal/db"
+PACKAGES = ("./internal/db", "./cmd/migrate")
 
 
 def discover_roots(output):
@@ -28,21 +28,21 @@ def discover_roots(output):
         elif SUMMARY.fullmatch(line):
             summaries += 1
         else:
-            raise ValueError("unexpected database test discovery output")
+            raise ValueError("unexpected test discovery output")
     if not roots or len(roots) != len(set(roots)) or summaries != 1:
-        raise ValueError("database discovery must contain unique test roots and one package summary")
+        raise ValueError("discovery must contain unique test roots and one package summary")
     return sorted(roots)
 
 
 def partition_roots(roots, count):
     if count < 1 or len(roots) < count or len(roots) != len(set(roots)):
-        raise ValueError("every database shard must have distinct, nonempty test roots")
+        raise ValueError("every shard must have distinct, nonempty test roots")
     return [sorted(roots)[index::count] for index in range(count)]
 
 
 def root_pattern(roots):
     if not roots or any(ROOT_NAME.fullmatch(name) is None for name in roots):
-        raise ValueError("refusing an empty or invalid database test selection")
+        raise ValueError("refusing an empty or invalid test selection")
     return "^(?:" + "|".join(re.escape(name) for name in roots) + ")$"
 
 
@@ -52,27 +52,35 @@ def exit_status(status):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--package", choices=PACKAGES, default="./internal/db")
     parser.add_argument("--shards", type=int, default=4)
     parser.add_argument("--diagnostics", type=Path, required=True)
-    parser.add_argument("--coverprofile", type=Path, required=True)
-    parser.add_argument("--covermode", choices=("count", "atomic"), required=True)
+    parser.add_argument("--coverprofile", type=Path)
+    parser.add_argument("--covermode", choices=("count", "atomic"))
     parser.add_argument("--timeout", choices=("300s", "360s"), required=True)
     parser.add_argument("--race", action="store_true")
     args = parser.parse_args()
+    if bool(args.coverprofile) != bool(args.covermode):
+        parser.error("--coverprofile and --covermode must be supplied together")
+    if args.package == "./internal/db" and args.coverprofile is None:
+        parser.error("database shards require coverage")
     args.diagnostics.mkdir(parents=True, exist_ok=True)
-    manifest = {"discovery_status": None, "test_status": 0, "capture_status": 0,
-                "coverage_status": "not_run", "shards": []}
+    manifest = {"package": args.package, "discovery_status": None, "test_status": 0, "capture_status": 0,
+                "coverage_status": "not_run" if args.coverprofile else "not_requested", "shards": []}
 
     def retain_manifest():
         try:
             (args.diagnostics / "shard-status.json").write_text(json.dumps(manifest, indent=2) + "\n")
         except OSError:
             manifest["capture_status"] = 1
-            print("::warning::Could not retain database shard statuses", file=sys.stderr)
+            print("::warning::Could not retain test shard statuses", file=sys.stderr)
 
     try:
-        args.coverprofile.unlink(missing_ok=True)
-        discovery_command = ["go", "test", "-list", ".", PACKAGE]
+        if args.coverprofile:
+            args.coverprofile.unlink(missing_ok=True)
+        discovery_command = ["go", "test", "-list", ".", args.package]
+        if args.package == "./cmd/migrate":
+            discovery_command.append("-p=1")
         if args.race:
             discovery_command.append("-race")
         discovery = subprocess.run(discovery_command, capture_output=True, text=True, check=False)
@@ -85,20 +93,23 @@ def main():
     except (OSError, ValueError):
         manifest["discovery_status"] = 1
         retain_manifest()
-        print("::error::Unable to discover a complete nonempty database shard plan", file=sys.stderr)
+        print("::error::Unable to discover a complete nonempty test shard plan", file=sys.stderr)
         return 1
 
     plans = []
     for index, roots in enumerate(groups, 1):
-        profile = args.diagnostics / f"coverage-shard-{index}.out"
-        command = ["go", "test", "-json", PACKAGE, "-parallel=2", "-count=1",
-                   "-coverpkg=./internal/...", f"-coverprofile={profile}",
-                   f"-covermode={args.covermode}", f"-timeout={args.timeout}",
-                   "-run", root_pattern(roots)]
+        profile = args.diagnostics / f"coverage-shard-{index}.out" if args.coverprofile else None
+        command = ["go", "test", "-json", args.package]
+        if args.package == "./cmd/migrate":
+            command.append("-p=1")
+        command.extend(["-parallel=2", "-count=1"])
+        if profile:
+            command.extend(["-coverpkg=./internal/...", f"-coverprofile={profile}", f"-covermode={args.covermode}"])
+        command.extend([f"-timeout={args.timeout}", "-run", root_pattern(roots)])
         if args.race:
             command.append("-race")
         entry = {"index": index, "roots": roots, "root_count": len(roots), "exit_status": None,
-                 "profile": profile.name,
+                 "profile": profile.name if profile else None,
                  "command": [f"-coverprofile={profile.name}" if arg.startswith("-coverprofile=") else arg
                              for arg in command]}
         manifest["shards"].append(entry)
@@ -106,28 +117,29 @@ def main():
     retain_manifest()
     for command, profile, entry in plans:
         try:
-            profile.unlink(missing_ok=True)
+            if profile:
+                profile.unlink(missing_ok=True)
             result = subprocess.run(command, check=False)
             entry["exit_status"] = exit_status(result.returncode)
         except OSError:
             entry["exit_status"] = 127
-            print(f"::error::Unable to execute database shard {entry['index']}", file=sys.stderr)
+            print(f"::error::Unable to execute test shard {entry['index']}", file=sys.stderr)
         if not manifest["test_status"] and entry["exit_status"]:
             manifest["test_status"] = entry["exit_status"]
         retain_manifest()
 
-    if manifest["test_status"]:
+    if args.coverprofile and manifest["test_status"]:
         manifest["coverage_status"] = "skipped_failed_tests"
-    else:
+    elif args.coverprofile:
         try:
             merged = merge_profiles([profile for _, profile, _ in plans])
             args.coverprofile.write_text(merged)
             manifest["coverage_status"] = 0
         except (OSError, ValueError):
             manifest["coverage_status"] = 1
-            print("::error::Unable to combine complete database shard coverage", file=sys.stderr)
+            print("::error::Unable to combine complete test shard coverage", file=sys.stderr)
     retain_manifest()
-    return manifest["test_status"] or manifest["capture_status"] or (manifest["coverage_status"] != 0)
+    return manifest["test_status"] or manifest["capture_status"] or (manifest["coverage_status"] not in (0, "not_requested"))
 
 
 if __name__ == "__main__":

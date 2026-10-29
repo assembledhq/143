@@ -404,15 +404,51 @@ jobs:
         timeout-minutes: 10
         run: |
           race=()
+          shard_race=()
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             race=(-race)
+            shard_race=(--race)
           fi
           # Bound fresh-database creation/drop across packages and parallel tests,
           # without reducing concurrency exercised inside individual tests.
           diagnostics="${RUNNER_TEMP:?}/ci-command-diagnostics"
           mkdir -p "$diagnostics"
+          run_command_partitions() {
+            local packages package ordinary_status migration_status
+            local command_packages=()
+            local migration_found=0
+            packages="$(go list ./cmd/...)" || return "$?"
+            while IFS= read -r package; do
+              if [[ "$package" == "github.com/assembledhq/143/cmd/migrate" ]]; then
+                migration_found=1
+              elif [[ -n "$package" ]]; then
+                command_packages+=("$package")
+              fi
+            done <<< "$packages"
+            if [[ "$migration_found" != "1" || "${#command_packages[@]}" == "0" ]]; then
+              echo "::error::Unable to discover both command test partitions" >&2
+              return 1
+            fi
+            go test -json "${command_packages[@]}" -p=1 -parallel=2 -count=1 "${race[@]}" -timeout=300s
+            ordinary_status="$?"
+            # Each exact root runs once, with all its subtests, in a fresh
+            # bounded process. Keep the same in-test concurrency and timeout.
+            python3 -B .github/scripts/run_go_test_shards.py --package=./cmd/migrate --shards=4 \
+              --diagnostics="$diagnostics/migrate-shards" --timeout=300s "${shard_race[@]}"
+            migration_status="$?"
+            if ! printf 'ordinary_commands=%s\nmigration_shards=%s\n' "$ordinary_status" "$migration_status" >"$diagnostics/partition-status.txt"; then
+              echo "::warning::Could not retain command partition statuses" >&2
+              if [[ "$ordinary_status" == "0" && "$migration_status" == "0" ]]; then
+                return 1
+              fi
+            fi
+            if [[ "$ordinary_status" != "0" ]]; then
+              return "$ordinary_status"
+            fi
+            return "$migration_status"
+          }
           set +e
-          go test -json ./cmd/... -p=1 -parallel=2 -count=1 "${race[@]}" -timeout=300s \
+          run_command_partitions \
             2>"$diagnostics/go-test.stderr.log" | tee "$diagnostics/go-test.jsonl"
           statuses=("${PIPESTATUS[@]}")
           set -e

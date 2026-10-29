@@ -93,6 +93,7 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
             **os.environ, "PATH": f"{root}:{os.environ['PATH']}",
             "STUB_ROOT": str(root), "RUNNER_TEMP": str(root),
             "POSTGRES_CONTAINER": "synthetic-container", "GITHUB_EVENT_NAME": "pull_request",
+            "GO_PACKAGES": "github.com/assembledhq/143/cmd/migrate\ngithub.com/assembledhq/143/cmd/demo-seed\ngithub.com/assembledhq/143/cmd/wait-postgres\n",
             "TEST_EVENT": EVENT, "GO_STATUS": "0", "TEE_STATUS": "0",
             "PRIVATE_ERROR": PRIVATE_ERROR, **overrides,
         }
@@ -100,7 +101,7 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
     def test_original_test_status_and_json_capture(self):
         suites = [
             ("Run database tests", "ci-db-diagnostics", None),
-            ("Run command tests", "ci-command-diagnostics", ["go", "test", "-json", "./cmd/...", "-p=1", "-parallel=2", "-count=1", "-timeout=300s"]),
+            ("Run command tests", "ci-command-diagnostics", "command partitions"),
             ("Run demoseed tests", "ci-demoseed-diagnostics", ["go", "test", "-json", "./internal/demoseed", "-p=1", "-parallel=1", "-count=1", "-coverpkg=./internal/...", "-coverprofile=coverage-unit-demoseed.out", "-covermode=count", "-timeout=300s"]),
         ]
         cases = [(suite, go, tee, expected) for suite in suites for go, tee, expected in [(0, 0, 0), (7, 0, 7), (0, 9, 9), (7, 9, 7)]]
@@ -114,7 +115,7 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, expected, result.stderr)
                 diagnostics = root / folder
-                expected_events = 4 if step == "Run database tests" else 1
+                expected_events = {"Run database tests": 4, "Run command tests": 5}.get(step, 1)
                 self.assertEqual((diagnostics / "go-test.jsonl").read_text(), EVENT * expected_events, "stderr must not corrupt per-test JSON")
                 self.assertEqual([json.loads(line)["Test"] for line in (diagnostics / "go-test.jsonl").read_text().splitlines()], ["TestSynthetic"] * expected_events)
                 self.assertEqual((diagnostics / "go-test.stderr.log").read_text(), "synthetic non-JSON warning\n" * expected_events)
@@ -122,7 +123,23 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
                 self.assertEqual((diagnostics / "exit-status.txt").read_text(), f"go_test={go_status}\njson_capture={tee_status}\n")
                 calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
                 go = [call for call in calls if call[0] == "go"]
-                if arguments is not None:
+                if arguments == "command partitions":
+                    self.assertEqual(go[:3], [
+                        ["go", "list", "./cmd/..."],
+                        ["go", "test", "-json", "github.com/assembledhq/143/cmd/demo-seed", "github.com/assembledhq/143/cmd/wait-postgres", "-p=1", "-parallel=2", "-count=1", "-timeout=300s"],
+                        ["go", "test", "-list", ".", "./cmd/migrate", "-p=1"],
+                    ], "ordinary commands must all run once while migration roots are discovered separately")
+                    self.assertEqual(len(go), 7, "ordinary command failure must not skip discovery or any migration shard")
+                    for command in go[3:]:
+                        for required in ("./cmd/migrate", "-p=1", "-parallel=2", "-count=1", "-timeout=300s", "-run"):
+                            self.assertIn(required, command)
+                        self.assertFalse(any(arg.startswith("-cover") for arg in command), "command sharding must preserve the original uninstrumented build")
+                    manifest = json.loads((diagnostics / "migrate-shards/shard-status.json").read_text())
+                    self.assertEqual(manifest["package"], "./cmd/migrate")
+                    self.assertEqual([shard["exit_status"] for shard in manifest["shards"]], [go_status] * 4)
+                    self.assertEqual(sorted(name for shard in manifest["shards"] for name in shard["roots"]), [f"TestSynthetic{i}" for i in range(8)])
+                    self.assertEqual((diagnostics / "partition-status.txt").read_text(), f"ordinary_commands={go_status}\nmigration_shards={go_status}\n")
+                elif arguments is not None:
                     self.assertEqual(go, [arguments], "diagnostics must preserve PR test coverage, budgets, and bounded fixture overlap")
                 else:
                     self.assertEqual(go[0], ["go", "test", "-list", ".", "./internal/db"])
@@ -165,6 +182,22 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
                     sql = docker[2][-1]
                     for excluded in ("query,", "query ", "datname", "usename", "client_addr", "application_name"):
                         self.assertNotIn(excluded, sql.lower(), "snapshot must not select private identifiers or SQL text")
+
+    def test_command_package_discovery_fails_closed_before_any_test_invocation(self):
+        for packages in ("", "github.com/assembledhq/143/cmd/migrate\n", "github.com/assembledhq/143/cmd/wait-postgres\n"):
+            with self.subTest(packages=packages), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", run_script("Run command tests")],
+                    cwd=root, env=self.environment(root, GO_PACKAGES=packages),
+                    capture_output=True, text=True, timeout=10, check=False,
+                )
+                self.assertEqual(result.returncode, 1, "incomplete command inventory must not silently select the current directory or skip a partition")
+                calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
+                self.assertEqual([call for call in calls if call[0] == "go"], [["go", "list", "./cmd/..."]])
+                diagnostics = root / "ci-command-diagnostics"
+                self.assertEqual((diagnostics / "go-test.jsonl").read_text(), "")
+                self.assertEqual((diagnostics / "exit-status.txt").read_text(), "go_test=1\njson_capture=0\n")
 
     def test_failed_step_upload_precedes_database_cleanup(self):
         source = WORKFLOW.read_text()
