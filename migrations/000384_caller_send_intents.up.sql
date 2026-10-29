@@ -1,4 +1,6 @@
 -- Passive caller-send storage. Readiness is not enablement; no row is enabled here.
+SET LOCAL lock_timeout = '5s';
+
 CREATE TABLE caller_send_intent_control ( -- lint:no-org-id reason="global caller-send schema readiness and explicit enablement interlock"
     singleton boolean PRIMARY KEY CHECK (singleton),
     schema_ready boolean NOT NULL,

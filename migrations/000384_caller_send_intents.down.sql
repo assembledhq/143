@@ -1,4 +1,5 @@
 -- Recheck at the storage-removal boundary; a prior readiness downgrade is not evidence of settlement.
+SET LOCAL lock_timeout = '5s';
 LOCK TABLE caller_send_intent_control, code_review_agent_results, session_review_loops,
     session_review_loop_passes, review_loop_start_intents, caller_send_command_stamps,
     session_publications, automation_runs IN ACCESS EXCLUSIVE MODE;
