@@ -226,7 +226,7 @@ jobs:
         if: needs.changes.outputs.demo_seed == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
         run: make demo-seed-check
 
-      - name: Run backend unit tests outside database, agent, and worker packages
+      - name: Run backend unit tests outside database, demoseed, agent, and worker packages
         timeout-minutes: 10
         run: |
           mode=count
@@ -241,6 +241,7 @@ jobs:
           unit_packages=()
           while IFS= read -r package; do
             if [[ "$package" != "github.com/assembledhq/143/internal/db" && \
+                  "$package" != "github.com/assembledhq/143/internal/demoseed" && \
                   "$package" != "github.com/assembledhq/143/internal/services/agent" && \
                   "$package" != "github.com/assembledhq/143/internal/worker" ]]; then
               unit_packages+=("$package")
@@ -248,6 +249,60 @@ jobs:
           done <<< "$packages"
           go test -json "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
             -coverprofile=coverage-unit-other.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
+
+      # Demo checks create, migrate, seed, and drop complete sibling databases.
+      # Serialize those fixtures outside the general concurrent package batch.
+      - name: Run demoseed tests
+        id: demoseed_tests
+        timeout-minutes: 10
+        run: |
+          mode=count
+          race=()
+          package_timeout=300s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(-race)
+            package_timeout=360s
+          fi
+          diagnostics="${RUNNER_TEMP:?}/ci-demoseed-diagnostics"
+          mkdir -p "$diagnostics"
+          set +e
+          go test -json ./internal/demoseed -p=1 -parallel=1 -count=1 -coverpkg=./internal/... \
+            -coverprofile=coverage-unit-demoseed.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout" \
+            2>"$diagnostics/go-test.stderr.log" | tee "$diagnostics/go-test.jsonl"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          capture_status="${statuses[1]}"
+          if ! cat "$diagnostics/go-test.stderr.log" >&2; then
+            echo "::warning::Could not replay demoseed test stderr"
+            capture_status=1
+          fi
+          if ! printf 'go_test=%s\njson_capture=%s\n' "${statuses[0]}" "$capture_status" >"$diagnostics/exit-status.txt"; then
+            echo "::warning::Could not retain demoseed test exit statuses"
+            capture_status=1
+          fi
+          # Preserve the test failure even if diagnostic capture also fails.
+          if [[ "${statuses[0]}" != "0" ]]; then
+            exit "${statuses[0]}"
+          fi
+          exit "$capture_status"
+
+      - name: Collect demoseed test PostgreSQL diagnostics
+        if: ${{ !cancelled() && (steps.demoseed_tests.outcome == 'success' || steps.demoseed_tests.outcome == 'failure') }}
+        timeout-minutes: 1
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+          CI_POSTGRES_DIAGNOSTICS_SCOPE: demoseed
+        run: bash .github/scripts/collect-ci-postgres-diagnostics.sh
+
+      - name: Upload demoseed test diagnostics
+        if: ${{ !cancelled() && (steps.demoseed_tests.outcome == 'success' || steps.demoseed_tests.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: demoseed-test-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-demoseed-diagnostics/
+          retention-days: 7
+          if-no-files-found: error
 
       # Full-schema Postgres fixtures need their own bounded package budget.
       # Keep database work outside the concurrent general package suite.
@@ -339,7 +394,7 @@ jobs:
             -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
       - name: Combine backend unit coverage
-        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-db.out coverage-unit-worker.out coverage-unit-agent.out
+        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-demoseed.out coverage-unit-db.out coverage-unit-worker.out coverage-unit-agent.out
 
       - name: Test offline review export archive utilities
         run: python3 -B -m unittest discover -s scripts -p 'test_*code_review_export*.py'
@@ -468,6 +523,7 @@ jobs:
             coverage.out
             coverage-unit.out
             coverage-unit-other.out
+            coverage-unit-demoseed.out
             coverage-unit-db.out
             coverage-unit-worker.out
             coverage-unit-agent.out
