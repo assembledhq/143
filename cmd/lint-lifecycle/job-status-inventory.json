@@ -199,6 +199,17 @@
       ]
     },
     {
+      "id": "internal/db/automation_self_update.go:AutomationStore.UpdatePersonalBaseBranch:sql:1",
+      "source_sha256": "5f80790b8c66909a7e0421be028746317fe68a1497a1392ae4511e997a173eab",
+      "classification": "lease-owned",
+      "action_0a": "Retain running-only execution authority with the exact job, session/thread binding, attempt lock token, and unexpired lease. awaiting_start_control has no execution lease and must not authorize this configuration write.",
+      "reason": "A Personal routine's base-branch update spends its current execution authority; logical ownership of a nonterminal input does not authorize the write.",
+      "evidence": [
+        "internal/db/automation_self_update.go:32",
+        "j . status = 'running'"
+      ]
+    },
+    {
       "id": "internal/db/automation_turns.go:AutomationRunStore.CompleteExecutingPreflight:sql:1",
       "source_sha256": "2afa1f49d5331c68f540bb70554caf2fb21bbda6eb286a272554d784237f57c5",
       "classification": "lease-owned",

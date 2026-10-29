@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1884,7 +1885,11 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		actionSnapshot = turnState.run.CapabilitySnapshot
 		actionRunID = &turnState.run.ID
 	}
-	if actionRunID != nil && models.HasAutomationActions(actionSnapshot) {
+	managementWrite := slices.ContainsFunc(actionSnapshot, func(grant models.AgentCapabilitySnapshotItem) bool {
+		return grant.ID == models.AgentCapabilityAutomationManagement && models.AgentCapabilityAccessWrite.AtMost(grant.AccessLevel)
+	})
+	hasActions := models.HasAutomationActions(actionSnapshot)
+	if actionRunID != nil && (hasActions || managementWrite) {
 		// A warm sandbox receives a token for this job attempt, including per-run continuations.
 		delete(sandboxCfg.Env, "INTERNAL_API_TOKEN")
 		var thread uuid.UUID
@@ -1902,7 +1907,7 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		if perTargetTurn {
 			attempt = turnState.lockToken
 		}
-		if !perTargetTurn {
+		if !perTargetTurn && hasActions {
 			scopes = append(scopes, models.ToolScope("automation:execute-action"), models.ToolScope("automation:action-status"))
 		}
 		internalToken, err = auth.GenerateAutomationActionToken(o.internalAPISecret, models.AutomationActionActor{OrgID: session.OrgID, RepositoryID: *repoID, SessionID: session.ID, ThreadID: thread, RunID: *actionRunID, JobID: jobID, AttemptToken: attempt}, scopes, sessionOrigin, tokenTTL)

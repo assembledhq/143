@@ -935,10 +935,20 @@ func TestReviewActionTokenRefreshAcrossContinuedTurns(t *testing.T) {
 func TestAutomationActionTokenForPerRunAttempts(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name  string
-		job   bool
-		grant bool
-	}{{"scheduled", true, true}, {"manual", true, true}, {"event", true, true}, {"missing lease", false, true}, {"no grant", true, false}}
+		name       string
+		job        bool
+		grant      bool
+		management bool
+	}{
+		{name: "scheduled", job: true, grant: true},
+		{name: "manual", job: true, grant: true},
+		{name: "event", job: true, grant: true},
+		{name: "missing lease", grant: true},
+		{name: "no grant", job: true},
+		{name: "management only", job: true, management: true},
+		{name: "management missing lease", management: true},
+		{name: "actions and management", job: true, grant: true, management: true},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -947,6 +957,9 @@ func TestAutomationActionTokenForPerRunAttempts(t *testing.T) {
 			if tt.grant {
 				session.CapabilitySnapshot = []models.AgentCapabilitySnapshotItem{{ID: models.AgentCapabilityAutomationActions, AccessLevel: models.AgentCapabilityAccessWrite, Config: json.RawMessage(`{"actions":["slack_notification"],"slack_channel_id":"C0123456789"}`)}}
 			}
+			if tt.management {
+				session.CapabilitySnapshot = append(session.CapabilitySnapshot, models.AgentCapabilitySnapshotItem{ID: models.AgentCapabilityAutomationManagement, AccessLevel: models.AgentCapabilityAccessWrite})
+			}
 			ctx := context.Background()
 			if tt.job {
 				ctx = jobctx.WithJobID(jobctx.WithLockToken(ctx, attempt), job)
@@ -954,20 +967,24 @@ func TestAutomationActionTokenForPerRunAttempts(t *testing.T) {
 			o := &Orchestrator{internalAPIURL: "https://platform.test", internalAPISecret: "secret"}
 			cfg := &SandboxConfig{Timeout: time.Minute, Env: map[string]string{"INTERNAL_API_TOKEN": "stale"}}
 			o.injectInternalAPIEnv(ctx, session, &repo, &thread, cfg, o.resolveRuntimeConfig(context.Background(), session.OrgID), zerolog.Nop())
-			if tt.grant && !tt.job {
+			if (tt.grant || tt.management) && !tt.job {
 				require.Empty(t, cfg.Env["INTERNAL_API_TOKEN"], "missing job must discard stale authority")
 				return
 			}
 			claims, err := auth.ValidateInternalToken("secret", cfg.Env["INTERNAL_API_TOKEN"])
 			require.NoError(t, err, "current attempt token validates")
-			if tt.grant {
+			if tt.grant || tt.management {
 				require.Equal(t, &run, claims.AutomationRunID, "per-run token binds originating run")
 				require.Equal(t, &job, claims.AutomationJobID, "per-run token binds current job")
 				require.Equal(t, &attempt, claims.AutomationAttemptToken, "per-run token binds current attempt")
-				require.Contains(t, claims.AllowedToolScopes, models.ToolScope("automation:execute-action"), "granted action is callable")
 			} else {
 				require.Nil(t, claims.AutomationRunID, "ungranted token carries no action authority")
 			}
+			wantScopes := []string{"preview:read", "preview:interact", "preview:manage"}
+			if tt.grant {
+				wantScopes = append(wantScopes, models.ToolScope("automation:execute-action"), models.ToolScope("automation:action-status"))
+			}
+			require.Equal(t, wantScopes, claims.AllowedToolScopes, "management alone must not grant external action scopes")
 		})
 	}
 }
