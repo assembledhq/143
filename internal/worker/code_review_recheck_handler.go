@@ -518,6 +518,11 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 			// publishers. Re-read after acquiring it: waiting for another
 			// publisher must not preserve permission to send stale inputs.
 			fresh, captureErr := services.CodeReviewInputCapture.CaptureAssessmentInputs(lockCtx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText}})
+			if errors.Is(captureErr, models.ErrInvalidCodeReviewGuidanceFile) && current.PublicationState == models.CodeReviewPublicationReserved {
+				// No send has started, so a permanent file error can fail safely.
+				// Uncertain sends must still reconcile their possible receipt.
+				return captureErr
+			}
 			allowWrite = captureErr == nil && fresh.Manifest.InputDigest == a.InputDigest
 			inputsChanged = captureErr == nil && !allowWrite || errors.Is(captureErr, codereviewsvc.ErrAssessmentReuseUnavailable)
 			if inputsChanged && current.PublicationState == models.CodeReviewPublicationReserved {

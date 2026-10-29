@@ -957,6 +957,10 @@ func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStor
 }
 
 func codeReviewTerminalFailureStatus(err error) (models.CodeReviewStatusCode, string, bool) {
+	if errors.Is(err, models.ErrInvalidCodeReviewGuidanceFile) {
+		return models.CodeReviewStatusCodeWorkerFailed,
+			"REVIEW.md on the repository default branch is invalid. Fix it as a regular UTF-8 text file of at most 64 KiB, then request a new review.", false
+	}
 	if errors.Is(err, errFullAssessmentFreshnessInconclusive) {
 		return models.CodeReviewStatusCodeGitHubUnavailable,
 			"Visual evidence could not be verified before automatic retries expired. Request a fresh review after the evidence is available.", false

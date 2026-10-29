@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
@@ -17,6 +18,57 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRecheckPublicationInvalidGuidancePostgres(t *testing.T) {
+	t.Parallel()
+	if os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("set TEST_DATABASE_URL for invalid guidance publication proof")
+	}
+	tests := []struct {
+		name      string
+		uncertain bool
+	}{
+		{name: "unsent publication fails promptly"},
+		{name: "uncertain send still reconciles", uncertain: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			pool := fullRecoveryPostgresPoolWithMaxConns(t, ctx, 4)
+			f, _ := seedDeadLetterRecheck(t, pool)
+			f.stores.CodeReviewRechecks = db.NewCodeReviewRecheckStore(pool)
+			manifest := f.manifest
+			manifest.InputDigest = "recheck-input"
+			raw, err := json.Marshal(manifest)
+			require.NoError(t, err, "encode the saved review inputs")
+			_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET input_manifest=$3 WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.assessment, raw)
+			require.NoError(t, err, "retain the saved capture")
+			require.NoError(t, f.stores.CodeReviewAssessments.ReservePublication(ctx, f.job.OrgID, f.assessment, 2, manifest.InputDigest, f.job.HeadSHA), "reserve the unsent review")
+			if tt.uncertain {
+				require.NoError(t, f.stores.CodeReviewAssessments.MarkPublicationAttemptUncertain(ctx, f.job.OrgID, f.assessment, 2, manifest.InputDigest), "retain a possible previous send")
+			}
+			publisher := &fakeRecheckPublisher{}
+			capture := &fixedRecheckCapture{captureErr: fmt.Errorf("default branch file: %w", models.ErrInvalidCodeReviewGuidanceFile)}
+			services := &Services{CodeReviewInputCapture: capture, CodeReviews: publisher}
+			job, err := json.Marshal(codeReviewRecheckJob{OrgID: f.job.OrgID, AssessmentID: f.assessment})
+			require.NoError(t, err, "encode the publication supervisor")
+			ctx = jobctx.WithLockToken(jobctx.WithJobID(ctx, f.jobID), f.token)
+			err = newRunCodeReviewRecheckHandler(f.stores, services, zerolog.Nop())(ctx, models.JobTypeRunCodeReviewRecheck, job)
+			require.Empty(t, publisher.requests, "invalid guidance must never authorize a new GitHub write")
+			if tt.uncertain {
+				var retryable *RetryableError
+				require.ErrorAs(t, err, &retryable, "a possible send must retain receipt reconciliation")
+				require.Equal(t, 1, len(publisher.reconciliations), "uncertain publication must look for the existing receipt")
+			} else {
+				var fatal *FatalError
+				require.ErrorAs(t, err, &fatal, "an unsent review must stop instead of retrying permanent invalid guidance")
+				require.ErrorIs(t, err, models.ErrInvalidCodeReviewGuidanceFile, "terminal failure must preserve the repairable repository cause")
+				require.Empty(t, publisher.reconciliations, "no send means there is no receipt to reconcile")
+			}
+		})
+	}
+}
 
 func TestRecheckPublicationRateLimitRecoveryPostgres(t *testing.T) {
 	t.Parallel()

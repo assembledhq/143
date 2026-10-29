@@ -211,6 +211,26 @@ type guidanceFreshnessCapture struct {
 	err    error
 }
 
+func TestInvalidGuidanceTerminalStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "direct", err: models.ErrInvalidCodeReviewGuidanceFile},
+		{name: "classified", err: classifyGitHubJobError(fmt.Errorf("capture guidance: %w", models.ErrInvalidCodeReviewGuidanceFile), "review")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			code, message, retryable := codeReviewTerminalFailureStatus(tt.err)
+			require.Equal(t, models.CodeReviewStatusCodeWorkerFailed, code, "invalid guidance should use the existing failure status")
+			require.Equal(t, "REVIEW.md on the repository default branch is invalid. Fix it as a regular UTF-8 text file of at most 64 KiB, then request a new review.", message, "PR authors must see the cause and repair instructions")
+			require.False(t, retryable, "retrying without a repository fix cannot repair invalid guidance")
+		})
+	}
+}
+
 func (c guidanceFreshnessCapture) CaptureAssessmentInputs(context.Context, codereviewsvc.AssessmentInputCaptureRequest) (codereviewsvc.AssessmentInputCaptureResult, error) {
 	return c.result, c.err
 }
