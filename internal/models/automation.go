@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -358,9 +359,12 @@ func (t AutomationProductTrigger) Validate() error {
 }
 
 type AutomationGitHubEventFilters struct {
-	BaseBranches []string `json:"base_branches,omitempty"`
-	Authors      []string `json:"authors,omitempty"`
-	Paths        []string `json:"paths,omitempty"`
+	LabelModelRoutes    map[string]AutomationLabelModelRoute `json:"label_model_routes,omitempty"`
+	LabelModelOverrides map[string]string                    `json:"label_model_overrides,omitempty"`
+	CheckRun            *AutomationGitHubCheckRunFilter      `json:"check_run,omitempty"`
+	BaseBranches        []string                             `json:"base_branches,omitempty"`
+	Authors             []string                             `json:"authors,omitempty"`
+	Paths               []string                             `json:"paths,omitempty"`
 	// Labels matches the pull request's GitHub labels. An event passes when the
 	// PR carries at least one of the configured labels (case-insensitive).
 	// An event whose labels could not be determined is filtered out, so a
@@ -371,6 +375,32 @@ type AutomationGitHubEventFilters struct {
 	ExcludedLabels []string `json:"excluded_labels,omitempty"`
 	FeedbackTypes  []string `json:"feedback_types,omitempty"`
 	ReviewStates   []string `json:"review_states,omitempty"`
+}
+
+type AutomationGitHubCheckRunFilter struct {
+	Name  string `json:"name"`
+	AppID int64  `json:"app_id"`
+}
+
+func (f AutomationGitHubEventFilters) Validate() error {
+	if err := f.ValidateLabelModels(); err != nil {
+		return err
+	}
+	if f.CheckRun == nil {
+		return nil
+	}
+	if f.CheckRun.Name == "" || strings.TrimSpace(f.CheckRun.Name) != f.CheckRun.Name {
+		return fmt.Errorf("check_run.name must be an exact nonempty check name without surrounding whitespace")
+	}
+	if f.CheckRun.AppID <= 0 {
+		return fmt.Errorf("check_run.app_id must be positive")
+	}
+	for _, label := range f.Labels {
+		if strings.TrimSpace(label) != "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("check_run requires a nonempty label filter")
 }
 
 type AutomationScheduleType string
