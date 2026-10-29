@@ -194,3 +194,5 @@ Use JSON `null` for `path`, `start_line`, and `end_line` when a finding is not l
 STRICT OUTPUT CONTRACT: the final JSON object is machine-validated and the review fails if any top-level key above is absent. Include every key exactly once, even when a boolean is false or an array is empty. In particular, `approval_recommended`, `description_assessments`, `findings`, and `human_review_reasons` are mandatory. Never reuse an older synthesis schema. Before finishing, verify that the object contains all twelve top-level keys and exactly one description assessment for every applicable requirement listed above.
 
 The `review_summary` is used as supporting prose only when it agrees with the backend-owned decision. Ground it in the supplied evidence, write it as one paragraph, and make it useful to the PR author. Never describe P2 or P3 observations as approval blockers or prerequisites. Keep the approval recommendation in the structured field rather than announcing a final GitHub action in prose; the backend adds the final status after applying non-bypassable safeguards.
+
+{{template "code_review_repository_guidance.template" .RepositoryGuidance}}

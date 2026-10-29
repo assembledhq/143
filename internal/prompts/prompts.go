@@ -7,6 +7,8 @@ import (
 	"embed"
 	"strings"
 	"text/template"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 //go:embed templates/*.template
@@ -270,6 +272,7 @@ func ReviewLoopFixPrompt(data ReviewLoopFixPromptData) string {
 // ─── Code Reviews ───────────────────────────────────────────────────────────
 
 type CodeReviewReviewerPromptData struct {
+	RepositoryGuidance      *models.CodeReviewRepositoryGuidance
 	ManifestPath            string
 	DiffPath                string
 	ReviewInstructions      string
@@ -329,6 +332,7 @@ func CodeReviewReviewerPrompt(data CodeReviewReviewerPromptData) string {
 }
 
 type CodeReviewOrchestratorPromptData struct {
+	RepositoryGuidance         *models.CodeReviewRepositoryGuidance
 	Repository                 string
 	PullNumber                 int
 	PullRequestURL             string

@@ -709,6 +709,17 @@ func prepareFullAssessment(ctx context.Context, stores *Stores, services *Servic
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, err
 	}
+	// Once non-reusable reviewers have started, a later successful capture
+	// cannot retroactively describe their inputs (including REVIEW.md).
+	if services.CodeReviewRepositoryGuidance != nil {
+		results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(results) > 0 {
+			return nil, nil, nil
+		}
+	}
 	captured, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, AssessmentID: assessmentID, RequestContext: job.RequestContext})
 	if err != nil {
 		if errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {

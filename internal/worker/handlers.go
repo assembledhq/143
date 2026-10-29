@@ -950,6 +950,7 @@ type codeReviewVisualEvidenceProvider interface {
 // Services holds the service dependencies needed by job handlers.
 type Services struct {
 	CodeReviewInputCapture       codereviewsvc.AssessmentInputCapturer
+	CodeReviewRepositoryGuidance codereviewsvc.RepositoryGuidanceCapturer
 	CodeReviewAssessmentsEnabled bool
 	CodeReviewRechecksEnabled    bool
 	Orchestrator                 orchestratorService

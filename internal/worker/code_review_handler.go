@@ -51,6 +51,8 @@ type runCodeReviewPayload struct {
 	ExistingGitHubReviewID  *int64                              `json:"existing_github_review_id,omitempty"`
 	ExistingGitHubReviewURL *string                             `json:"existing_github_review_url,omitempty"`
 	TriggeringDisputeID     *uuid.UUID                          `json:"triggering_dispute_id,omitempty"`
+
+	RepositoryGuidance *models.CodeReviewRepositoryGuidance `json:"-"`
 }
 
 const codeReviewRawOutputInlineLimit = 32 * 1024
@@ -334,6 +336,10 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		if codeReviewHeadChanged(job.HeadSHA, pr, health) {
 			return supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head changed after review started")
+		}
+		job.RepositoryGuidance, err = loadCodeReviewRepositoryGuidance(ctx, stores, services, job, assessment, len(agentResults) > 0)
+		if err != nil {
+			return fmt.Errorf("prepare repository review guidance: %w", err)
 		}
 		changedFiles, changedFilesAvailable, err := loadCodeReviewAssessmentChangedFiles(ctx, stores, services, job, pr, capturedAssessment)
 		if err != nil {
@@ -1440,7 +1446,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			}
 			target = &captured
 		}
-		promptText := codeReviewReviewerPrompt(*target, pr, cfg, changedFiles, visualEvidence)
+		promptText := codeReviewReviewerPrompt(*target, pr, cfg, changedFiles, visualEvidence, job.RepositoryGuidance)
 		recordKey := fmt.Sprintf("%s/reviewer-%02d-%s", rootKey, idx+1, agentType)
 		recordMetadata, err := json.Marshal(map[string]any{
 			"reviewer_key":         key,
@@ -1975,9 +1981,10 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 	return true
 }
 
-func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
+func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot, guidance *models.CodeReviewRepositoryGuidance) string {
 	cfg = models.ResolveCodeReviewPolicyConfig(&cfg)
 	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{
+		RepositoryGuidance:    guidance,
 		ManifestPath:          target.ManifestPath,
 		DiffPath:              target.DiffPath,
 		ReviewInstructions:    cfg.ReviewInstructions,
@@ -1994,6 +2001,7 @@ func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.P
 
 func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
 	return prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
+		RepositoryGuidance:         job.RepositoryGuidance,
 		Repository:                 pr.GitHubRepo,
 		PullNumber:                 pr.GitHubPRNumber,
 		PullRequestURL:             pr.GitHubPRURL,

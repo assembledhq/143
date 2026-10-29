@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 )
 
@@ -49,6 +50,8 @@ type ReviewContractInput struct {
 	PromptContentDigest      string    `json:"prompt_content_digest"`
 	InstructionsDigest       string    `json:"instructions_digest"`
 	ExternalInputsComplete   bool      `json:"external_inputs_complete"`
+
+	RepositoryGuidance *models.CodeReviewRepositoryGuidance `json:"repository_guidance,omitempty"`
 }
 
 // ReviewVisualImage identifies captured content, not merely a URL. SourceText
@@ -149,6 +152,10 @@ type ReviewInputManifest struct {
 func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, error) {
 	// Sorting must not mutate the caller's snapshots; they may also be retained
 	// as immutable source evidence for the assessment.
+	if input.Contract.RepositoryGuidance != nil {
+		guidance := *input.Contract.RepositoryGuidance
+		input.Contract.RepositoryGuidance = &guidance
+	}
 	input.Code.Files = append([]ReviewChangedFile(nil), input.Code.Files...)
 	input.Visual.Images = append([]ReviewVisualImage(nil), input.Visual.Images...)
 	input.TextEvidence.Items = append([]ReviewTextEvidence(nil), input.TextEvidence.Items...)
@@ -165,6 +172,11 @@ func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, er
 		!allDigests(input.Contract.PolicyDigest, input.Contract.RosterDigest, input.Contract.ModelConfigurationDigest,
 			input.Contract.PromptContentDigest, input.Contract.InstructionsDigest) {
 		return ReviewInputManifest{}, errors.New("incomplete review contract")
+	}
+	if input.Contract.RepositoryGuidance != nil {
+		if err := input.Contract.RepositoryGuidance.Validate(); err != nil {
+			return ReviewInputManifest{}, err
+		}
 	}
 	if !input.Visual.CaptureComplete || !input.Visual.SourceProvenanceComplete ||
 		!allDigests(input.Gates.SnapshotDigest, input.Gates.EligibilityDigest, input.Gates.ChecksDigest, input.Gates.DynamicDigest) || !input.Gates.Complete {

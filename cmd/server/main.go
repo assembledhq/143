@@ -1964,6 +1964,7 @@ func buildServices(
 	svc := &worker.Services{
 		Feedback:                     feedbackService,
 		CodeReviewInputCapture:       codeReviewInputCapture,
+		CodeReviewRepositoryGuidance: prService,
 		CodeReviewAssessmentsEnabled: cfg.CodeReviewAssessmentsEnabled,
 		CodeReviewRechecksEnabled:    cfg.CodeReviewAssessmentsEnabled && cfg.CodeReviewRechecksEnabled,
 		Orchestrator:                 orchestrator,

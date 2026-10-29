@@ -61,6 +61,8 @@ func (assessmentFilesFixture) ListPullRequestFiles(context.Context, PullRequestF
 }
 
 type assessmentSnapshotFixture struct {
+	guidance                          *models.CodeReviewRepositoryGuidance
+	guidanceErr                       error
 	snapshot                          ghservice.CodeReviewPullRequestSnapshot
 	changeDuringCapture               bool
 	calls, snapshotCalls, healthCalls int
@@ -71,6 +73,13 @@ type assessmentSnapshotFixture struct {
 	textHead, textBody                *string
 	incompleteText                    bool
 	metadata                          []telemetry.RequestMetadata
+}
+
+func (f *assessmentSnapshotFixture) CaptureCodeReviewRepositoryGuidance(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewRepositoryGuidance, error) {
+	if f.guidance != nil {
+		return *f.guidance, f.guidanceErr
+	}
+	return models.CodeReviewRepositoryGuidance{Branch: "master"}, f.guidanceErr
 }
 
 func (f *assessmentSnapshotFixture) recordMetadata(ctx context.Context) {
@@ -124,10 +133,11 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name                                                                                  string
+		guidanceFailure                                                                       bool
 		change, staleHealth, incompleteVisual, overflow, closed, syncFailure, invalidSettings bool
 		restored, discoveryFailure, incompleteText, textHeadChanged, textBodyChanged          bool
 	}{
-		{name: "complete capture"}, {name: "restored visual captures only text", restored: true}, {name: "shared provider failure", discoveryFailure: true}, {name: "shared text over budget", incompleteText: true}, {name: "shared text head changes", textHeadChanged: true}, {name: "shared text body changes", textBodyChanged: true}, {name: "intent changes during capture", change: true}, {name: "health for old head", staleHealth: true}, {name: "incomplete visual discovery", incompleteVisual: true}, {name: "visual source overflow", overflow: true}, {name: "closed target", closed: true}, {name: "failed gate refresh", syncFailure: true}, {name: "invalid settings JSON", invalidSettings: true},
+		{name: "guidance fetch failure", guidanceFailure: true}, {name: "complete capture"}, {name: "restored visual captures only text", restored: true}, {name: "shared provider failure", discoveryFailure: true}, {name: "shared text over budget", incompleteText: true}, {name: "shared text head changes", textHeadChanged: true}, {name: "shared text body changes", textBodyChanged: true}, {name: "intent changes during capture", change: true}, {name: "health for old head", staleHealth: true}, {name: "incomplete visual discovery", incompleteVisual: true}, {name: "visual source overflow", overflow: true}, {name: "closed target", closed: true}, {name: "failed gate refresh", syncFailure: true}, {name: "invalid settings JSON", invalidSettings: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -139,6 +149,9 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			cfg := policy.Config()
 			policies := &policyStub{resolved: models.CodeReviewResolvedPolicy{Config: cfg, Policy: &policy}}
 			snapshots := &assessmentSnapshotFixture{snapshot: ghservice.CodeReviewPullRequestSnapshot{State: "open", Number: 42, Title: "Update view", Body: "Intent stays unchanged", HeadSHA: head, BaseSHA: base, BaseRef: "main"}, changeDuringCapture: tt.change}
+			if tt.guidanceFailure {
+				snapshots.guidanceErr = errors.New("guidance unavailable")
+			}
 			if tt.discoveryFailure {
 				snapshots.discoveryErr = errors.New("shared inventory unavailable")
 			}
@@ -180,8 +193,11 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			for _, actual := range snapshots.metadata {
 				require.Equal(t, expectedMetadata, actual, "all snapshot preparation, health, discovery and final bracket calls must retain validated ownership and caller metadata")
 			}
-			if tt.change || tt.staleHealth || tt.incompleteVisual || tt.overflow || tt.closed || tt.syncFailure || tt.invalidSettings || tt.discoveryFailure || tt.incompleteText || tt.textHeadChanged || tt.textBodyChanged {
+			if tt.guidanceFailure || tt.change || tt.staleHealth || tt.incompleteVisual || tt.overflow || tt.closed || tt.syncFailure || tt.invalidSettings || tt.discoveryFailure || tt.incompleteText || tt.textHeadChanged || tt.textBodyChanged {
 				require.Error(t, err, "capture must reject mixed, stale, or unavailable inputs")
+				if tt.guidanceFailure {
+					require.NotErrorIs(t, err, ErrAssessmentReuseUnavailable, "guidance failure must not allow unguided legacy fallback")
+				}
 				if tt.closed {
 					require.ErrorIs(t, err, ErrReviewIneligible, "terminal snapshots must remain deterministic ineligibility rather than a retryable capture error")
 				}
@@ -196,6 +212,7 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			require.NoError(t, err, "complete authoritative inputs should produce a manifest")
 			require.NoError(t, ValidateReviewInputManifest(result.Manifest), "persisted manifest must rebuild exactly")
 			require.Equal(t, "main", result.Manifest.Code.BaseRef, "base ref must come from GitHub rather than repository default")
+			require.Equal(t, &models.CodeReviewRepositoryGuidance{Branch: "master"}, result.Manifest.Contract.RepositoryGuidance, "guidance must come from default branch independently of PR base")
 			require.True(t, result.Manifest.Gates.ChecksVerified, "complete confirmed check inventory should support check-only rechecks")
 			require.Equal(t, head, result.Health.HeadSHA, "captured health must describe the exact reviewed head")
 			require.True(t, result.Health.ChecksConfirmed, "captured health should preserve confirmed check provenance")
@@ -212,6 +229,11 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			require.Equal(t, 1, snapshots.snapshotCalls, "assessment must keep one independent final PR read without an initial duplicate")
 			require.True(t, visual.request.Fresh, "publication refresh must bypass immutable visual snapshot restoration")
 			require.Equal(t, in.AssessmentID, *visual.request.AssessmentID, "capture must retain assessment identity")
+			snapshots.guidance = &models.CodeReviewRepositoryGuidance{Branch: "master", Present: true, BlobSHA: strings.Repeat("d", 40), Content: "Updated default branch guidance"}
+			updatedGuidance, err := s.CaptureAssessmentInputs(context.Background(), in)
+			require.NoError(t, err, "same-head review must recapture current default branch guidance")
+			require.Equal(t, snapshots.guidance, updatedGuidance.Manifest.Contract.RepositoryGuidance, "captured manifest must preserve actual guidance bytes")
+			require.Equal(t, RecheckReasonContractChanged, RecheckBaselineChange(updatedGuidance.Manifest, result.Manifest), "guidance updates must force a full review without a rebase")
 			s.SetExternalContextResolver(assessmentExternalFixture{digest: "changed-integration-tools"})
 			changed, err := s.CaptureAssessmentInputs(context.Background(), in)
 			require.NoError(t, err, "changed external prompt context should remain capturable")
