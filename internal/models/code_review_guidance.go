@@ -1,12 +1,16 @@
 package models
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
 )
 
 const CodeReviewGuidanceMaxBytes = 64 * 1024
+
+// ErrInvalidCodeReviewGuidanceFile requires a repository change, not a retry.
+var ErrInvalidCodeReviewGuidanceFile = errors.New("invalid REVIEW.md")
 
 // CodeReviewRepositoryGuidance captures root REVIEW.md from the repository's
 // default branch. Missing files are explicit; nil denotes a historical capture
@@ -32,7 +36,7 @@ func (g CodeReviewRepositoryGuidance) Validate() error {
 		return fmt.Errorf("repository review guidance requires a Git blob SHA")
 	}
 	if len(g.Content) > CodeReviewGuidanceMaxBytes || !utf8.ValidString(g.Content) || strings.ContainsRune(g.Content, 0) {
-		return fmt.Errorf("REVIEW.md must be UTF-8 text of at most %d bytes", CodeReviewGuidanceMaxBytes)
+		return fmt.Errorf("%w: must be UTF-8 text of at most %d bytes", ErrInvalidCodeReviewGuidanceFile, CodeReviewGuidanceMaxBytes)
 	}
 	return nil
 }

@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 )
 
@@ -139,6 +141,13 @@ func githubRateLimitJitter(retryKey string) time.Duration {
 }
 
 func classifyGitHubJobError(err error, retryKey string) error {
+	if errors.Is(err, models.ErrInvalidCodeReviewGuidanceFile) {
+		var fatal *FatalError
+		if errors.As(err, &fatal) {
+			return err
+		}
+		return &FatalError{Err: fmt.Errorf("%w; fix root REVIEW.md on the repository default branch and request a new review", err)}
+	}
 	if errors.Is(err, db.ErrCodeReviewPublicationLockBusy) {
 		delay := 15 * time.Second
 		retryWindow := githubRateLimitMaxRetryDuration

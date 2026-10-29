@@ -2,8 +2,11 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	agentsvc "github.com/assembledhq/143/internal/services/agent"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -155,8 +159,13 @@ func TestCodeReviewCapturedGuidancePrompts(t *testing.T) {
 			require.NoError(t, err, "assessment guidance must restore without network dependencies")
 			require.Equal(t, tt.guidance, guidance, "assessment guidance must remain pinned")
 			cfg := models.DefaultCodeReviewPolicyConfig()
+			cfg.ReviewInstructions = "Apply organization conventions."
 			reviewer := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{}, guidance)
 			synthesis := codeReviewOrchestratorPrompt(runCodeReviewPayload{RepositoryGuidance: guidance}, models.PullRequest{}, nil, cfg, 1, "", nil, nil, nil, models.CodeReviewVisualEvidenceSnapshot{})
+			if guidance != nil {
+				require.Less(t, strings.Index(synthesis, "<repository_review_guidance>"), strings.Index(synthesis, "STRICT OUTPUT CONTRACT"), "machine-readable output contract must follow repository guidance")
+				require.Contains(t, reviewer, "except for the separately captured default-branch REVIEW.md guidance", "organization instructions must recognize the captured guidance exception")
+			}
 			for _, prompt := range []string{reviewer, synthesis} {
 				if tt.guidance == nil {
 					require.NotContains(t, prompt, "<repository_review_guidance>", "historical runs must not silently gain new instructions")
@@ -195,4 +204,73 @@ func TestPrepareFullAssessmentDoesNotRecaptureStartedLegacyReview(t *testing.T) 
 	require.Nil(t, current, "later default branch content must not replace original reviewer inputs")
 	require.Empty(t, capture.requests, "started legacy review must not capture new instructions")
 	require.NoError(t, mock.ExpectationsWereMet(), "guard should stop before capture and insertion")
+}
+
+type guidanceFreshnessCapture struct {
+	result codereviewsvc.AssessmentInputCaptureResult
+	err    error
+}
+
+func (c guidanceFreshnessCapture) CaptureAssessmentInputs(context.Context, codereviewsvc.AssessmentInputCaptureRequest) (codereviewsvc.AssessmentInputCaptureResult, error) {
+	return c.result, c.err
+}
+
+func TestCodeReviewGuidancePublicationFreshness(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                                 string
+		changed, removed, invalid, temporary bool
+	}{
+		{name: "unchanged guidance"}, {name: "edited guidance", changed: true}, {name: "removed guidance", removed: true},
+		{name: "invalid file requires repair", invalid: true}, {name: "provider failure remains retryable", temporary: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			digest := strings.Repeat("a", 64)
+			input := codereviewsvc.ReviewInputCapture{
+				Code:     codereviewsvc.ReviewCodeInput{OrgID: uuid.New(), RepositoryID: uuid.New(), PullRequestID: uuid.New(), HeadSHA: "head", BaseSHA: "base", BaseRef: "release", FilesComplete: true},
+				Contract: codereviewsvc.ReviewContractInput{PolicyID: uuid.New(), PolicyVersion: 1, PolicyDigest: digest, RosterDigest: digest, ModelConfigurationDigest: digest, PromptContractVersion: "1", PromptContentDigest: digest, InstructionsDigest: digest, ExternalInputsComplete: true, RepositoryGuidance: &models.CodeReviewRepositoryGuidance{Branch: "master", Present: true, BlobSHA: strings.Repeat("b", 40), Content: "Original guidance"}},
+				Title:    "Synthetic change", Visual: codereviewsvc.ReviewVisualInput{CaptureComplete: true, SourceProvenanceComplete: true},
+				TextEvidence: codereviewsvc.ReviewTextInput{Complete: true, SourceProvenanceComplete: true, UnclassifiedDigest: digest, Items: []codereviewsvc.ReviewTextEvidence{{EvidenceID: "pr-body", Surface: "pull_request_description", ProviderObjectID: "1", SourceURL: "https://example.test/pr/1", Section: "full", ContentDigest: fmt.Sprintf("%x", sha256.Sum256(nil))}}},
+				Gates:        codereviewsvc.ReviewGateInput{SnapshotDigest: digest, EligibilityDigest: digest, ChecksDigest: digest, DynamicDigest: digest, Complete: true},
+			}
+			baseline, err := codereviewsvc.BuildReviewInputManifest(input)
+			require.NoError(t, err, "baseline must be a valid immutable capture")
+			raw, err := json.Marshal(baseline)
+			require.NoError(t, err, "baseline should serialize")
+			assessment := models.CodeReviewAssessment{ID: uuid.New(), InputManifest: raw, InputDigest: baseline.InputDigest, HeadSHA: "head", BaseSHA: "base", BaseRef: "release", PolicyID: input.Contract.PolicyID}
+			if tt.changed {
+				input.Contract.RepositoryGuidance = &models.CodeReviewRepositoryGuidance{Branch: "master", Present: true, BlobSHA: strings.Repeat("c", 40), Content: "New guidance"}
+			}
+			if tt.removed {
+				input.Contract.RepositoryGuidance = &models.CodeReviewRepositoryGuidance{Branch: "master"}
+			}
+			fresh, err := codereviewsvc.BuildReviewInputManifest(input)
+			require.NoError(t, err, "fresh guidance should build independently of unchanged PR code")
+			capture := guidanceFreshnessCapture{result: codereviewsvc.AssessmentInputCaptureResult{Manifest: fresh, Policy: models.CodeReviewPolicyRecord{ID: input.Contract.PolicyID}}}
+			if tt.invalid {
+				capture.err = (models.CodeReviewRepositoryGuidance{Branch: "master", Present: true, BlobSHA: strings.Repeat("a", 40), Content: "\x00"}).Validate()
+			}
+			if tt.temporary {
+				capture.err = &ghservice.GitHubAPIError{StatusCode: http.StatusServiceUnavailable, Body: []byte(`{"message":"unavailable"}`)}
+			}
+			_, err = captureFreshFullAssessment(context.Background(), &Services{CodeReviewInputCapture: capture}, runCodeReviewPayload{SessionID: uuid.New()}, assessment)
+			switch {
+			case tt.changed || tt.removed:
+				require.ErrorIs(t, err, errFullAssessmentInputsChanged, "changed guidance must take the existing supersede-and-restart publication path")
+			case tt.invalid:
+				var fatal *FatalError
+				require.ErrorAs(t, err, &fatal, "invalid REVIEW.md must fail promptly instead of exhausting retries")
+				require.ErrorIs(t, err, models.ErrInvalidCodeReviewGuidanceFile, "terminal failure must preserve the invalid-file reason")
+				require.Contains(t, err.Error(), "fix root REVIEW.md on the repository default branch and request a new review", "terminal failure must explain how to recover")
+				require.Equal(t, err, classifyGitHubJobError(err, "retry"), "reclassification must preserve the existing actionable fatal error")
+			case tt.temporary:
+				var retryable *RetryableError
+				require.ErrorAs(t, err, &retryable, "temporary GitHub failures must retain bounded retry policy")
+			default:
+				require.NoError(t, err, "unchanged guidance should preserve publication eligibility")
+			}
+		})
+	}
 }

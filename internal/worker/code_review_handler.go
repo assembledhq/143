@@ -339,7 +339,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		job.RepositoryGuidance, err = loadCodeReviewRepositoryGuidance(ctx, stores, services, job, assessment, len(agentResults) > 0)
 		if err != nil {
-			return fmt.Errorf("prepare repository review guidance: %w", err)
+			return fmt.Errorf("prepare repository review guidance: %w", classifyGitHubJobError(err, job.SessionID.String()))
 		}
 		changedFiles, changedFilesAvailable, err := loadCodeReviewAssessmentChangedFiles(ctx, stores, services, job, pr, capturedAssessment)
 		if err != nil {

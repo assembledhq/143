@@ -119,6 +119,9 @@ func TestCaptureCodeReviewRepositoryGuidance(t *testing.T) {
 			require.NoError(t, mock.ExpectationsWereMet(), "repository reads must be tenant scoped")
 			if tt.wantErr {
 				require.Error(t, err, "unavailable or invalid guidance must not silently become absent")
+				if tt.mode == "120000" || len(tt.content) > models.CodeReviewGuidanceMaxBytes || tt.content == "\xff" || tt.content == "a\x00b" {
+					require.ErrorIs(t, err, models.ErrInvalidCodeReviewGuidanceFile, "invalid repository files must be distinguishable from temporary provider failures")
+				}
 				return
 			}
 			require.NoError(t, err, "default branch guidance should be captured")

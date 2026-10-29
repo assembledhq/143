@@ -69,7 +69,7 @@ func (s *PRService) CaptureCodeReviewRepositoryGuidance(ctx context.Context, org
 			continue
 		}
 		if entry.Type != "blob" || (entry.Mode != "100644" && entry.Mode != "100755") || entry.Size < 0 || entry.Size > models.CodeReviewGuidanceMaxBytes {
-			return result, fmt.Errorf("REVIEW.md must be a regular file of at most %d bytes", models.CodeReviewGuidanceMaxBytes)
+			return result, fmt.Errorf("%w: must be a regular file of at most %d bytes", models.ErrInvalidCodeReviewGuidanceFile, models.CodeReviewGuidanceMaxBytes)
 		}
 		result.Present, result.BlobSHA = true, entry.SHA
 		if err := result.Validate(); err != nil {
