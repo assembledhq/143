@@ -1,3 +1,5 @@
+SET LOCAL lock_timeout = '5s';
+
 LOCK TABLE caller_send_intent_control IN SHARE ROW EXCLUSIVE MODE;
 DO $$
 DECLARE expected record;

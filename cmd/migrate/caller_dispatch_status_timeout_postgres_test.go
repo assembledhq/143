@@ -144,22 +144,27 @@ func callerDispatchStatusTimeoutSnapshotAt(t *testing.T, ctx context.Context, co
 
 func callerDispatchStatusTimeoutWait(t *testing.T, ctx context.Context, holder pgx.Tx, migrator, holderPID int32, query string, queryBytes int, mode string, finished <-chan struct{}) {
 	t.Helper()
+	callerMigrationLockTimeoutWait(t, ctx, holder, migrator, holderPID, query, queryBytes, "code_review_session_metadata", mode, finished)
+}
+
+func callerMigrationLockTimeoutWait(t *testing.T, ctx context.Context, holder pgx.Tx, migrator, holderPID int32, query string, queryBytes int, relation, mode string, finished <-chan struct{}) {
+	t.Helper()
 	require.NotEqual(t, holderPID, migrator, "the existing migrator must be distinct from the existing inspection/holder backend")
 	if len(query) >= queryBytes {
-		query = query[:queryBytes-1] // The three finite migration sources are ASCII.
+		query = query[:queryBytes-1] // The selected migration sources are ASCII.
 	}
 	for {
 		select {
 		case <-finished:
-			require.FailNow(t, "observe the exact migrator metadata wait before accepting its eventual timeout")
+			require.FailNow(t, "observe the exact migrator relation wait before accepting its eventual timeout")
 		case <-ctx.Done():
-			require.FailNow(t, "the real metadata wait must be positively attributed within the independent finite wall guard")
+			require.FailNow(t, "the real relation wait must be positively attributed within the independent finite wall guard")
 		default:
 		}
 		_, err := holder.Exec(ctx, `SELECT pg_stat_clear_snapshot()`)
 		require.NoError(t, err, "refresh activity statistics inside the existing holder transaction before each sequential observation")
 		var blocked bool
-		require.NoError(t, holder.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid=$1::integer AND a.state='active' AND a.wait_event_type='Lock' AND a.query=$3 AND $2::integer=ANY(pg_blocking_pids(a.pid)) AND EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.locktype='relation' AND l.relation='code_review_session_metadata'::regclass AND l.mode=$4 AND NOT l.granted))`, migrator, holderPID, query, mode).Scan(&blocked), "use only sequential holder-connection queries to prove the real migrator PID, server-retained DDL text, metadata lock mode and exact blocker")
+		require.NoError(t, holder.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity a WHERE a.datname=current_database() AND a.pid=$1::integer AND a.state='active' AND a.wait_event_type='Lock' AND a.query=$3 AND $2::integer=ANY(pg_blocking_pids(a.pid)) AND EXISTS(SELECT 1 FROM pg_locks l WHERE l.pid=a.pid AND l.locktype='relation' AND l.relation=$5::regclass AND l.mode=$4 AND NOT l.granted))`, migrator, holderPID, query, mode, relation).Scan(&blocked), "use only sequential holder-connection queries to prove the real migrator PID, server-retained DDL text, relation lock mode and exact blocker")
 		if blocked {
 			return
 		}

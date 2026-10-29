@@ -1,3 +1,5 @@
+SET LOCAL lock_timeout = '5s';
+
 ALTER TABLE code_review_agent_results VALIDATE CONSTRAINT chk_cra_dispatch_send;
 ALTER TABLE code_review_agent_results VALIDATE CONSTRAINT fk_cra_dispatch_thread;
 ALTER TABLE session_review_loops VALIDATE CONSTRAINT chk_srl_startup_send;
