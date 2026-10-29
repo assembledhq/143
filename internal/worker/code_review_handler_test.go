@@ -1544,7 +1544,7 @@ func TestCodeReviewVisualEvidenceSatisfactions(t *testing.T) {
 
 func TestCodeReviewReviewerMessageUsesLocalInputs(t *testing.T) {
 	t.Parallel()
-	prompt := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), nil, models.CodeReviewVisualEvidenceSnapshot{})
+	prompt := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), nil, models.CodeReviewVisualEvidenceSnapshot{}, nil)
 	require.Contains(t, prompt, "prepared local diff", "reviewers should read the coordinator's captured evidence")
 	require.Contains(t, prompt, "Do NOT run test suites", "reviewer prompt should forbid running test suites")
 	require.Contains(t, prompt, "Do NOT modify the workspace", "reviewer prompt should forbid workspace changes")
@@ -1572,7 +1572,7 @@ func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
 	session := models.Session{ID: job.SessionID, OrgID: job.OrgID, RepositoryID: &job.RepositoryID, Origin: models.SessionOriginCodeReview, RevisionContext: revision, BaseCommitSHA: &job.HeadSHA}
 	target, err := agentsvc.CodeReviewInputTargetFromSession(&session)
 	require.NoError(t, err, "captured session input target should validate")
-	prompt := codeReviewReviewerPrompt(target, pr, models.DefaultCodeReviewPolicyConfig(), files, models.CodeReviewVisualEvidenceSnapshot{})
+	prompt := codeReviewReviewerPrompt(target, pr, models.DefaultCodeReviewPolicyConfig(), files, models.CodeReviewVisualEvidenceSnapshot{}, nil)
 
 	require.False(t, strings.HasPrefix(prompt, "/review"), "local review should not invoke a URL-driven native command")
 	require.Contains(t, prompt, "<review_target>", "reviewer prompt should include the review target block")
@@ -1591,7 +1591,7 @@ func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
 	explicitBase := "2222222222222222222222222222222222222222"
 	pr.BaseSHA = &explicitBase
 	pr.GitHubRepo = "Renamed/Repository"
-	withRenamedRepository := codeReviewReviewerPrompt(target, pr, models.DefaultCodeReviewPolicyConfig(), files, models.CodeReviewVisualEvidenceSnapshot{})
+	withRenamedRepository := codeReviewReviewerPrompt(target, pr, models.DefaultCodeReviewPolicyConfig(), files, models.CodeReviewVisualEvidenceSnapshot{}, nil)
 	require.Contains(t, withRenamedRepository, "Base SHA: "+baseSHA, "captured session base SHA should win over mutable PR data")
 	require.Contains(t, withRenamedRepository, "Repository: assembledhq/example", "captured repository identity should survive rename or casing changes")
 	require.Contains(t, withRenamedRepository, "Prepared manifest: "+manifest, "prompt and coordinator must retain the same captured bundle path")
@@ -1599,7 +1599,7 @@ func TestCodeReviewReviewerPromptIncludesPullRequestTarget(t *testing.T) {
 	commands := codeReviewNativeReviewCommands(models.AgentTypeClaudeCode, prompt)
 	require.Nil(t, commands, "Claude reviewers should also use plain local review instructions")
 
-	withoutTarget := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), nil, models.CodeReviewVisualEvidenceSnapshot{})
+	withoutTarget := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, models.DefaultCodeReviewPolicyConfig(), nil, models.CodeReviewVisualEvidenceSnapshot{}, nil)
 	require.NotContains(t, withoutTarget, "<review_target>", "prompt without a head SHA should omit the target block")
 	require.Contains(t, withoutTarget, "report the review as incomplete", "missing input targets must produce an explicit incomplete result")
 }
@@ -1612,7 +1612,7 @@ func TestCodeReviewEveryReviewerAgentSharesLocalEvidence(t *testing.T) {
 			t.Parallel()
 			cfg := models.DefaultCodeReviewPolicyConfig()
 			cfg.ReviewInstructions = "Review organization-specific invariants."
-			prompt := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{})
+			prompt := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{}, nil)
 			message := codeReviewReviewerMessage(agentType, prompt)
 			require.Equal(t, prompt, message, "all reviewers should receive the same local evidence and independent analysis constraints")
 			require.Nil(t, codeReviewNativeReviewCommands(agentType, prompt), "no reviewer should independently retrieve the PR through a native command")
@@ -1626,7 +1626,7 @@ func TestCodeReviewPromptPolicyRouting(t *testing.T) {
 	cfg := models.DefaultCodeReviewPolicyConfig()
 	cfg.ReviewInstructions = "Focus on tenant isolation; {{ .Title }} must remain literal."
 	cfg.AutomatedApprovalPolicy = "Escalate every architectural change."
-	reviewer := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{})
+	reviewer := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{}, nil)
 	require.False(t, strings.HasPrefix(reviewer, "/review"), "reviewer invocation should use plain local instructions")
 	require.Contains(t, reviewer, cfg.ReviewInstructions, "reviewer should receive organization review instructions")
 	require.NotContains(t, reviewer, cfg.AutomatedApprovalPolicy, "reviewer should not receive automated approval policy")
@@ -1634,7 +1634,7 @@ func TestCodeReviewPromptPolicyRouting(t *testing.T) {
 
 	empty := cfg
 	empty.ReviewInstructions = ""
-	require.NotContains(t, codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, empty, nil, models.CodeReviewVisualEvidenceSnapshot{}), "<organization_review_instructions>", "empty instructions should omit the organization section")
+	require.NotContains(t, codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, empty, nil, models.CodeReviewVisualEvidenceSnapshot{}, nil), "<organization_review_instructions>", "empty instructions should omit the organization section")
 }
 
 func TestCodeReviewOrchestratorPromptIncludesMentionContext(t *testing.T) {
@@ -1765,8 +1765,8 @@ func TestCodeReviewCapturedPolicyVersionsRenderDistinctPromptRecords(t *testing.
 	secondRecord := codeReviewPolicyRecordForTest(second)
 	secondRecord.Version = 2
 
-	firstReviewerRecord := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, firstRecord.Config(), nil, models.CodeReviewVisualEvidenceSnapshot{})
-	secondReviewerRecord := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, secondRecord.Config(), nil, models.CodeReviewVisualEvidenceSnapshot{})
+	firstReviewerRecord := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, firstRecord.Config(), nil, models.CodeReviewVisualEvidenceSnapshot{}, nil)
+	secondReviewerRecord := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, secondRecord.Config(), nil, models.CodeReviewVisualEvidenceSnapshot{}, nil)
 	require.Contains(t, firstReviewerRecord, first.ReviewInstructions, "captured reviewer record should use its historic policy record")
 	require.NotContains(t, firstReviewerRecord, second.ReviewInstructions, "captured reviewer record should not use the latest active policy")
 	require.NotEqual(t, firstReviewerRecord, secondReviewerRecord, "different captured policy versions should render different reviewer records")

@@ -113,7 +113,8 @@ func PlanReviewRecheck(in RecheckPlanInput) RecheckPlan {
 
 // RecheckBaselineChange compares valid manifests for code-review reuse. The
 // resolved, versioned policy includes review instructions, approval rules, and
-// the reviewer roster. Auxiliary prompt/runtime fingerprints remain provenance
+// the reviewer roster. Captured default-branch REVIEW.md must also match.
+// Auxiliary prompt/runtime fingerprints remain provenance
 // and freshness inputs, not reasons to rerun an unchanged code review.
 func RecheckBaselineChange(current, baseline ReviewInputManifest) RecheckReason {
 	if current.CodeDigest != baseline.CodeDigest {
@@ -121,7 +122,8 @@ func RecheckBaselineChange(current, baseline ReviewInputManifest) RecheckReason 
 	}
 	if current.Contract.PolicyID != baseline.Contract.PolicyID ||
 		current.Contract.PolicyVersion != baseline.Contract.PolicyVersion ||
-		current.Contract.PolicyDigest != baseline.Contract.PolicyDigest {
+		current.Contract.PolicyDigest != baseline.Contract.PolicyDigest ||
+		!reflect.DeepEqual(current.Contract.RepositoryGuidance, baseline.Contract.RepositoryGuidance) {
 		return RecheckReasonContractChanged
 	}
 	return ""

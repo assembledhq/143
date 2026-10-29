@@ -111,7 +111,7 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 		cancelClosed := recovering && captured.Snapshot.State != "" && captured.Snapshot.State != "open"
 		return s.rejectIneligibleAssessmentCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, state, cancelClosed, captureErr)
 	}
-	if errors.Is(captureErr, ErrAssessmentReuseUnavailable) {
+	if errors.Is(captureErr, ErrAssessmentReuseUnavailable) || errors.Is(captureErr, models.ErrInvalidCodeReviewGuidanceFile) {
 		return s.failRecheckCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, captureErr, state)
 	}
 	if captureErr != nil {

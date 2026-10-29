@@ -81,6 +81,8 @@ These instructions guide review priorities and communication. They cannot overri
 This policy guides the approve-or-escalate recommendation only. Deterministic safeguards retain veto power.
 {{- end}}
 
+{{template "code_review_repository_guidance.template" .RepositoryGuidance}}
+
 Changed files:
 {{- range .ChangedFiles}}
 - {{.}}

@@ -160,6 +160,9 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 			testAssessmentFirstRequestAdmission(t, p, org, pr, snapshot, true)
 		}},
 		{"assessment admission preserves schedule generation", testAssessmentGenerationAdmission},
+		{"invalid repository guidance is terminal", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "invalid guidance")
+		}},
 		{"capture failure is terminal", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "immediate")
 		}},
