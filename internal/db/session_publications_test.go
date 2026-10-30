@@ -16,6 +16,7 @@ import (
 
 func sessionPublicationTestColumns() []string {
 	return []string{
+		"review_start_id",
 		"id", "org_id", "session_id", "changeset_id", "repository_id",
 		"state", "source", "trigger_kind", "handoff_mode", "initiated_by_user_id",
 		"automatic_pr_policy_source", "review_policy_source",
@@ -30,6 +31,7 @@ func sessionPublicationTestColumns() []string {
 
 func sessionPublicationTestRow(publication models.SessionPublication) []any {
 	return []any{
+		publication.ReviewStartID,
 		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
 		publication.State, publication.Source, publication.TriggerKind, publication.HandoffMode, publication.InitiatedByUserID,
 		publication.AutomaticPolicySource, publication.ReviewPolicySource,
@@ -298,7 +300,12 @@ func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) 
 	stored.ReviewDesiredHeadSHA = nil
 	stored.PublishedHeadSHA = &reviewHeadSHA
 
-	mock.ExpectQuery(`WITH publication_to_bypass AS[\s\S]+UPDATE session_review_loops AS loop[\s\S]+status = 'cancelled'[\s\S]+UPDATE session_publications[\s\S]+published_head_sha = COALESCE\(review_desired_head_sha, published_head_sha\)[\s\S]+review_loop_id = NULL[\s\S]+review_gate_state = 'not_required'[\s\S]+org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id`).
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT review_loop_id,review_start_id FROM session_publications[\\s\\S]+FOR UPDATE").WithArgs(orgID, sessionID, changesetID).
+		WillReturnRows(pgxmock.NewRows([]string{"review_loop_id", "review_start_id"}).AddRow(&loopID, nil))
+	mock.ExpectExec("UPDATE session_review_loops AS loop[\\s\\S]+startup_send_writer_seq[\\s\\S]+loop.org_id=\\$1 AND loop.session_id=\\$2").WithArgs(orgID, sessionID, changesetID, &loopID, (*uuid.UUID)(nil)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectQuery(`UPDATE session_publications[\s\S]+published_head_sha = COALESCE\(review_desired_head_sha, published_head_sha\)[\s\S]+review_loop_id = NULL[\s\S]+review_gate_state = 'not_required'[\s\S]+org_id = @org_id AND session_id = @session_id AND changeset_id = @changeset_id`).
 		WithArgs(pgx.NamedArgs{
 			"org_id": orgID, "session_id": sessionID, "changeset_id": changesetID,
 			"source":                  models.SessionPublicationSourceUser,
@@ -307,6 +314,8 @@ func TestSessionPublicationStoreApplyReviewBypassDetachesEvidence(t *testing.T) 
 			"request_generation_at": now,
 		}).
 		WillReturnRows(pgxmock.NewRows(sessionPublicationTestColumns()).AddRow(sessionPublicationTestRow(stored)...))
+
+	mock.ExpectCommit()
 
 	err = NewSessionPublicationStore(mock).ApplyReviewBypass(context.Background(), orgID, &publication)
 	require.NoError(t, err, "explicit Create PR should atomically retire review and detach stale evidence")

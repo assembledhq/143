@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sync/atomic"
 	"time"
 
@@ -132,6 +133,37 @@ func WithLeaseRenewer(renewer JobLeaseRenewer) Option {
 	return func(w *Worker) { w.leaseRenewer = renewer }
 }
 
+// CodeReviewTerminalStore owns the complete bounded controller retirement unit.
+// It is separate from the ordinary queue and the reserved lease renewer.
+type CodeReviewTerminalStore interface {
+	DeadLetterCodeReviewWithLease(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, db.CodeReviewTerminalFailure) (db.CodeReviewTerminalOutcome, error)
+}
+
+// WithCodeReviewTerminalStore supplies the explicitly configured retirement
+// owner. An ordinary queue store does not imply this capability.
+func WithCodeReviewTerminalStore(store CodeReviewTerminalStore) Option {
+	return func(w *Worker) {
+		if codeReviewTerminalStoreAvailable(store) {
+			w.codeReviewTerminal = store
+		} else {
+			w.codeReviewTerminal = nil
+		}
+	}
+}
+
+func codeReviewTerminalStoreAvailable(store CodeReviewTerminalStore) bool {
+	if store == nil {
+		return false
+	}
+	value := reflect.ValueOf(store)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
+}
+
 type jobLeaseStore interface {
 	retryWindowLeaseStore
 	ClaimNextRunnable(ctx context.Context, nodeID, ownerID string, lockToken uuid.UUID, leaseDuration time.Duration) (*models.Job, error)
@@ -164,15 +196,16 @@ const maxRetryableDuration = 8 * time.Minute
 var defaultMaxLongRunningJobDuration = time.Duration(models.MaxAbsoluteRuntimeCeilingSeconds)*time.Second + 2*time.Minute
 
 type Worker struct {
-	jobs          jobLeaseStore
-	leaseRenewer  JobLeaseRenewer
-	logger        zerolog.Logger
-	nodeID        string
-	handlers      map[string]JobHandler
-	pollInterval  time.Duration
-	leaseDuration time.Duration
-	renewInterval time.Duration
-	renewTimeout  time.Duration
+	jobs               jobLeaseStore
+	leaseRenewer       JobLeaseRenewer
+	codeReviewTerminal CodeReviewTerminalStore
+	logger             zerolog.Logger
+	nodeID             string
+	handlers           map[string]JobHandler
+	pollInterval       time.Duration
+	leaseDuration      time.Duration
+	renewInterval      time.Duration
+	renewTimeout       time.Duration
 	// maxLongRunningJobDuration is a worker-level lease-renewal watchdog for
 	// session jobs. Handler-owned contexts should normally stop first; this
 	// outer guard prevents a wedged handler from renewing a job forever.
@@ -637,22 +670,43 @@ func (w *Worker) retryJobWithDelayAt(ctx context.Context, now time.Time, jobID, 
 	return runAt, true
 }
 
-type codeReviewTerminalLeaseStore interface {
-	DeadLetterCodeReviewWithLease(ctx context.Context, orgID, jobID, lockToken uuid.UUID, errMsg, failureDetail string) (bool, error)
-}
-
-var _ codeReviewTerminalLeaseStore = (*db.JobStore)(nil)
+var _ CodeReviewTerminalStore = (*db.JobStore)(nil)
 
 func (w *Worker) deadLetterJob(ctx, handlerCtx context.Context, job *models.Job, terminalErr error) {
+	if job == nil || job.LockToken == nil || *job.LockToken == uuid.Nil || terminalErr == nil {
+		w.logger.Error().Msg("cannot retire a job without its exact lease and terminal error")
+		return
+	}
 	var ok bool
 	var err error
 	if job.JobType == models.JobTypeRunCodeReviewRecheck || (job.JobType == models.JobTypeRunCodeReview && !errors.Is(terminalErr, errCodeReviewEndedParentRecovery)) {
-		store, supported := w.jobs.(codeReviewTerminalLeaseStore)
-		if !supported {
+		if !codeReviewTerminalStoreAvailable(w.codeReviewTerminal) {
 			w.logger.Error().Str("job_id", job.ID.String()).Msg("job store cannot atomically fail a code review; leaving job for lease recovery")
 			return
 		}
-		ok, err = store.DeadLetterCodeReviewWithLease(ctx, job.OrgID, job.ID, *job.LockToken, terminalErr.Error(), codeReviewDeadLetterReason(terminalErr))
+		code, message, retryable := codeReviewTerminalFailureStatus(terminalErr)
+		var outcome db.CodeReviewTerminalOutcome
+		outcome, err = w.codeReviewTerminal.DeadLetterCodeReviewWithLease(ctx, job.OrgID, job.ID, *job.LockToken, db.CodeReviewTerminalFailure{
+			JobError: terminalErr.Error(), Reason: codeReviewDeadLetterReason(terminalErr), Code: code, Message: message, Retryable: retryable,
+		})
+		ok = outcome.Owned()
+		if err == nil && ok {
+			if !outcome.Matches(job.OrgID, job.ID, *job.LockToken) {
+				w.logger.Error().Str("job_id", job.ID.String()).Msg("code review retirement did not confirm the exact committed job lease")
+				return
+			}
+			scope, valid := outcome.Scope()
+			if !valid {
+				// A positively lease-owned malformed/missing-scope poison job can
+				// retire, but that result authorizes no target-derived hooks.
+				return
+			}
+			if scope.JobType != job.JobType {
+				w.logger.Error().Str("job_id", job.ID.String()).Msg("code review retirement owner type changed before hook delivery")
+				return
+			}
+			handlerCtx = context.WithValue(handlerCtx, codeReviewTerminalOutcomeKey{}, outcome)
+		}
 	} else {
 		// An ended-parent ownership rejection must preserve the assessment for
 		// the existing guarded recovery path, as its cleanup hook also does.

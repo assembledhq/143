@@ -3025,11 +3025,12 @@ func newTestStores(t *testing.T) (*Stores, pgxmock.PgxPoolIface) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err, "should create pgxmock pool")
 	stores := &Stores{
-		Issues:       db.NewIssueStore(mock),
-		Sessions:     db.NewSessionStore(mock),
-		Jobs:         db.NewJobStore(mock),
-		Integrations: db.NewIntegrationStore(mock),
-		Webhooks:     db.NewWebhookDeliveryStore(mock),
+		Issues:                 db.NewIssueStore(mock),
+		Sessions:               db.NewSessionStore(mock),
+		Jobs:                   db.NewJobStore(mock),
+		Integrations:           db.NewIntegrationStore(mock),
+		Webhooks:               db.NewWebhookDeliveryStore(mock),
+		ThreadSendDependencies: requiredWorkerThreadSendDependencies(t),
 	}
 	return stores, mock
 }
@@ -5136,6 +5137,7 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	stores.ThreadInbox = db.NewThreadInboxStore(mock)
 	stores.ThreadSendTx = mock
 	stores.PullRequests = db.NewPullRequestStore(mock)
+	stores.ThreadSendDependencies = workerThreadSendSQLDependencies(t, stores, mock)
 
 	orgID := uuid.New()
 	sessionID := uuid.New()
@@ -5186,8 +5188,18 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	mock.ExpectQuery(`(?s)SELECT.*FROM pull_requests.*WHERE session_id.*org_id`).
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerPullRequestColumns).AddRow(workerPullRequestRow(prID, sessionID, orgID, repo, headRef, now)...))
+	expectWorkerThreadSendSQLEntry(mock, orgID, sessionID)
 	// SendMessage checks both review and automation ownership before admitting
 	// an ordinary reconciliation turn.
+	mock.ExpectQuery(`SELECT code_review_owner_pr_id FROM sessions WHERE org_id=\$1 AND id=\$2`).
+		WithArgs(orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"code_review_owner_pr_id"}).AddRow(nil))
+	mock.ExpectQuery(`(?s)SELECT.*FROM sessions s\s+JOIN automation_target_sessions g`).
+		WithArgs(pgx.NamedArgs{"session_id": sessionID, "org_id": orgID}).
+		WillReturnError(pgx.ErrNoRows)
+	// The atomic send rechecks ownership and performs every deciding read
+	// after its fresh canonical scope guards on the supplied transaction.
+	expectWorkerThreadSendSQLMutation(mock, orgID, sessionID, threadID, models.SessionStatusCompleted, models.ThreadStatusCompleted)
 	mock.ExpectQuery(`SELECT code_review_owner_pr_id FROM sessions WHERE org_id=\$1 AND id=\$2`).
 		WithArgs(orgID, sessionID).
 		WillReturnRows(pgxmock.NewRows([]string{"code_review_owner_pr_id"}).AddRow(nil))
@@ -5212,16 +5224,12 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 			"claimable_statuses": []string{string(models.ThreadStatusIdle)},
 		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns))
-	mock.ExpectQuery(`(?s)SELECT\s+COALESCE`).
-		WithArgs(pgx.NamedArgs{
-			"id":         threadID,
-			"org_id":     orgID,
-			"session_id": sessionID,
-		}).
-		WillReturnRows(pgxmock.NewRows([]string{"target_status", "sibling_active"}).AddRow(string(models.ThreadStatusCompleted), 0))
 	mock.ExpectQuery("SELECT .* FROM session_threads").
 		WithArgs(workerAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(completedThreadRow...))
+	mock.ExpectQuery(`(?s)SELECT count\(\*\).*FROM session_threads.*org_id = @org_id.*session_id = @session_id`).
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery(`(?s)WITH locked_threads AS.*UPDATE session_threads.*RETURNING`).
 		WithArgs(pgx.NamedArgs{
 			"id":          threadID,
@@ -5259,7 +5267,6 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 			},
 		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(runningRow...))
-	mock.ExpectBegin()
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(
 			sessionID,
@@ -5284,7 +5291,6 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 			models.ThreadInboxDeliveryStatePending, 0,
 			nil, nil, nil, now, nil, nil, nil, now, now,
 		))
-	mock.ExpectCommit()
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(
 			orgID,
@@ -5300,6 +5306,7 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 			pgxmock.AnyArg(),
 		).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+	mock.ExpectCommit()
 
 	services := &Services{
 		PR: &stubPRService{
@@ -6402,6 +6409,7 @@ func workerChangesetTestRow(changeset models.SessionChangeset) []any {
 }
 
 var workerPublicationTestColumns = []string{
+	"review_start_id",
 	"id", "org_id", "session_id", "changeset_id", "repository_id",
 	"state", "source", "trigger_kind", "handoff_mode", "initiated_by_user_id",
 	"automatic_pr_policy_source", "review_policy_source", "review_max_passes", "review_loop_id",
@@ -6414,6 +6422,7 @@ var workerPublicationTestColumns = []string{
 
 func workerPublicationTestRow(publication models.SessionPublication) []any {
 	return []any{
+		publication.ReviewStartID,
 		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
 		publication.State, publication.Source, publication.TriggerKind, publication.HandoffMode, publication.InitiatedByUserID,
 		publication.AutomaticPolicySource, publication.ReviewPolicySource, publication.ReviewMaxPasses, publication.ReviewLoopID,
@@ -7175,7 +7184,7 @@ func TestEnsureBuilderReviewFresh(t *testing.T) {
 					loopID, orgID, sessionID, nil, nil,
 					tt.status, models.ReviewLoopSourceManual, nil, nil, nil, models.AgentTypeCodex,
 					2, models.ReviewLoopFixModeMinimal, 1, true, nil, nil, stringPtr("snap-start"), tt.checkpointKey,
-					nil, nil, now, nil,
+					nil, nil, now, nil, nil,
 				))
 
 			run := models.Session{ID: sessionID, OrgID: orgID, SnapshotKey: &tt.snapshotKey}
@@ -7423,7 +7432,7 @@ func TestEnsureAutomationPrePRReviewRetriesExistingRunningLoop(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows(workerReviewLoopColumns()).AddRow(
 			loopID, orgID, sessionID, &automationRunID, &threadID,
 			models.ReviewLoopStatusRunning, models.ReviewLoopSourceAutomation, nil, nil, nil, models.AgentTypeCodex,
-			1, models.ReviewLoopFixModeMinimal, 0, true, nil, nil, nil, nil, nil, nil, now, nil,
+			1, models.ReviewLoopFixModeMinimal, 0, true, nil, nil, nil, nil, nil, nil, now, nil, nil,
 		))
 
 	run := models.Session{
@@ -9025,7 +9034,7 @@ func workerReviewLoopColumns() []string {
 		"status", "source", "changeset_id", "workspace_revision", "desired_head_sha",
 		"agent_type", "max_passes", "fix_mode", "completed_passes", "review_required",
 		"bypassed_by_user_id", "bypass_reason", "loop_start_checkpoint_key", "latest_checkpoint_key",
-		"latest_summary", "started_by_user_id", "started_at", "completed_at",
+		"latest_summary", "started_by_user_id", "started_at", "completed_at", "startup_send_state",
 	}
 }
 

@@ -24,16 +24,30 @@ import (
 
 type captureRetirementFaultPool struct {
 	*pgxpool.Pool
-	fail  atomic.Bool
-	calls atomic.Int32
+	transactions db.CodeReviewMetadataTransactions
+	fail         atomic.Bool
+	calls        atomic.Int32
 }
 
-func (p *captureRetirementFaultPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if p.fail.Load() && strings.Contains(sql, "UPDATE code_review_session_metadata") && strings.Contains(sql, "SET status = 'stale'") {
-		p.calls.Add(1)
+func (p *captureRetirementFaultPool) Run(ctx context.Context, work func(context.Context, pgx.Tx) error) error {
+	// Keep the real owned-pool transaction's acquisition, budget and settlement;
+	// inject only the same retirement SQL fault inside its supplied transaction.
+	return p.transactions.Run(ctx, func(unitCtx context.Context, tx pgx.Tx) error {
+		return work(unitCtx, &captureRetirementFaultTx{Tx: tx, owner: p})
+	})
+}
+
+type captureRetirementFaultTx struct {
+	pgx.Tx
+	owner *captureRetirementFaultPool
+}
+
+func (tx *captureRetirementFaultTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if tx.owner.fail.Load() && strings.Contains(sql, "UPDATE code_review_session_metadata") && strings.Contains(sql, "SET status = 'stale'") {
+		tx.owner.calls.Add(1)
 		return nil, errors.New("synthetic source retirement write unavailable")
 	}
-	return p.Pool.Query(ctx, sql, args...)
+	return tx.Tx.Query(ctx, sql, args...)
 }
 
 func TestCaptureIdentityRetirementRetryDisputeHandoffPostgres(t *testing.T) {
@@ -69,8 +83,9 @@ func TestCaptureIdentityRetirementRetryDisputeHandoffPostgres(t *testing.T) {
 			require.NoError(t, err, "retain dispute authorization on source metadata")
 			_, err = pool.Exec(ctx, `UPDATE sessions SET revision_context=jsonb_build_object('pull_request_title','Saved review','triggering_dispute_id',$3::text) WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.job.SessionID, disputeID.String())
 			require.NoError(t, err, "retain valid immutable revision context and triggering dispute")
-			fault := &captureRetirementFaultPool{Pool: pool}
-			f.stores.CodeReviews = db.NewCodeReviewStore(fault)
+			fault := &captureRetirementFaultPool{Pool: pool, transactions: f.stores.ThreadSendDependencies.Transactions}
+			f.stores.CodeReviews, err = db.NewCodeReviewStoreWithTerminalTransactions(fault, fault)
+			require.NoError(t, err, "retain actual terminal transactions while faulting only the source retirement write")
 			disputes := codereviewsvc.NewDisputeService(f.stores.CodeReviewDisputes, f.stores.CodeReviews, f.stores.PullRequests, f.stores.Jobs, nil, "https://example.invalid", zerolog.Nop())
 			services := &Services{CodeReviewDisputes: disputes, CodeReviews: &statusCommentSubmitterStub{commentID: 9001}}
 			if !tt.handoff {
@@ -103,7 +118,7 @@ func TestCaptureIdentityRetirementRetryDisputeHandoffPostgres(t *testing.T) {
 			_, err = pool.Exec(ctx, `UPDATE jobs SET payload=$3,status='pending',lock_token=NULL,attempts=7,max_attempts=8,target_node_id=$4,priority=100000,run_at=now(),retry_window_started_at=now()-interval '4 hours' WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.jobID, payload, nodeID)
 			require.NoError(t, err, "reproduce an eighth claim after an unrelated generic retry window expired")
 			fault.fail.Store(true)
-			worker := New(pool, zerolog.Nop(), nodeID)
+			worker := f.newWorker(t, pool, nodeID)
 			worker.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(f.stores, services, zerolog.Nop()))
 			worker.poll(ctx)
 			var status models.JobStatus

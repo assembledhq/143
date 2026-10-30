@@ -417,7 +417,8 @@ uncertainty and unproved predecessor drain never become automatic replay.
 Existing `ownerloss` recovery of jobs/executors does not cover missing-input
 discovery. In-memory dead-letter callbacks are not its crash-recovery owner.
 
-The current thread path commits message/inbox before normal continuation enqueue.
+The characterized baseline thread path commits message/inbox before normal
+continuation enqueue.
 Moving claims and enqueue into one admission transaction is a deliberate failure-
 atomicity improvement, not a claim that today's paths are already equivalent.
 Characterize successful behavior first, add failure-injection regressions, and
@@ -509,9 +510,12 @@ and aborts only on a real exclusive-lock conflict. Rejecting every unknown scope
 would livelock `ClaimNextRunnable`. Fresh post-acquisition guard lookup requires
 READ COMMITTED; trigger snapshot and multi-scope behavior remain 0a proof gates.
 Milestone 0 must resolve any conflicting order before transactional extraction.
-The compatibility release below must land and finish rolling out before commands
-use a new lock order. The baseline already has inversions: session send locks the
-session before pending input (`sessions.go:4254`, `:4295`), whereas structured
+The compatibility release below must land and finish rolling out before active
+commands use the new lock graph. The 0a A.1 contract separately specifies the
+bounded atomic legacy thread-send exception and its adjacent-build proof; it
+does not establish that release floor. The baseline already has inversions:
+session send locks the session before pending input (`sessions.go:4254`,
+`:4295`), whereas structured
 answer locks input before session (`humaninput/db_repository.go:88`, `:108`).
 Capability grants also lock session then automation run, competing with automation
 dispatch's run-first order. Characterize these existing pairs; do not describe
@@ -1163,8 +1167,11 @@ revision; it must not reinterpret new durable records or trigger replay.
   recovers after a process restart without another user send or Redis wake.
 - DB-backed grants and state/result/activity writes use the caller transaction
   without hidden transactions, savepoints, or pre-commit publication.
-- A verified compatibility release precedes changed transaction overlap, and
-  both pre-floor/floor and floor/new coexistence are tested. Explicit end cannot
+- A verified compatibility release precedes changed transaction overlap, except
+  for the narrowly bounded atomic version-0 thread send specified in the 0a A.1
+  contract. That exception requires its own full-schema adjacent-writer proof,
+  unchanged runner bounds and no reliance on active fences. Both pre-floor/floor
+  and floor/new coexistence remain release gates. Explicit end cannot
   let an old runtime overwrite a successor or deliver its newly queued input.
 - Automation/review/GC lock order, drain distinctions, and immutable receipts stay
   protected by real concurrency regressions.

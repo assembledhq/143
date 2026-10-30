@@ -26,7 +26,8 @@ func TestRecheckDeadLetterAssessmentAtomicPostgres(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL for atomic recheck supervisor failure proof")
 	}
 	ctx := context.Background()
-	pool := fullRecoveryPostgresPool(t, ctx)
+	pool := fullRecoveryPostgresPoolWithMaxConns(t, ctx, 2)
+	require.Equal(t, int32(2), pool.Config().MaxConns, "actual supervisor retirement and exact scheduler cleanup must fit the bounded two-slot pool")
 	tests := []struct {
 		name        string
 		terminal    func() error
@@ -60,6 +61,9 @@ func TestRecheckDeadLetterAssessmentAtomicPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f, baseline := seedDeadLetterRecheck(t, pool)
+			terminalJobs, err := db.NewJobStoreWithCodeReviewTerminalTransactions(pool, f.stores.ThreadSendDependencies.Transactions)
+			require.NoError(t, err, "supply the existing actual bounded transaction capability to recheck retirement")
+			f.stores.Jobs = terminalJobs
 			status, publication := tt.status, tt.publication
 			if status == "" {
 				status = models.CodeReviewAssessmentRunning
@@ -67,7 +71,7 @@ func TestRecheckDeadLetterAssessmentAtomicPostgres(t *testing.T) {
 			if publication == "" {
 				publication = models.CodeReviewPublicationNotStarted
 			}
-			_, err := pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status=$3,publication_state=$4,failure_detail=NULLIF($5,''),completed_at=CASE WHEN $3 IN ('failed','superseded') THEN now() ELSE NULL END,superseded_at=CASE WHEN $3='superseded' THEN now() ELSE NULL END WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.assessment, status, publication, tt.detail)
+			_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET status=$3,publication_state=$4,failure_detail=NULLIF($5,''),completed_at=CASE WHEN $3 IN ('failed','superseded') THEN now() ELSE NULL END,superseded_at=CASE WHEN $3='superseded' THEN now() ELSE NULL END WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.assessment, status, publication, tt.detail)
 			require.NoError(t, err, "stage the recheck's current publication safety state")
 			if publication == models.CodeReviewPublicationConfirmed {
 				_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET publication_receipt='{"github_review_id":77}',github_review_id=77 WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.assessment)
@@ -81,9 +85,11 @@ func TestRecheckDeadLetterAssessmentAtomicPostgres(t *testing.T) {
 			initial, err := f.stores.CodeReviewAssessments.GetByID(ctx, f.job.OrgID, f.assessment)
 			require.NoError(t, err, "retain every immutable recheck field")
 			if tt.foreignOrg {
-				owned, retireErr := f.stores.Jobs.DeadLetterCodeReviewWithLease(ctx, uuid.New(), f.jobID, f.token, "foreign failure", "foreign failure")
+				outcome, retireErr := f.stores.Jobs.DeadLetterCodeReviewWithLease(ctx, uuid.New(), f.jobID, f.token, db.CodeReviewTerminalFailure{
+					JobError: "foreign failure", Reason: "foreign failure", Code: models.CodeReviewStatusCodeWorkerFailed, Message: "Synthetic foreign failure",
+				})
 				require.NoError(t, retireErr, "foreign retirement must safely miss the supervisor")
-				require.False(t, owned, "org_id must fence the supervisor even with a matching job ID and token")
+				require.False(t, outcome.Owned(), "org_id must fence the supervisor even with a matching job ID and token")
 			}
 			node := "recheck-terminal-" + uuid.NewString()
 			_, err = pool.Exec(ctx, `INSERT INTO nodes(id,mode) VALUES($1,'worker')`, node)
@@ -92,7 +98,7 @@ func TestRecheckDeadLetterAssessmentAtomicPostgres(t *testing.T) {
 			require.NoError(t, err, "make only the original supervisor the highest-priority runnable job")
 			schedule := db.NewCodeReviewScheduleStore(pool)
 			hooks, beforeCleanup, reason := 0, models.CodeReviewAssessmentStatus(""), ""
-			w := New(pool, zerolog.Nop(), node)
+			w := New(pool, zerolog.Nop(), node, WithCodeReviewTerminalStore(terminalJobs))
 			w.Register(models.JobTypeRunCodeReviewRecheck, func(handlerCtx context.Context, _ string, _ json.RawMessage) error {
 				jobctx.RegisterDeadLetterHook(handlerCtx, func(hookCtx context.Context, terminalErr error) {
 					hooks++

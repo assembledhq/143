@@ -63,9 +63,10 @@ func ContinueSessionDedupeKey(scopeID uuid.UUID) string {
 }
 
 type JobStore struct {
-	db       DBTX
-	notifier *cache.JobNotifier
-	logger   zerolog.Logger
+	db                             DBTX
+	notifier                       *cache.JobNotifier
+	logger                         zerolog.Logger
+	codeReviewTerminalTransactions CodeReviewMetadataTransactions
 }
 
 // JobQueueHealthSample is an ops-oriented queue snapshot grouped by queue and

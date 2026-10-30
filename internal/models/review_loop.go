@@ -107,30 +107,55 @@ func (d ReviewLoopDecision) Validate() error {
 	}
 }
 
+// ReviewLoopAdmissionState is the safe startup projection. It describes command
+// admission only and never claims provider delivery or review completion.
+type ReviewLoopAdmissionState string
+
+const (
+	ReviewLoopAdmissionPending    ReviewLoopAdmissionState = "pending"
+	ReviewLoopAdmissionAttempting ReviewLoopAdmissionState = "attempting"
+	ReviewLoopAdmissionUnknown    ReviewLoopAdmissionState = "unknown"
+	ReviewLoopAdmissionAttention  ReviewLoopAdmissionState = "attention"
+	ReviewLoopAdmissionAccepted   ReviewLoopAdmissionState = "accepted"
+	ReviewLoopAdmissionRefused    ReviewLoopAdmissionState = "refused"
+	ReviewLoopAdmissionCancelled  ReviewLoopAdmissionState = "cancelled"
+)
+
+func (s ReviewLoopAdmissionState) Validate() error {
+	switch s {
+	case ReviewLoopAdmissionPending, ReviewLoopAdmissionAttempting, ReviewLoopAdmissionUnknown, ReviewLoopAdmissionAttention,
+		ReviewLoopAdmissionAccepted, ReviewLoopAdmissionRefused, ReviewLoopAdmissionCancelled:
+		return nil
+	default:
+		return fmt.Errorf("invalid review loop admission state: %q", s)
+	}
+}
+
 type SessionReviewLoop struct {
-	ID                     uuid.UUID         `db:"id" json:"id"`
-	OrgID                  uuid.UUID         `db:"org_id" json:"org_id"`
-	SessionID              uuid.UUID         `db:"session_id" json:"session_id"`
-	AutomationRunID        *uuid.UUID        `db:"automation_run_id" json:"automation_run_id,omitempty"`
-	ThreadID               *uuid.UUID        `db:"thread_id" json:"thread_id,omitempty"`
-	Status                 ReviewLoopStatus  `db:"status" json:"status"`
-	Source                 ReviewLoopSource  `db:"source" json:"source"`
-	ChangesetID            *uuid.UUID        `db:"changeset_id" json:"changeset_id,omitempty"`
-	WorkspaceRevision      *int64            `db:"workspace_revision" json:"workspace_revision,omitempty"`
-	DesiredHeadSHA         *string           `db:"desired_head_sha" json:"desired_head_sha,omitempty"`
-	AgentType              AgentType         `db:"agent_type" json:"agent_type"`
-	MaxPasses              int               `db:"max_passes" json:"max_passes"`
-	FixMode                ReviewLoopFixMode `db:"fix_mode" json:"fix_mode"`
-	CompletedPasses        int               `db:"completed_passes" json:"completed_passes"`
-	ReviewRequired         bool              `db:"review_required" json:"review_required"`
-	BypassedByUserID       *uuid.UUID        `db:"bypassed_by_user_id" json:"bypassed_by_user_id,omitempty"`
-	BypassReason           *string           `db:"bypass_reason" json:"bypass_reason,omitempty"`
-	LoopStartCheckpointKey *string           `db:"loop_start_checkpoint_key" json:"loop_start_checkpoint_key,omitempty"`
-	LatestCheckpointKey    *string           `db:"latest_checkpoint_key" json:"latest_checkpoint_key,omitempty"`
-	LatestSummary          *string           `db:"latest_summary" json:"latest_summary,omitempty"`
-	StartedByUserID        *uuid.UUID        `db:"started_by_user_id" json:"started_by_user_id,omitempty"`
-	StartedAt              time.Time         `db:"started_at" json:"started_at"`
-	CompletedAt            *time.Time        `db:"completed_at" json:"completed_at,omitempty"`
+	ID                     uuid.UUID                 `db:"id" json:"id"`
+	OrgID                  uuid.UUID                 `db:"org_id" json:"org_id"`
+	SessionID              uuid.UUID                 `db:"session_id" json:"session_id"`
+	AutomationRunID        *uuid.UUID                `db:"automation_run_id" json:"automation_run_id,omitempty"`
+	ThreadID               *uuid.UUID                `db:"thread_id" json:"thread_id,omitempty"`
+	Status                 ReviewLoopStatus          `db:"status" json:"status"`
+	Source                 ReviewLoopSource          `db:"source" json:"source"`
+	ChangesetID            *uuid.UUID                `db:"changeset_id" json:"changeset_id,omitempty"`
+	WorkspaceRevision      *int64                    `db:"workspace_revision" json:"workspace_revision,omitempty"`
+	DesiredHeadSHA         *string                   `db:"desired_head_sha" json:"desired_head_sha,omitempty"`
+	AgentType              AgentType                 `db:"agent_type" json:"agent_type"`
+	MaxPasses              int                       `db:"max_passes" json:"max_passes"`
+	FixMode                ReviewLoopFixMode         `db:"fix_mode" json:"fix_mode"`
+	CompletedPasses        int                       `db:"completed_passes" json:"completed_passes"`
+	ReviewRequired         bool                      `db:"review_required" json:"review_required"`
+	BypassedByUserID       *uuid.UUID                `db:"bypassed_by_user_id" json:"bypassed_by_user_id,omitempty"`
+	BypassReason           *string                   `db:"bypass_reason" json:"bypass_reason,omitempty"`
+	LoopStartCheckpointKey *string                   `db:"loop_start_checkpoint_key" json:"loop_start_checkpoint_key,omitempty"`
+	LatestCheckpointKey    *string                   `db:"latest_checkpoint_key" json:"latest_checkpoint_key,omitempty"`
+	LatestSummary          *string                   `db:"latest_summary" json:"latest_summary,omitempty"`
+	StartedByUserID        *uuid.UUID                `db:"started_by_user_id" json:"started_by_user_id,omitempty"`
+	StartedAt              time.Time                 `db:"started_at" json:"started_at"`
+	CompletedAt            *time.Time                `db:"completed_at" json:"completed_at,omitempty"`
+	AdmissionState         *ReviewLoopAdmissionState `db:"startup_send_state" json:"admission_state,omitempty"`
 }
 
 type SessionReviewLoopPass struct {

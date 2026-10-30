@@ -72,7 +72,7 @@ type pullRequestHealthSummaryArg struct {
 }
 
 var publicationHealthTestColumns = []string{
-	"id", "org_id", "session_id", "changeset_id", "repository_id",
+	"review_start_id", "id", "org_id", "session_id", "changeset_id", "repository_id",
 	"state", "source", "trigger_kind", "handoff_mode", "initiated_by_user_id",
 	"automatic_pr_policy_source", "review_policy_source",
 	"review_max_passes", "review_loop_id", "review_workspace_revision", "review_desired_head_sha",
@@ -85,7 +85,7 @@ var publicationHealthTestColumns = []string{
 
 func publicationHealthTestRow(publication models.SessionPublication) []any {
 	return []any{
-		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
+		publication.ReviewStartID, publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
 		publication.State, publication.Source, publication.TriggerKind, publication.HandoffMode, publication.InitiatedByUserID,
 		publication.AutomaticPolicySource, publication.ReviewPolicySource,
 		publication.ReviewMaxPasses, publication.ReviewLoopID, publication.ReviewWorkspaceRevision, publication.ReviewDesiredHeadSHA,

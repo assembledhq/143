@@ -16,7 +16,10 @@ import (
 func testSchedulingRestartLoop(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture, newHead bool) {
 	ctx := context.Background()
 	service, claim, _ := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
-	store := db.NewCodeReviewStore(pool)
+	transactions, err := db.NewThreadSendTransactions(pool)
+	require.NoError(t, err, "own terminal metadata updates with the existing bounded fixture transactions")
+	store, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, transactions)
+	require.NoError(t, err, "compose the real terminal-capable review store before retiring restart attempts")
 	assessments := db.NewCodeReviewAssessmentStore(pool)
 	var previous *uuid.UUID
 	var last models.CodeReviewAssessment

@@ -56,7 +56,7 @@ func TestCaptureIdentityHandoffRetryWindowPostgres(t *testing.T) {
 				_, err = pool.Exec(ctx, `UPDATE jobs SET payload=jsonb_set(payload,'{_code_review_capture_identity_retry_started_at}',to_jsonb(now()-interval '121 minutes')) WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.jobID)
 				require.NoError(t, err, "expire only the distinct handoff phase")
 			}
-			worker := New(pool, zerolog.Nop(), node)
+			worker := f.newWorker(t, pool, node)
 			worker.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(f.stores, services, zerolog.Nop()))
 			worker.poll(ctx)
 			var status models.JobStatus

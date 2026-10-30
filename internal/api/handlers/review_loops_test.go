@@ -12,12 +12,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
 	reviewloopsvc "github.com/assembledhq/143/internal/services/reviewloop"
+	threadsvc "github.com/assembledhq/143/internal/services/thread"
 )
 
 type fakeReviewLoopService struct {
-	startFn func(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error)
+	recoverFn func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*models.SessionReviewLoop, error)
+	startFn   func(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error)
+}
+
+func (f *fakeReviewLoopService) RecoverStart(ctx context.Context, orgID, sessionID, startID uuid.UUID) (*models.SessionReviewLoop, error) {
+	return f.recoverFn(ctx, orgID, sessionID, startID)
 }
 
 func (f *fakeReviewLoopService) Start(ctx context.Context, orgID, sessionID uuid.UUID, req reviewloopsvc.StartReviewLoopRequest) (*models.SessionReviewLoop, error) {
@@ -33,6 +40,7 @@ func TestReviewLoopHandler_Start_OwnershipErrors(t *testing.T) {
 	targetID := uuid.New()
 	generationID := uuid.New()
 	prID := uuid.New()
+	loopID := uuid.New()
 
 	tests := []struct {
 		name          string
@@ -42,6 +50,43 @@ func TestReviewLoopHandler_Start_OwnershipErrors(t *testing.T) {
 		// expectedDetails is compared whole so a dropped field fails the test.
 		expectedDetails map[string]any
 	}{
+		{
+			name:          "visible thread limit is a known conflict",
+			startErr:      db.ErrThreadLimitReached,
+			expectedCode:  http.StatusConflict,
+			expectedError: "THREAD_LIMIT",
+		},
+		{
+			name:          "terminal session is a known conflict",
+			startErr:      threadsvc.ErrSessionTerminal,
+			expectedCode:  http.StatusConflict,
+			expectedError: "SESSION_TERMINAL",
+		},
+		{
+			name:          "invalid creation agent is a known bad request",
+			startErr:      threadsvc.ErrInvalidAgentType,
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_AGENT_TYPE",
+		},
+		{
+			name:          "invalid creation model is a known bad request",
+			startErr:      threadsvc.ErrInvalidModel,
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "INVALID_MODEL",
+		},
+		{
+			name:            "pending creation keeps safe original correlation",
+			startErr:        fmt.Errorf("synthetic private storage detail: %w", &reviewloopsvc.StartPendingError{LoopID: loopID}),
+			expectedCode:    http.StatusServiceUnavailable,
+			expectedError:   "REVIEW_LOOP_START_PENDING_CONFIRMATION",
+			expectedDetails: map[string]any{"loop_id": loopID.String()},
+		},
+		{
+			name:          "known retained refusal",
+			startErr:      reviewloopsvc.ErrReviewLoopStartRefused,
+			expectedCode:  http.StatusConflict,
+			expectedError: "REVIEW_LOOP_START_REFUSED",
+		},
 		{
 			name: "automation owned session",
 			startErr: fmt.Errorf("create review thread: %w", &models.SessionAutomationOwnedError{Owner: models.SessionAutomationOwner{
@@ -108,9 +153,7 @@ func TestReviewLoopHandler_Start_OwnershipErrors(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &errResp), "response body should be valid JSON")
 			require.Equal(t, tt.expectedError, errResp.Error.Code, "Start should return the expected error code")
-			if tt.expectedDetails != nil {
-				require.Equal(t, tt.expectedDetails, errResp.Error.Details, "ownership conflict should return exactly the owner as details")
-			}
+			require.Equal(t, tt.expectedDetails, errResp.Error.Details, "known refusals expose only their existing safe details and never pending-start correlation")
 		})
 	}
 }

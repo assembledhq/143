@@ -305,7 +305,7 @@ func TestFullAssessmentFreshnessRetryLifecyclePostgres(t *testing.T) {
 			capture, checkpoint := &assessmentFreshnessCapture{result: fresh}, &assessmentVisualCheckpoint{snapshot: visual}
 			publisher := &inlineRecoveryPublisher{}
 			services := &Services{CodeReviewInputCapture: capture, CodeReviewVisualEvidence: checkpoint, CodeReviews: publisher}
-			worker := New(pool, zerolog.Nop(), node)
+			worker := f.newWorker(t, pool, node)
 			worker.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(f.stores, services, zerolog.Nop()))
 			worker.poll(ctx)
 			var jobStatus string
@@ -319,7 +319,7 @@ func TestFullAssessmentFreshnessRetryLifecyclePostgres(t *testing.T) {
 				require.WithinDuration(t, time.Now(), *retryStart, 5*time.Second, "the older external deadline must not consume a new freshness phase")
 				_, err = pool.Exec(ctx, `UPDATE jobs SET max_attempts=8,payload=jsonb_set(payload,'{_code_review_freshness_retry_started_at}',to_jsonb(now()-interval '6 minutes')) WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.jobID)
 				require.NoError(t, err, "expire the durable verification budget")
-				worker = New(pool, zerolog.Nop(), node)
+				worker = f.newWorker(t, pool, node)
 				worker.Register(models.JobTypeRunCodeReview, newRunCodeReviewHandler(f.stores, services, zerolog.Nop()))
 			}
 			if tt.recover {

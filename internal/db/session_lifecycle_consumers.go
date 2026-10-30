@@ -432,12 +432,21 @@ func hasCompetingInputConsumerInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 			return false, &lifecycleConsumerError{cause: ErrLifecycleConsumerDiscoveryIncomplete, source: lifecycleConsumerAutomation}
 		}
 	}
+	repairJobs, retainedPayloadBytes, err := readRetainedLifecycleRepairJobsInTx(ctx, tx, orgID, evidence, limits)
+	if err != nil {
+		return false, err
+	}
 	blocked := recovery
 	scopedJobs := make(map[uuid.UUID]bool)
 	for _, v := range evidence {
 		overlap, err := lifecycleConsumerEvidenceOverlaps(v, fence)
 		if err != nil {
 			return false, err
+		}
+		if v.jobID != nil && repairJobs[*v.jobID] {
+			// A sibling association alone cannot narrow unresolved repair work.
+			// Retained physical evidence survives terminal job/reservation labels.
+			return false, &lifecycleConsumerError{cause: errLifecycleRepairConsumerReconciliation, source: v.source, id: v.id}
 		}
 		if !overlap {
 			continue
@@ -451,7 +460,12 @@ func hasCompetingInputConsumerInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 		}
 		blocked = blocked || competes
 	}
-	legacyBlocked, err := readLegacyLifecycleConsumersInTx(ctx, tx, orgID, fence, proof, scopedJobs, limits)
+	// Both route readers share the original aggregate decoded-payload budget.
+	// Re-reading a retained job in the nonterminal scan consumes bytes again;
+	// neither duplicate identities nor a second reader create a fresh allowance.
+	legacyLimits := limits
+	legacyLimits.payloadBytes -= retainedPayloadBytes
+	legacyBlocked, err := readLegacyLifecycleConsumersInTx(ctx, tx, orgID, fence, proof, scopedJobs, legacyLimits)
 	if err != nil {
 		return false, err
 	}
@@ -859,7 +873,13 @@ func classifyLegacyLifecycleConsumer(job lifecycleLegacyConsumerJob, fence Admis
 	if !scoped {
 		return false, nil
 	}
-	bad := func() (bool, error) { return false, reconcileLifecycleConsumer(lifecycleConsumerLegacyJob, job.id) }
+	bad := func() (bool, error) {
+		cause := ErrLifecycleConsumerReconciliation
+		if r.repairScopeUnproved {
+			cause = errLifecycleRepairConsumerReconciliation
+		}
+		return false, &lifecycleConsumerError{cause: cause, source: lifecycleConsumerLegacyJob, id: job.id}
+	}
 	const ambiguous = legacyJobRouteDuplicate | legacyJobRouteAlias | legacyJobRouteWrongType | legacyJobRouteInvalidUUID | legacyJobRouteZeroUUID
 	if r.problems != 0 || r.orgMismatch || r.routeDecodingFails || r.org.problems&ambiguous != 0 || r.session.problems&ambiguous != 0 || r.thread.problems&ambiguous != 0 || len(r.session.anchors) != 1 {
 		return bad()
@@ -873,9 +893,15 @@ func classifyLegacyLifecycleConsumer(job lifecycleLegacyConsumerJob, fence Admis
 				return bad()
 			}
 		}
+		if r.repairScopeUnproved {
+			return bad()
+		}
 		if fence.threaded && !slices.Contains(r.thread.anchors, fence.threadID) && !r.sessionWideFallback && !reverseScoped {
 			return false, nil
 		}
+	}
+	if r.repairScopeUnproved {
+		return bad()
 	}
 	if own.binding != nil && job.id == own.binding.jobID {
 		return false, nil

@@ -184,6 +184,15 @@ reserved for session-wide execution that conflicts with every lane; it is not a
 shared pointer rewritten by independent siblings. The session running status
 remains a derived projection of active siblings, not logical claim ownership.
 
+Before typed repair composition supplies durable scope and exact owning-job/runtime
+proof, unresolved repair evidence keeps affected ordinary input waiting with
+`repair_reconciliation`, without a new job or claim. Comment-resolution commands
+still roll back if immediate new-job admission is unavailable. Released history
+alone is not a reservation; stale live work blocks dispatch even if the reservation
+is inactive or no longer matches the current head. A thread association alone
+cannot establish that repair work excludes only that lane. A.5 owns the missing
+repair scope/proof writers and their eventual reconciliation.
+
 The passive lane-claim representation uses an exact token-bound FK from
 `session_threads(org_id,session_id,id,admission_claim_dispatch_id,admission_claim_token)`
 to `session_input_dispatches(org_id,session_id,thread_id,id,admission_claim_token)`.
@@ -807,6 +816,17 @@ eligible conflict cause. Cancellation or deadline expiry also forbids replay; th
 same whole-unit deadline covers all attempts rather than resetting on conflict.
 A rollback failure is not a confirmed abort; abandon connection and resolve
 command receipt.
+
+The 0a A.1 delivery contract permits one pre-floor transaction-overlap exception:
+the version-0 `thread.Service.SendMessage` database mutation becomes one guarded
+atomic unit, including enqueue. Preserve its characterized branch policy and the
+bounds above, use the supplied transaction for every in-unit read/write, roll
+back the whole graph on database failure and remove send compensation. Require
+full-schema adjacent-build coexistence and postcommit/unknown-settlement proof
+before shipping it. This is not a general legacy-boundary waiver, a compatibility
+floor or authority to activate version-1 semantics; other families retain their
+stated release gates.
+
 No provider/Slack/Redis effect inside any attempted transaction. Foreground lock
 retry exhaustion returns typed Contended without a claim/answer; already accepted
 async receipt stays pending for independent reconciliation, not ingress-job retry

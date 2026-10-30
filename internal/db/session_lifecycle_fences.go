@@ -62,7 +62,7 @@ type lockedLifecycleScope struct {
 // It acquires the exact parent before one stable-order batch of explicit lanes,
 // without filtering hidden/terminal rows or inferring expected epochs.
 //
-// No production caller is wired yet. The helper never owns settlement, retries,
+// Thread-send routing composes this helper; it never owns settlement, retries,
 // settings or effects. On ANY error its owner must roll back the entire unit and
 // discard all observations; a missing lane does not release earlier locks by
 // itself. End/reset must use a separately proved stronger lock, not this helper.

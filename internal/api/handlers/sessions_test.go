@@ -426,7 +426,7 @@ var reviewLoopColumns = []string{
 	"status", "source", "changeset_id", "workspace_revision", "desired_head_sha",
 	"agent_type", "max_passes", "fix_mode", "completed_passes", "review_required",
 	"bypassed_by_user_id", "bypass_reason", "loop_start_checkpoint_key", "latest_checkpoint_key",
-	"latest_summary", "started_by_user_id", "started_at", "completed_at",
+	"latest_summary", "started_by_user_id", "started_at", "completed_at", "startup_send_state",
 }
 
 func reviewLoopRowWithLatestCheckpoint(loopID, sessionID uuid.UUID, status, source string, latestCheckpointKey *string) []any {
@@ -436,6 +436,7 @@ func reviewLoopRowWithLatestCheckpoint(loopID, sessionID uuid.UUID, status, sour
 		status, source, nil, nil, nil, "claude_code", 2, "minimal", 1, false,
 		nil, nil, nil, latestCheckpointKey,
 		nil, nil, now, &now,
+		nil,
 	}
 }
 
@@ -611,6 +612,7 @@ var sessionPullRequestColumns = []string{
 }
 
 var handlerSessionPublicationColumns = []string{
+	"review_start_id",
 	"id", "org_id", "session_id", "changeset_id", "repository_id",
 	"state", "source", "trigger_kind", "handoff_mode", "initiated_by_user_id",
 	"automatic_pr_policy_source", "review_policy_source", "review_max_passes", "review_loop_id",
@@ -623,6 +625,7 @@ var handlerSessionPublicationColumns = []string{
 
 func handlerSessionPublicationRow(publication models.SessionPublication) []any {
 	return []any{
+		publication.ReviewStartID,
 		publication.ID, publication.OrgID, publication.SessionID, publication.ChangesetID, publication.RepositoryID,
 		publication.State, publication.Source, publication.TriggerKind, publication.HandoffMode, publication.InitiatedByUserID,
 		publication.AutomaticPolicySource, publication.ReviewPolicySource, publication.ReviewMaxPasses, publication.ReviewLoopID,

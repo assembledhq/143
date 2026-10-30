@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 )
@@ -242,20 +243,68 @@ func auxiliaryProbeConnectionString(t *testing.T, raw, kind string) (string, []s
 		target.Path, target.RawPath, target.RawQuery = "/synthetic_unused", "", query.Encode()
 		return target.String(), nil
 	case "keyword", "environment":
-		password, _ := target.User.Password()
-		port := target.Port()
-		if port == "" {
-			port = strconv.Itoa(5432)
-		}
+		config, err := pgx.ParseConfig(target.String())
+		require.True(t, err == nil, "resolve the native fixture endpoint without publishing parser errors or connection details")
+		port := strconv.Itoa(int(config.Port))
 		settings := []string{"application_name=synthetic-keyword-name", "APPLICATION_NAME=synthetic-uppercase-name", "Application_Name=synthetic-mixed-name", "statement_timeout=20000", "lock_timeout=10000", "search_path=public", "options='-c application_name=synthetic-options-name -c idle_in_transaction_session_timeout=25000'", "pool_min_conns=0", "pool_min_idle_conns=0", "pool_max_conns=3", "pool_max_conn_idle_time=23m"}
 		if kind == "environment" {
 			settings = []string{"statement_timeout=20000", "lock_timeout=10000", "search_path=public", "pool_min_conns=0", "pool_min_idle_conns=0", "pool_max_conns=3", "pool_max_conn_idle_time=23m"}
-			return strings.Join(settings, " "), []string{"PGHOST=" + target.Hostname(), "PGPORT=" + port, "PGUSER=" + target.User.Username(), "PGPASSWORD=" + password, "PGDATABASE=" + strings.TrimPrefix(target.Path, "/"), "PGSSLMODE=" + query.Get("sslmode")}
+			return strings.Join(settings, " "), []string{"PGHOST=" + config.Host, "PGPORT=" + port, "PGUSER=" + config.User, "PGPASSWORD=" + config.Password, "PGDATABASE=" + config.Database, "PGSSLMODE=" + query.Get("sslmode")}
 		}
-		settings = append(settings, "host="+auxiliaryKeywordValue(target.Hostname()), "port="+port, "user="+auxiliaryKeywordValue(target.User.Username()), "password="+auxiliaryKeywordValue(password), "dbname="+auxiliaryKeywordValue(strings.TrimPrefix(target.Path, "/")), "sslmode="+auxiliaryKeywordValue(query.Get("sslmode")))
+		settings = append(settings, "host="+auxiliaryKeywordValue(config.Host), "port="+port, "user="+auxiliaryKeywordValue(config.User), "password="+auxiliaryKeywordValue(config.Password), "dbname="+auxiliaryKeywordValue(config.Database), "sslmode="+auxiliaryKeywordValue(query.Get("sslmode")))
 		return strings.Join(settings, " "), nil
 	default:
 		t.Fatal("select a declared native pgx connection-string test case")
 		return "", nil
+	}
+}
+
+func TestAuxiliaryProbeConnectionStringPreservesNativeEndpoint(t *testing.T) {
+	t.Parallel()
+	type endpoint struct {
+		host, user, password, database string
+		port                           uint16
+	}
+	tests := []struct {
+		name, raw string
+		expected  endpoint
+	}{
+		{
+			name:     "authority TCP endpoint",
+			raw:      "postgres://synthetic:fixture-password@127.0.0.1:55448/owned_fixture?sslmode=disable",
+			expected: endpoint{host: "127.0.0.1", port: 55448, user: "synthetic", password: "fixture-password", database: "owned_fixture"},
+		},
+		{
+			name:     "query Unix socket and port",
+			raw:      "postgres://synthetic:fixture-password@/owned_fixture?host=%2Fsynthetic%2Fpostgres-socket&port=55449&sslmode=disable",
+			expected: endpoint{host: "/synthetic/postgres-socket", port: 55449, user: "synthetic", password: "fixture-password", database: "owned_fixture"},
+		},
+		{
+			name:     "query parameters override authority and database",
+			raw:      "postgres://unused:unused@127.0.0.1:5432/unused?host=%2Fsynthetic%2Fquery-socket&port=55450&user=synthetic&password=fixture-password&dbname=owned_fixture&sslmode=disable",
+			expected: endpoint{host: "/synthetic/query-socket", port: 55450, user: "synthetic", password: "fixture-password", database: "owned_fixture"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, kind := range []string{"keyword", "environment"} {
+				t.Run(kind, func(t *testing.T) {
+					t.Parallel()
+					converted, defaults := auxiliaryProbeConnectionString(t, tt.raw, kind)
+					if kind == "environment" {
+						expected := []string{"PGHOST=" + tt.expected.host, "PGPORT=" + strconv.Itoa(int(tt.expected.port)),
+							"PGUSER=" + tt.expected.user, "PGPASSWORD=" + tt.expected.password, "PGDATABASE=" + tt.expected.database, "PGSSLMODE=disable"}
+						require.Equal(t, expected, defaults, "environment conversion must preserve the native effective endpoint and exact owned database")
+						return
+					}
+					config, err := pgx.ParseConfig(converted)
+					require.True(t, err == nil, "parse only synthetic converted settings without publishing a native parser error")
+					actual := endpoint{host: config.Host, port: config.Port, user: config.User, password: config.Password, database: config.Database}
+					require.Equal(t, tt.expected, actual, "keyword conversion must preserve query-host sockets, explicit ports and effective database overrides")
+					require.Nil(t, defaults, "keyword settings must remain self-contained without additional environment defaults")
+				})
+			}
+		})
 	}
 }

@@ -74,13 +74,14 @@ func TestSessionExecutorPublicationWiringQueuesAutomationPRPostgres(t *testing.T
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			stores := buildSessionExecutorStores(sessionExecutorStoreDeps{Pool: pool})
+			stores, err := buildSessionExecutorStores(sessionExecutorStoreDeps{Pool: pool})
+			require.NoError(t, err, "construct publication fixture stores with mandatory send dependencies")
 			services := &worker.Services{}
 			wirePublicationCoordinator(&config.Config{AgentPRPublicationEnabled: false, PrePRReviewEnabled: true}, services, stores, zerolog.Nop())
 			require.NotNil(t, services.PublicationIntents, "executor must have a coordinator before completing automation work")
 
 			orgID, integrationID, repoID, automationID, runID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
-			_, err := pool.Exec(ctx, `INSERT INTO organizations(id,name) VALUES($1,'Publication fixture')`, orgID)
+			_, err = pool.Exec(ctx, `INSERT INTO organizations(id,name) VALUES($1,'Publication fixture')`, orgID)
 			require.NoError(t, err, "create isolated publication tenant")
 			_, err = pool.Exec(ctx, `INSERT INTO integrations(id,org_id,provider) VALUES($1,$2,'github')`, integrationID, orgID)
 			require.NoError(t, err, "create fixture GitHub integration")

@@ -147,8 +147,8 @@ func TestCodeReviewAssessmentCompleteStateFence(t *testing.T) {
 			require.NoError(t, err, "create isolated mock")
 			defer mock.Close()
 			capture := testAssessmentCapture()
-			mock.ExpectExec(regexp.QuoteMeta("UPDATE code_review_revision_assessments SET status='completed'")).
-				WithArgs(capture.OrgID, capture.ID, capture.Generation, capture.InputDigest, models.CodeReviewResultExecuted, true, models.CodeReviewDecisionBlocked, false, pgxmock.AnyArg(), pgxmock.AnyArg(), "body").
+			mock.ExpectExec(regexp.QuoteMeta("UPDATE code_review_revision_assessments SET status='completed',completed_at=now(),failure_detail=CASE WHEN failure_detail=$12 THEN NULL ELSE failure_detail END")).
+				WithArgs(capture.OrgID, capture.ID, capture.Generation, capture.InputDigest, models.CodeReviewResultExecuted, true, models.CodeReviewDecisionBlocked, false, pgxmock.AnyArg(), pgxmock.AnyArg(), "body", CodeReviewConfirmedCompletionRecoveryPending).
 				WillReturnResult(pgxmock.NewResult("UPDATE", tt.rows))
 			result := models.CodeReviewAssessmentCompletion{ResultOrigin: models.CodeReviewResultExecuted, CoverageComplete: true, Decision: models.CodeReviewDecisionBlocked, Acceptable: false, StructuredOutcome: json.RawMessage(`{}`), RenderedBody: "body"}
 			err = NewCodeReviewAssessmentStore(mock).Complete(context.Background(), capture.OrgID, capture.ID, capture.Generation, capture.InputDigest, result)

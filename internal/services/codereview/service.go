@@ -31,6 +31,8 @@ type MetadataStore interface {
 	GetLatestSubmittedByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (models.CodeReviewSessionMetadata, error)
 	HasApprovedByPullRequest(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error)
 	GetLatestByPullRequestHead(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, policyID uuid.UUID) (models.CodeReviewSessionMetadata, error)
+	HasConfirmedFullAssessmentCompletionPending(ctx context.Context, orgID, metadataID uuid.UUID) (bool, error)
+	ResolveCaptureIdentitySource(ctx context.Context, orgID, sessionID, pullRequestID uuid.UUID, metadataID *uuid.UUID) (db.CodeReviewCaptureIdentitySource, error)
 	FailReview(ctx context.Context, orgID, sessionID uuid.UUID, reason string) (models.CodeReviewSessionMetadata, error)
 	FailReviewWithStatus(ctx context.Context, orgID uuid.UUID, params db.FailCodeReviewParams) (models.CodeReviewSessionMetadata, error)
 	MarkSupersededBy(ctx context.Context, orgID, sessionID, replacementSessionID uuid.UUID) (models.CodeReviewSessionMetadata, error)
@@ -143,6 +145,7 @@ type ReviewChangedInput struct {
 	RepositoryID           uuid.UUID                      `json:"repository_id"`
 	PullRequestID          uuid.UUID                      `json:"pull_request_id"`
 	PriorSessionID         uuid.UUID                      `json:"prior_session_id"`
+	PriorMetadataID        *uuid.UUID                     `json:"prior_metadata_id,omitempty"`
 	GitHubRepo             string                         `json:"github_repo"`
 	GitHubPRNumber         int                            `json:"github_pr_number"`
 	GitHubPRURL            string                         `json:"github_pr_url"`
@@ -483,6 +486,15 @@ func (s *Service) ensureLatestRetrySource(ctx context.Context, source models.Cod
 		active, activeErr := s.jobs.HasActiveByDedupeKey(ctx, source.OrgID, "agent", "code_review:"+outputKey)
 		if activeErr != nil {
 			return fmt.Errorf("check newer code review dispatch: %w", activeErr)
+		}
+		if !active {
+			pending, pendingErr := s.metadata.HasConfirmedFullAssessmentCompletionPending(ctx, source.OrgID, latest.ID)
+			if pendingErr != nil {
+				return fmt.Errorf("check newer code review completion ownership: %w", pendingErr)
+			}
+			if pending {
+				return &RetryReviewConflictError{Code: RetryReviewConflictNewerAttempt, Message: "A newer code review attempt already exists."}
+			}
 		}
 		if !active && (latest.CreatedAt.IsZero() || time.Since(latest.CreatedAt) >= codeReviewJobEnqueueGracePeriod) {
 			const reason = "code review replacement job was not queued"
@@ -864,6 +876,17 @@ func (s *Service) reassessmentDebounce() time.Duration {
 // code review. Automatic reassessment stops after the reviewer approves the PR,
 // while explicit requests may intentionally start another assessment.
 func (s *Service) HandleReviewChanged(ctx context.Context, input ReviewChangedInput) (ReviewRequestedResult, error) {
+	if input.ChangeReason == captureIdentityChangeReason {
+		source, pending, err := s.captureIdentitySource(ctx, input)
+		if err != nil {
+			return ReviewRequestedResult{}, err
+		}
+		if pending {
+			return preservedCaptureIdentitySource(source), nil
+		}
+		metadataID := source.MetadataID
+		input.PriorMetadataID = &metadataID
+	}
 	if s.SchedulingEnabled() {
 		return s.handleSerializedReviewChanged(ctx, input)
 	}
@@ -1067,6 +1090,15 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 					result := reusedReviewRequestedResult(latest, source)
 					result.Deferred = opts.forceReassessment
 					result.DispatchConfirmed = true
+					return result, nil
+				}
+				pending, pendingErr := s.metadata.HasConfirmedFullAssessmentCompletionPending(ctx, input.OrgID, latest.ID)
+				if pendingErr != nil {
+					return ReviewRequestedResult{}, fmt.Errorf("lookup confirmed code review completion ownership: %w", pendingErr)
+				}
+				if pending {
+					result := reusedReviewRequestedResult(latest, source)
+					result.Deferred = opts.forceReassessment
 					return result, nil
 				}
 				if !latest.CreatedAt.IsZero() && time.Since(latest.CreatedAt) < codeReviewJobEnqueueGracePeriod {

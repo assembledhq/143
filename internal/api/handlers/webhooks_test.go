@@ -2004,6 +2004,16 @@ type codeReviewWebhookMetadataStore struct {
 	approved  bool
 }
 
+func (s *codeReviewWebhookMetadataStore) HasConfirmedFullAssessmentCompletionPending(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	// These webhook fixtures contain no staged confirmed assessment.
+	return false, nil
+}
+
+func (s *codeReviewWebhookMetadataStore) ResolveCaptureIdentitySource(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, *uuid.UUID) (db.CodeReviewCaptureIdentitySource, error) {
+	// Capture recovery is not represented by this webhook admission fixture.
+	return db.CodeReviewCaptureIdentitySource{}, pgx.ErrNoRows
+}
+
 func (s *codeReviewWebhookMetadataStore) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {
 	metadata.ID = uuid.New()
 	s.created = *metadata
