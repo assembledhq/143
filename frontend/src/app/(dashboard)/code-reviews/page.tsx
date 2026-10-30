@@ -379,12 +379,21 @@ function isReviewInProgress(review: CodeReviewListItem): boolean {
   return !isSupersededReview(review) && (review.status === "queued" || review.status === "running");
 }
 
-function reviewDuration(review: CodeReviewListItem, nowMs: number): string {
-  const endMs = review.completed_at
-    ? Date.parse(review.completed_at)
-    : isReviewInProgress(review) ? nowMs : NaN;
-  const seconds = (endMs - Date.parse(review.created_at)) / 1_000;
-  return formatReviewTurnaround(seconds >= 0 ? seconds : null);
+function ReviewDuration({ review, mobile = false }: { review: CodeReviewListItem; mobile?: boolean }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const inProgress = !review.completed_at && isReviewInProgress(review);
+  useEffect(() => {
+    if (!inProgress) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [inProgress]);
+
+  const endMs = review.completed_at ? Date.parse(review.completed_at) : inProgress ? nowMs : NaN;
+  const elapsedSeconds = (endMs - Date.parse(review.created_at)) / 1_000;
+  const seconds = inProgress ? Math.max(0, elapsedSeconds) : elapsedSeconds;
+  const duration = formatReviewTurnaround(seconds >= 0 ? seconds : null);
+  if (mobile && duration === "—") return null;
+  return <span className="tabular-nums">{mobile ? "Duration: " : ""}{duration}</span>;
 }
 
 function ReviewActions({ onViewReview, className }: { onViewReview: () => void; className?: string }) {
@@ -1171,12 +1180,12 @@ export default function CodeReviewsPage() {
     void statsQuery.refetch();
   }, [reviewsQuery, statsQuery]);
   const [countdownNowMs, setCountdownNowMs] = useState(() => Date.now());
-  const hasReviewClock = reviews.some((item) => Boolean(item.retry_at) || isReviewInProgress(item));
+  const hasScheduledReviewRetry = reviews.some((item) => Boolean(item.retry_at));
   useEffect(() => {
-    if (!hasReviewClock) return;
+    if (!hasScheduledReviewRetry) return;
     const timer = window.setInterval(() => setCountdownNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [hasReviewClock]);
+  }, [hasScheduledReviewRetry]);
   const listedEvidenceReview = useMemo(() => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null, [reviews, selectedEvidenceSessionId]);
   // The list is windowed (default 30d) and paginated, but ?evidence=<session id>
   // is deep-linked from the dispute queue and from every GitHub dispute reply.
@@ -1304,7 +1313,7 @@ export default function CodeReviewsPage() {
       header: "Duration",
       className: "text-right",
       cellClassName: "text-right tabular-nums whitespace-nowrap",
-      render: (review) => reviewDuration(review, countdownNowMs),
+      render: (review) => <ReviewDuration review={review} />,
     },
     {
       id: "completed",
@@ -1500,7 +1509,7 @@ export default function CodeReviewsPage() {
                         <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                             <ReviewOutcome review={review} />
-                            <span className="tabular-nums">Duration: {reviewDuration(review, countdownNowMs)}</span>
+                            <ReviewDuration review={review} mobile />
                             {review.completed_at ? <span className="text-foreground">{formatDate(review.completed_at)}</span> : null}
                         </div>
                         <MobileWhyNotApproved review={review} />

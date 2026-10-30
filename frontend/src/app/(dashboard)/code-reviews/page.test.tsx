@@ -17,6 +17,18 @@ const sse = vi.hoisted(() => ({
 
 vi.mock("@/lib/notify", () => ({ notify: toast }));
 
+const summaryRenders = vi.hoisted(() => vi.fn());
+vi.mock("@/components/code-review-overview", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/code-review-overview")>();
+  return {
+    ...actual,
+    CodeReviewSummaryCards: (props: Parameters<typeof actual.CodeReviewSummaryCards>[0]) => {
+      summaryRenders();
+      return <actual.CodeReviewSummaryCards {...props} />;
+    },
+  };
+});
+
 import CodeReviewsPage from "./page";
 
 function renderWithProviders(
@@ -2451,12 +2463,15 @@ describe("CodeReviewsPage", () => {
   it.each(["queued", "running"] as const)("links %s review titles and updates elapsed duration", async (status) => {
     vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
     vi.setSystemTime(new Date("2026-06-26T12:06:49Z"));
+    const setInterval = vi.spyOn(window, "setInterval");
+    const clearInterval = vi.spyOn(window, "clearInterval");
     mockCodeReviewBaseHandlers();
     server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
       data: [{ ...review, status, completed_at: undefined, github_review_url: undefined, github_review_id: undefined }],
       meta: {},
     } satisfies ListResponse<CodeReviewListItem>)));
-    const { unmount } = renderWithProviders(<CodeReviewsPage />);
+    const queryClient = createTestQueryClient();
+    const { unmount } = renderWithProviders(<CodeReviewsPage />, { queryClient });
     try {
       const table = await screen.findByRole("table", { name: "Code reviews" });
       const mobile = screen.getByLabelText("Code review activity");
@@ -2469,18 +2484,31 @@ describe("CodeReviewsPage", () => {
       act(() => vi.advanceTimersByTime(1_000));
       expect(within(table).getByText("6m 50s")).toBeInTheDocument();
       expect(within(mobile).getByText("Duration: 6m 50s")).toBeInTheDocument();
-      const clearInterval = vi.spyOn(window, "clearInterval");
-      unmount();
-      expect(clearInterval).toHaveBeenCalled();
-      clearInterval.mockRestore();
+      const durationTimers = setInterval.mock.calls.flatMap((args, index) =>
+        args[1] === 1_000 ? [setInterval.mock.results[index].value] : []);
+      expect(durationTimers).toHaveLength(2);
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      summaryRenders.mockClear();
+      await act(async () => vi.advanceTimersByTime(1_000));
+      expect(within(table).getByText("6m 51s")).toBeInTheDocument();
+      expect(summaryRenders).not.toHaveBeenCalled();
     } finally {
+      const durationTimers = setInterval.mock.calls.flatMap((args, index) =>
+        args[1] === 1_000 ? [setInterval.mock.results[index].value] : []);
       unmount();
-      vi.useRealTimers();
+      try {
+        for (const timer of durationTimers) expect(clearInterval).toHaveBeenCalledWith(timer);
+      } finally {
+        setInterval.mockRestore();
+        clearInterval.mockRestore();
+        vi.useRealTimers();
+      }
     }
   });
 
   it("shows fixed durations for finished reviews and no duration for missing or invalid timestamps", async () => {
     const cases: { status: CodeReviewListItem["status"]; created_at?: string; completed_at?: string; expected: string }[] = [
+      { status: "running", created_at: new Date(Date.now() + 60_000).toISOString(), expected: "0s" },
       { status: "completed", completed_at: "2026-06-26T12:06:49Z", expected: "6m 49s" },
       { status: "failed", completed_at: "2026-06-26T12:01:30Z", expected: "1m 30s" },
       { status: "cancelled", completed_at: "2026-06-26T12:00:30Z", expected: "30s" },
