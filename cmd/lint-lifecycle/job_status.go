@@ -139,6 +139,9 @@ func scanJobStatus(root string) ([]jobStatusCandidate, error) {
 			if !ok || fn.Body == nil {
 				continue
 			}
+			booleanJobStatusPolicy := fn.Recv != nil && receiverType(fn) == "JobStatus" &&
+				fn.Type.Results != nil && fn.Type.Results.NumFields() == 1 &&
+				expression(fn.Type.Results.List[0].Type) == "bool"
 			constants := map[string]string{}
 			for name, value := range values[filepath.Dir(src.path)] {
 				constants[name] = value
@@ -204,6 +207,14 @@ func scanJobStatus(root string) ([]jobStatusCandidate, error) {
 					}
 					if strings.Contains(fact, "models.JobStatus") || fn.Recv != nil && receiverType(fn) == "JobStatus" {
 						goOrdinal++
+						add(fmt.Sprintf("%s:%s:go:%d", src.path, symbol(fn), goOrdinal), fset.Position(n.Pos()).Line, "go-job-status-syntax", []string{fact}, "")
+					}
+				case *ast.ReturnStmt:
+					// Only the method's direct boolean return is a policy site;
+					// nested closures and error-returning validation are excluded.
+					if booleanJobStatusPolicy && len(n.Results) == 1 && slices.Contains(fn.Body.List, ast.Stmt(n)) {
+						goOrdinal++
+						fact := "return " + expression(n.Results[0])
 						add(fmt.Sprintf("%s:%s:go:%d", src.path, symbol(fn), goOrdinal), fset.Position(n.Pos()).Line, "go-job-status-syntax", []string{fact}, "")
 					}
 				}

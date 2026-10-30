@@ -79,6 +79,115 @@ func TestScanJobStatusConstruction(t *testing.T) {
 	}
 }
 
+func TestScanJobStatusBooleanReturns(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, source string
+		expected     []jobStatusCandidate
+	}{
+		{
+			name:   "runnable policy",
+			source: "func (s JobStatus) IsRunnable() bool { return s == JobStatusPending }",
+			expected: []jobStatusCandidate{{
+				ID: "internal/fixture.go:JobStatus.IsRunnable:go:1", Line: 2,
+				SourceSHA256: "856212fbef093b6cbc75f9af1c5cd3765929440627322cc874da8236a126bfbf",
+				Kind:         "go-job-status-syntax", Facts: []string{"return s == JobStatusPending"},
+			}},
+		},
+		{
+			name:   "lease owned policy",
+			source: "func (s JobStatus) IsLeaseOwned() bool { return s == JobStatusRunning }",
+			expected: []jobStatusCandidate{{
+				ID: "internal/fixture.go:JobStatus.IsLeaseOwned:go:1", Line: 2,
+				SourceSHA256: "5773ab4cfaf4eabe2590691062f5944f43d4095b3e8944d2bfe6d2a08f291286",
+				Kind:         "go-job-status-syntax", Facts: []string{"return s == JobStatusRunning"},
+			}},
+		},
+		{
+			name:   "nonterminal input consumer policy",
+			source: "func (s JobStatus) IsNonterminalInputConsumer() bool { return s == JobStatusPending || s == JobStatusRunning || s == JobStatusAwaitingStartControl }",
+			expected: []jobStatusCandidate{{
+				ID: "internal/fixture.go:JobStatus.IsNonterminalInputConsumer:go:1", Line: 2,
+				SourceSHA256: "8ab2c86d92158ea632e8d0ed07eb632a88a3463f2f66fd66d97a06c1e0b4ce51",
+				Kind:         "go-job-status-syntax", Facts: []string{"return s == JobStatusPending || s == JobStatusRunning || s == JobStatusAwaitingStartControl"},
+			}},
+		},
+		{
+			name:   "terminal policy",
+			source: "func (s JobStatus) IsTerminal() bool { return s == JobStatusSucceeded || s == JobStatusFailed || s == JobStatusCancelled || s == JobStatusDeadLetter }",
+			expected: []jobStatusCandidate{{
+				ID: "internal/fixture.go:JobStatus.IsTerminal:go:1", Line: 2,
+				SourceSHA256: "9a296f3c1cc79c5c584d8a82a08abef4cedb93e56df7ee10fe0eeecb570c5ee2",
+				Kind:         "go-job-status-syntax", Facts: []string{"return s == JobStatusSucceeded || s == JobStatusFailed || s == JobStatusCancelled || s == JobStatusDeadLetter"},
+			}},
+		},
+		{
+			name:   "pointer receiver",
+			source: "func (s *JobStatus) IsRunnable() bool { return s == JobStatusPending }",
+			expected: []jobStatusCandidate{{
+				ID: "internal/fixture.go:JobStatus.IsRunnable:go:1", Line: 2,
+				SourceSHA256: "856212fbef093b6cbc75f9af1c5cd3765929440627322cc874da8236a126bfbf",
+				Kind:         "go-job-status-syntax", Facts: []string{"return s == JobStatusPending"},
+			}},
+		},
+		{name: "other receiver", source: "func (s OtherStatus) IsRunnable() bool { return s == JobStatusPending }"},
+		{name: "error validation return", source: "func (s JobStatus) Validate() error { return fmt.Errorf(\"invalid status: %s\", s) }"},
+		{name: "nested closure", source: "func (s JobStatus) IsRunnable() bool { _ = func() bool { return s == JobStatusPending }; panic(\"unreachable\") }"},
+		{name: "nested conditional return", source: "func (s JobStatus) IsRunnable() bool { if true { return s == JobStatusPending }; panic(\"unreachable\") }"},
+		{name: "multiple return values", source: "func (s JobStatus) IsRunnable() (bool, error) { return s == JobStatusPending, nil }"},
+		{name: "multiple named results", source: "func (s JobStatus) IsRunnable() (runnable, known bool) { return s == JobStatusPending, true }"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			found, err := scanJobStatus(fixture(t, tt.source))
+			require.NoError(t, err, "boolean policy fixtures should scan without requiring type checking")
+			require.Equal(t, tt.expected, found, "only direct single-bool returns on the exact JobStatus receiver should become complete policy candidates")
+		})
+	}
+}
+
+func TestJobStatusBooleanReturnDrift(t *testing.T) {
+	t.Parallel()
+	baseline := "func (s JobStatus) IsNonterminalInputConsumer() bool { return s == JobStatusPending || s == JobStatusRunning || s == JobStatusAwaitingStartControl }"
+	tests := []struct {
+		name, source, expectedError string
+	}{
+		{
+			name: "boolean operator", source: strings.Replace(baseline, " || ", " && ", 1),
+			expectedError: "changed jobs-status source requires policy review: internal/fixture.go:JobStatus.IsNonterminalInputConsumer:go:1",
+		},
+		{
+			name: "membership removal", source: strings.Replace(baseline, " || s == JobStatusAwaitingStartControl", "", 1),
+			expectedError: "changed jobs-status source requires policy review: internal/fixture.go:JobStatus.IsNonterminalInputConsumer:go:1",
+		},
+		{
+			name: "status substitution", source: strings.Replace(baseline, "JobStatusAwaitingStartControl", "JobStatusSucceeded", 1),
+			expectedError: "changed jobs-status source requires policy review: internal/fixture.go:JobStatus.IsNonterminalInputConsumer:go:1",
+		},
+		{
+			name: "new method", source: baseline + "\nfunc (s JobStatus) AddedPolicy() bool { return s == JobStatusPending }",
+			expectedError: "uncovered jobs-status site: internal/fixture.go:JobStatus.AddedPolicy:go:1",
+		},
+		{name: "whitespace and comments", source: "func (s JobStatus) IsNonterminalInputConsumer() bool {\n// policy comment\nreturn s==JobStatusPending || /* still consumes */ s==JobStatusRunning || s==JobStatusAwaitingStartControl\n}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			before, err := scanJobStatus(fixture(t, baseline))
+			require.NoError(t, err, "the baseline boolean policy should scan")
+			after, err := scanJobStatus(fixture(t, tt.source))
+			require.NoError(t, err, "changed boolean policy syntax should still scan")
+			err = compareJobStatus(after, reviewedJobStatusFixture(before))
+			if tt.expectedError == "" {
+				require.NoError(t, err, "Go token-equivalent whitespace and comments should retain the reviewed fingerprint")
+			} else {
+				require.EqualError(t, err, tt.expectedError, "changed boolean policy meaning or a new method must require explicit inventory review")
+			}
+		})
+	}
+}
+
 func reviewedJobStatusFixture(found []jobStatusCandidate) jobStatusInventory {
 	reviewed := jobStatusInventory{Version: 1, Scope: []string{"fixture"}, Limitations: []string{"syntax only"}}
 	for _, item := range found {

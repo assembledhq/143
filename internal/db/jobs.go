@@ -19,7 +19,7 @@ import (
 
 // RunAgentDedupeKey returns the dedupe key used for run_agent enqueues. The
 // partial unique index on (queue, dedupe_key) WHERE status IN
-// ('pending','running') collapses concurrent run_agent enqueues for the same
+// ('pending','running','awaiting_start_control') collapses enqueues for the same
 // session into one — preventing the COALESCE race at AcquireTurnHold that
 // surfaced as "sandbox race: another holder attached first" in production.
 // Terminal-status rows (succeeded/failed/dead_letter) don't conflict, so a
@@ -288,7 +288,7 @@ func (s *JobStore) Enqueue(ctx context.Context, orgID uuid.UUID, queue, jobType 
 	})
 }
 
-// HasActiveByDedupeKey reports whether a pending or running job currently
+// HasActiveByDedupeKey reports whether a nonterminal input consumer currently
 // owns a dedupe key. Terminal jobs intentionally do not count, matching the
 // partial unique index used by EnqueueWithOpts.
 func (s *JobStore) HasActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (bool, error) {
@@ -300,7 +300,7 @@ func (s *JobStore) HasActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, qu
 			WHERE org_id = @org_id
 			  AND queue = @queue
 			  AND dedupe_key = @dedupe_key
-			  AND status IN ('pending', 'running')
+			  AND status IN `+jobNonterminalInputConsumerStatusesSQL+`
 		)`, pgx.NamedArgs{
 		"org_id":     orgID,
 		"queue":      queue,
@@ -317,7 +317,7 @@ type ActiveJobRef struct {
 	Status models.JobStatus
 }
 
-// GetActiveByDedupeKey returns the pending or running job that currently owns
+// GetActiveByDedupeKey returns the nonterminal input consumer that currently owns
 // a queue dedupe key. The partial unique index guarantees at most one row.
 func (s *JobStore) GetActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (ActiveJobRef, error) {
 	var active ActiveJobRef
@@ -327,13 +327,16 @@ func (s *JobStore) GetActiveByDedupeKey(ctx context.Context, orgID uuid.UUID, qu
 		WHERE org_id = @org_id
 		  AND queue = @queue
 		  AND dedupe_key = @dedupe_key
-		  AND status IN ('pending', 'running')`, pgx.NamedArgs{
+		  AND status IN `+jobNonterminalInputConsumerStatusesSQL, pgx.NamedArgs{
 		"org_id":     orgID,
 		"queue":      queue,
 		"dedupe_key": dedupeKey,
 	}).Scan(&active.ID, &active.Status)
 	if err != nil {
 		return ActiveJobRef{}, err
+	}
+	if err := active.Status.Validate(); err != nil || active.ID == uuid.Nil || !active.Status.IsNonterminalInputConsumer() {
+		return ActiveJobRef{}, errors.New("invalid nonterminal job observation")
 	}
 	return active, nil
 }
@@ -766,6 +769,13 @@ type jobQuerier interface {
 }
 
 func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueOpts) (uuid.UUID, error) {
+	return enqueueOnWithID(ctx, q, orgID, opts, uuid.Nil)
+}
+
+// enqueueOnWithID is private to the immutable lifecycle enqueue path. Existing
+// callers leave identity allocation to PostgreSQL, preserving their exact SQL
+// defaults and nil-ID collision contract.
+func enqueueOnWithID(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueOpts, jobID uuid.UUID) (uuid.UUID, error) {
 	if opts.MaxAttempts < 0 {
 		return uuid.Nil, fmt.Errorf("max attempts must not be negative")
 	}
@@ -785,6 +795,11 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 	}
 	columns := []string{"queue", "job_type", "payload", "priority", "dedupe_key"}
 	values := []string{"@queue", "@job_type", "@payload", "@priority", "@dedupe_key"}
+	if jobID != uuid.Nil {
+		columns = append(columns, "id")
+		values = append(values, "@job_id")
+		args["job_id"] = jobID
+	}
 	if opts.TargetNodeID != nil {
 		columns = append(columns, "target_node_id")
 		values = append(values, "@target_node_id")
@@ -807,9 +822,9 @@ func enqueueOn(ctx context.Context, q jobQuerier, orgID uuid.UUID, opts EnqueueO
 		RETURNING id`, strings.Join(columns, ", "), strings.Join(values, ", "))
 
 	err = q.QueryRow(ctx, query, args).Scan(&id)
-	// ON CONFLICT DO NOTHING returns no row when a pending/running job with the
-	// same (queue, dedupe_key) already exists. Treat that as a successful no-op:
-	// the existing job will satisfy the caller's intent.
+	// Keep the legacy enqueue return contract: a collision returns nil ID. That
+	// is not proof that this input has a consumer or that any intent is satisfied.
+	// Canonical lifecycle admission must resolve its exact durable binding.
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, nil
 	}
