@@ -114,12 +114,71 @@ deleted, contradictory, malformed or unsupported active provenance returns
 `LIFECYCLE_GUARD_PROVENANCE_REQUIRED`; it never falls back to version 0.
 Mode resolution alone is not admission, readiness or activation authority.
 
+A shadow row may retain a valid incomplete normalization envelope with its exact
+cutoff and floor receipt, but still resolves as legacy. Normalizing requires that
+envelope with `complete=false`; completion is published atomically with active
+cutover and protocol stamps, never as a completed normalizing intermediate state.
+Receipt UUIDs compare by decoded identity; canonical hexadecimal encoding applies
+to digest text, not alternate equivalent UUID spellings.
+
+The protocol core in `internal/db/session_lifecycle_protocol.go` reads the parent,
+optional cutover and visible lane stamps/providers only after acquiring the shared
+interlock. It validates the supported JSON envelopes and actual provider coverage;
+it does not select a provider build or issue a resumability receipt. An empty
+visible lane set does not infer a primary lane or authorize threadless execution.
+Missing scope is not-found; every protocol/scan/context failure returns no mode.
+
+Migrations 346–348 install the retention functions and separate parent/cutover
+triggers without stamping or activating rows. Either a positive retained parent
+or an active cutover independently prevents evidence deletion/reset. These are
+provenance-retention guards, not the later complete minimum-writer/child-table
+guard set. They intentionally leave ordinary unversioned writes to inactive
+version-0 parents compatible. SQL advisory-lock refusal uses the same exact
+tenant/session key as Go; only an actual failed advisory try-lock is reported as
+`LIFECYCLE_CUTOVER_INTERLOCK_BUSY`.
+Once active, normalization is write-once: an exact no-op is allowed, replacement
+is refused. Equality uses canonical JSONB text, retaining numeric encoding so an
+integer cannot become a fractional encoding rejected by the strict reader. Key
+order is immaterial. Normalization stays frozen even on an invalid active row
+where it is absent; this component supplies no provenance-repair authority.
+Raw DELETE on a positive parent is refused, including the default soft-delete
+redirect. Ordinary application soft deletion uses UPDATE of `deleted_at`, which
+retains the stamp and remains permitted.
+Capability update authority remains a later guard obligation; this
+core only prevents clearing it. Malformed replacement fails strict resolution,
+and a shape-valid replacement still proves no provider conformance or target authority.
+
+Bulk maintenance also retains provenance. TRUNCATE takes nonwaiting SHARE locks
+on both evidence tables before its fresh READ COMMITTED assertion, including the
+table other than its target. A relation-lock conflict remains a real PostgreSQL
+lock error, without the advisory-busy label. Each down migration locks both
+evidence tables with a bounded acquisition before checking for positive/active
+evidence and removing guards in that same transaction. REPEATABLE READ and
+SERIALIZABLE are rejected because an old transaction snapshot cannot establish
+that activation evidence is absent.
+
+An inactive rollback still requires withdrawing readers and inhibiting activation.
+The future H controller must acquire schema-protecting relation locks and then
+freshly validate its required installed schema/guard floor before normalization
+or stamping. An activator waiting behind a successful down migration must fail
+that post-lock validation. The retention core supplies no activation controller
+and does not prove this later H integration gate. Once positive/active evidence
+exists, these down migrations refuse removal rather than reopening legacy mode.
+
+H must bound the distinct scope locks held by each bulk statement and measure
+shared lock-table pressure and forward progress. Row-level advisory acquisition
+does not provide an unbounded bulk-operation guarantee. H must also measure the
+rollback availability window: the retained-evidence check can scan the session
+table while the rollback holds exclusive relation locks. Neither capacity nor a
+table-size-independent rollback duration is established by this component.
+
 The decision matrix also fixes these error boundaries: missing exact parent is
 not-found, while a soft-deleted parent still retains provenance and is not hidden
 from protocol resolution (admission visibility is a later locked check). A
-version-0 parent with an active cutover, malformed shadow/normalizing metadata,
-or a positive parent with missing/non-active metadata is contradictory and fails
-closed. Active visible lanes must carry the supported stamp and a provider tuple
+version-0 parent with an active cutover, a positive visible lane stamp or malformed
+shadow/normalizing metadata, or a positive parent with missing/non-active metadata
+is contradictory and fails closed. Active visible lanes must carry the supported
+stamp and a provider tuple
 covering their actual agent type; a visible version-0 lane under an active parent
 is not a legacy escape. A cutover CAS revision need not equal the protocol stamp.
 
