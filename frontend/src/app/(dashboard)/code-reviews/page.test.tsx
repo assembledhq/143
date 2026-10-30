@@ -683,6 +683,7 @@ describe("CodeReviewsPage", () => {
       "Outcome",
       "Why not approved",
       "Run status",
+      "Duration",
       "Completed",
       "Actions",
     ]);
@@ -691,8 +692,10 @@ describe("CodeReviewsPage", () => {
     expect(within(reviewCells[3]).getByText("Completed").closest('[data-slot="status-label"]')).not.toBeNull();
     expect(within(reviewCells[0]).getByText(/api · anya · abcdef1/)).toBeInTheDocument();
     expect(within(reviewCells[2]).getByText("—")).toBeInTheDocument();
-    expect(within(reviewCells[5]).getByRole("button", { name: "View review" })).toBeInTheDocument();
-    expect(within(reviewCells[5]).queryByRole("link", { name: "Session" })).not.toBeInTheDocument();
+    expect(reviewCells[4]).toHaveTextContent("5m 0s");
+    expect(within(screen.getByLabelText("Code review activity")).getByText("Duration: 5m 0s")).toBeInTheDocument();
+    expect(within(reviewCells[6]).getByRole("button", { name: "View review" })).toBeInTheDocument();
+    expect(within(reviewCells[6]).queryByRole("link", { name: "Session" })).not.toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", {
       name: /Review for #428/i,
@@ -842,7 +845,7 @@ describe("CodeReviewsPage", () => {
     expect(within(mobileNeedsReview).queryByText("Risk")).not.toBeInTheDocument();
 
     await user.keyboard("{Escape}");
-    await user.click(within(needsReviewCells[5]).getByRole("button", { name: "View review" }));
+    await user.click(within(needsReviewCells[6]).getByRole("button", { name: "View review" }));
     const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
     expect(within(evidenceSheet).getByText("Why this verdict")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Reviewers found a blocking issue")).toBeInTheDocument();
@@ -2443,6 +2446,62 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByText("Previous result")).not.toBeInTheDocument();
     const row = within(screen.getByRole("table")).getByRole("row", { name: /#428 Fix invoice rounding/ });
     expect(within(row).getByText("Completed")).toBeInTheDocument();
+  });
+
+  it.each(["queued", "running"] as const)("links %s review titles and updates elapsed duration", async (status) => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(new Date("2026-06-26T12:06:49Z"));
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: [{ ...review, status, completed_at: undefined, github_review_url: undefined, github_review_id: undefined }],
+      meta: {},
+    } satisfies ListResponse<CodeReviewListItem>)));
+    const { unmount } = renderWithProviders(<CodeReviewsPage />);
+    try {
+      const table = await screen.findByRole("table", { name: "Code reviews" });
+      const mobile = screen.getByLabelText("Code review activity");
+      for (const container of [table, mobile]) {
+        expect(within(container).getByRole("link", { name: "#428 Fix invoice rounding" }))
+          .toHaveAttribute("href", review.github_pr_url);
+      }
+      expect(within(table).getByText("6m 49s")).toBeInTheDocument();
+      expect(within(mobile).getByText("Duration: 6m 49s")).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(within(table).getByText("6m 50s")).toBeInTheDocument();
+      expect(within(mobile).getByText("Duration: 6m 50s")).toBeInTheDocument();
+      const clearInterval = vi.spyOn(window, "clearInterval");
+      unmount();
+      expect(clearInterval).toHaveBeenCalled();
+      clearInterval.mockRestore();
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows fixed durations for finished reviews and no duration for missing or invalid timestamps", async () => {
+    const cases: { status: CodeReviewListItem["status"]; created_at?: string; completed_at?: string; expected: string }[] = [
+      { status: "completed", completed_at: "2026-06-26T12:06:49Z", expected: "6m 49s" },
+      { status: "failed", completed_at: "2026-06-26T12:01:30Z", expected: "1m 30s" },
+      { status: "cancelled", completed_at: "2026-06-26T12:00:30Z", expected: "30s" },
+      { status: "stale", completed_at: "2026-06-26T12:02:00Z", expected: "2m 0s" },
+      { status: "stale", expected: "—" },
+      { status: "completed", expected: "—" },
+      { status: "completed", created_at: "invalid", completed_at: review.completed_at, expected: "—" },
+      { status: "completed", completed_at: "2026-06-26T11:59:00Z", expected: "—" },
+    ];
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: cases.map((testCase, index) => ({ ...review, id: `review-${index}`, session_id: `session-${index}`,
+        github_pr_number: 500 + index, status: testCase.status, created_at: testCase.created_at ?? review.created_at, completed_at: testCase.completed_at })),
+      meta: {},
+    } satisfies ListResponse<CodeReviewListItem>)));
+    renderWithProviders(<CodeReviewsPage />);
+    const table = await screen.findByRole("table", { name: "Code reviews" });
+    for (const [index, testCase] of cases.entries()) {
+      const row = within(table).getByRole("row", { name: new RegExp(`#${500 + index} Fix invoice rounding`) });
+      expect(within(row).getAllByRole("cell")[4]).toHaveTextContent(testCase.expected);
+    }
   });
 
   it("omits the mobile completion timestamp until a review completes", async () => {

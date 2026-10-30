@@ -86,6 +86,7 @@ import {
   COMPLETED_NOT_APPROVED,
   CodeReviewFilters,
   CodeReviewSummaryCards,
+  formatReviewTurnaround,
   type CodeReviewFilterValues,
 } from "@/components/code-review-overview";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy, trackPolicyDraft, policyPatchFor } from "@/lib/code-review-autosave";
@@ -364,13 +365,26 @@ function MobileWhyNotApproved({ review }: { review: CodeReviewListItem }) {
 function ReviewTitle({ review }: { review: CodeReviewListItem }) {
   const title = `#${review.github_pr_number} ${review.pull_request_title}`;
 
-  if (!review.github_review_url) return title;
+  const href = review.github_review_url || review.github_pr_url;
+  if (!href) return title;
 
   return (
-    <ExternalLink href={review.github_review_url} title="Open final review">
+    <ExternalLink href={href} title={review.github_review_url ? "Open final review" : "Open pull request"}>
       {title}
     </ExternalLink>
   );
+}
+
+function isReviewInProgress(review: CodeReviewListItem): boolean {
+  return !isSupersededReview(review) && (review.status === "queued" || review.status === "running");
+}
+
+function reviewDuration(review: CodeReviewListItem, nowMs: number): string {
+  const endMs = review.completed_at
+    ? Date.parse(review.completed_at)
+    : isReviewInProgress(review) ? nowMs : NaN;
+  const seconds = (endMs - Date.parse(review.created_at)) / 1_000;
+  return formatReviewTurnaround(seconds >= 0 ? seconds : null);
 }
 
 function ReviewActions({ onViewReview, className }: { onViewReview: () => void; className?: string }) {
@@ -1157,12 +1171,12 @@ export default function CodeReviewsPage() {
     void statsQuery.refetch();
   }, [reviewsQuery, statsQuery]);
   const [countdownNowMs, setCountdownNowMs] = useState(() => Date.now());
-  const hasScheduledReviewRetry = reviews.some((item) => Boolean(item.retry_at));
+  const hasReviewClock = reviews.some((item) => Boolean(item.retry_at) || isReviewInProgress(item));
   useEffect(() => {
-    if (!hasScheduledReviewRetry) return;
+    if (!hasReviewClock) return;
     const timer = window.setInterval(() => setCountdownNowMs(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [hasScheduledReviewRetry]);
+  }, [hasReviewClock]);
   const listedEvidenceReview = useMemo(() => reviews.find((review) => review.session_id === selectedEvidenceSessionId) ?? null, [reviews, selectedEvidenceSessionId]);
   // The list is windowed (default 30d) and paginated, but ?evidence=<session id>
   // is deep-linked from the dispute queue and from every GitHub dispute reply.
@@ -1284,6 +1298,13 @@ export default function CodeReviewsPage() {
       header: sortHeader("Run status", "run_status"),
       sortDirection: reviewSort === "run_status" ? reviewSortOrder : false,
       render: (review) => <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />,
+    },
+    {
+      id: "duration",
+      header: "Duration",
+      className: "text-right",
+      cellClassName: "text-right tabular-nums whitespace-nowrap",
+      render: (review) => reviewDuration(review, countdownNowMs),
     },
     {
       id: "completed",
@@ -1479,6 +1500,7 @@ export default function CodeReviewsPage() {
                         <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                             <ReviewOutcome review={review} />
+                            <span className="tabular-nums">Duration: {reviewDuration(review, countdownNowMs)}</span>
                             {review.completed_at ? <span className="text-foreground">{formatDate(review.completed_at)}</span> : null}
                         </div>
                         <MobileWhyNotApproved review={review} />
