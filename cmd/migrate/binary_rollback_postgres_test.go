@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/url"
 	"testing"
 	"time"
 
@@ -10,8 +11,14 @@ import (
 
 func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 	t.Parallel()
-	tests := []struct{ name, mutation, refusal string }{
+	tests := []struct {
+		name, mutation, refusal string
+		workerURL               bool
+	}{
 		{name: "inactive schema"},
+		{name: "worker pool settings", workerURL: true},
+		{name: "worker pool settings dirty ledger", workerURL: true, mutation: "UPDATE schema_migrations SET dirty=true", refusal: "expected clean migration 392"},
+		{name: "worker pool settings enabled participation", workerURL: true, mutation: "UPDATE caller_send_intent_control SET intents_enabled=true", refusal: "caller participation"},
 		{name: "dirty ledger", mutation: "UPDATE schema_migrations SET dirty=true", refusal: "expected clean migration 392"},
 		{name: "different schema", mutation: "UPDATE schema_migrations SET version=393", refusal: "expected clean migration 392"},
 		{name: "missing control", mutation: "DELETE FROM caller_send_intent_control", refusal: "caller participation"},
@@ -40,7 +47,16 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 				return value
 			}
 			before := snapshot()
-			err := verifyInactiveBinaryRollback(ctx, conn.Config().ConnString())
+			rawURL := conn.Config().ConnString()
+			if tt.workerURL {
+				parsed, err := url.Parse(rawURL)
+				require.NoError(t, err, "parse fixture URL for worker pool setting")
+				query := parsed.Query()
+				query.Set("pool_max_conns", "4")
+				parsed.RawQuery = query.Encode()
+				rawURL = parsed.String()
+			}
+			err := verifyInactiveBinaryRollback(ctx, rawURL)
 			if tt.refusal == "" {
 				require.NoError(t, err, "clean inactive schema should permit binary-only rollback")
 			} else {

@@ -15,6 +15,7 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // migrateLogger implements migrate.Logger to surface verbose migration output.
@@ -125,11 +126,15 @@ func main() {
 // Operators must exclude activation and other deployments throughout rollback;
 // this bounded read-only snapshot is not a fleet-wide maintenance lock.
 func verifyInactiveBinaryRollback(ctx context.Context, rawURL string) (result error) {
-	cfg, err := pgx.ParseConfig(rawURL)
+	// Worker DATABASE_URL values include pool options. Parse them as a pool
+	// configuration so they are not sent to PostgreSQL as runtime parameters;
+	// the inspector still opens only one direct connection, never a pool.
+	poolConfig, err := pgxpool.ParseConfig(rawURL)
 	if err != nil {
 		// Parse errors can echo the original DSN, including credentials.
 		return errors.New("invalid rollback database connection settings")
 	}
+	cfg := poolConfig.ConnConfig
 	cfg.RuntimeParams["application_name"] = "143:inactive-rollback-preflight"
 	cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	cfg.RuntimeParams["statement_timeout"] = "30000"
