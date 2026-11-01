@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/version"
@@ -12,6 +14,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/database"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/jackc/pgx/v5"
 )
 
 // migrateLogger implements migrate.Logger to surface verbose migration output.
@@ -40,8 +43,24 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: migrate [up|down|repair-known-dirty|repair-pr-readiness]")
+		fmt.Println("Usage: migrate [up|down|repair-known-dirty|repair-pr-readiness|verify-inactive-rollback]")
 		os.Exit(1)
+	}
+	// This read-only check must not initialize golang-migrate: opening its
+	// database driver can create the migration ledger. It never runs old-image SQL.
+	if os.Args[1] == "verify-inactive-rollback" {
+		if len(os.Args) != 3 || os.Args[2] != "392" {
+			fmt.Fprintln(os.Stderr, "inactive binary rollback supports only explicitly pinned schema 392")
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := verifyInactiveBinaryRollback(ctx, dbURL); err != nil {
+			fmt.Fprintf(os.Stderr, "Inactive binary rollback refused: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Inactive binary rollback preflight passed (schema 392)")
+		return
 	}
 
 	migrationSource, err := resolveMigrationSource(pathExists)
@@ -99,6 +118,65 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", os.Args[1]) // #nosec G705 -- writing to stderr, not HTTP response
 		os.Exit(1)
 	}
+}
+
+// verifyInactiveBinaryRollback is deliberately limited to the unactivated 0a
+// schema. A later schema or any retained protocol history needs a new review.
+// Operators must exclude activation and other deployments throughout rollback;
+// this bounded read-only snapshot is not a fleet-wide maintenance lock.
+func verifyInactiveBinaryRollback(ctx context.Context, rawURL string) (result error) {
+	cfg, err := pgx.ParseConfig(rawURL)
+	if err != nil {
+		// Parse errors can echo the original DSN, including credentials.
+		return errors.New("invalid rollback database connection settings")
+	}
+	cfg.RuntimeParams["application_name"] = "143:inactive-rollback-preflight"
+	cfg.RuntimeParams["default_transaction_read_only"] = "on"
+	cfg.RuntimeParams["statement_timeout"] = "30000"
+	cfg.RuntimeParams["lock_timeout"] = "5000"
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("connect rollback inspector: %w", err)
+	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		result = errors.Join(result, conn.Close(closeCtx))
+	}()
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var refusal string
+	err = tx.QueryRow(ctx, `SELECT CASE
+ WHEN current_setting('transaction_read_only') <> 'on' THEN 'inspection is not read-only'
+ WHEN (SELECT count(*) FROM public.schema_migrations) <> 1
+   OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version=392 AND NOT dirty)
+   THEN 'expected clean migration 392'
+ WHEN (SELECT count(*) FROM public.caller_send_intent_control) <> 1
+   OR NOT EXISTS (SELECT 1 FROM public.caller_send_intent_control
+     WHERE singleton AND schema_ready AND dispatch_status_ready AND NOT intents_enabled)
+   THEN 'caller participation is enabled or readiness is incomplete'
+ WHEN EXISTS (SELECT 1 FROM public.sessions WHERE lifecycle_version <> 0)
+   OR EXISTS (SELECT 1 FROM public.session_threads WHERE lifecycle_version <> 0)
+   OR EXISTS (SELECT 1 FROM public.session_lifecycle_cutovers)
+   OR EXISTS (SELECT 1 FROM public.session_input_dispatches)
+   THEN 'lifecycle activation or retained dispatch history exists'
+ WHEN EXISTS (SELECT 1 FROM public.caller_send_command_stamps)
+   OR EXISTS (SELECT 1 FROM public.review_loop_start_intents)
+   OR EXISTS (SELECT 1 FROM public.code_review_agent_results WHERE dispatch_version IS NOT NULL)
+   OR EXISTS (SELECT 1 FROM public.session_review_loops WHERE startup_send_version IS NOT NULL)
+   OR EXISTS (SELECT 1 FROM public.code_review_session_metadata WHERE status_code='code_reviewer_dispatch_unresolved')
+   THEN 'retained caller history exists'
+ ELSE '' END`).Scan(&refusal)
+	if err != nil {
+		return fmt.Errorf("inspect inactive rollback state: %w", err)
+	}
+	if refusal != "" {
+		return errors.New(refusal)
+	}
+	return tx.Commit(ctx)
 }
 
 // lifecycleMigrationDatabaseURL overrides only passive connection attribution.
