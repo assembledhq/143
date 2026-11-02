@@ -5,6 +5,7 @@ import { delay, http, HttpResponse } from "msw";
 import { createTestQueryClient, fireEvent, renderWithProviders as renderWithBaseProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { queryKeys } from "@/lib/query-keys";
+import * as pollIntervals from "@/lib/poll-intervals";
 
 const toast = vi.hoisted(() => ({
   success: vi.fn(),
@@ -2461,6 +2462,10 @@ describe("CodeReviewsPage", () => {
   });
 
   it.each(["queued", "running"] as const)("links %s review titles and updates elapsed duration", async (status) => {
+    // Keep background polling outside the two-second duration check. The
+    // shared test setup compresses a 30-second poll to 1.5 seconds, which can
+    // legitimately rerender the summary while this test checks timer isolation.
+    const pollMs = vi.spyOn(pollIntervals, "pollMs").mockImplementation((ms) => ms);
     vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
     vi.setSystemTime(new Date("2026-06-26T12:06:49Z"));
     const setInterval = vi.spyOn(window, "setInterval");
@@ -2502,6 +2507,7 @@ describe("CodeReviewsPage", () => {
         setInterval.mockRestore();
         clearInterval.mockRestore();
         vi.useRealTimers();
+        pollMs.mockRestore();
       }
     }
   });
