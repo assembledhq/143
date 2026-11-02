@@ -1574,7 +1574,7 @@ func TestCIDeployCancelsStaleBuildsButNotActiveDeploys(t *testing.T) {
 	require.Contains(t, deployJob, `ref: ${{ github.event.workflow_run.head_sha }}`, "deploy should check out the exact SHA that passed CI")
 	require.Contains(t, deployJob, `gh api "repos/$REPO/commits/main" --jq .sha`, "deploy job should compare the run SHA to latest main after acquiring the deploy lock")
 	deployFreshnessIndex := strings.Index(deployJob, "id: deploy_latest")
-	deployCheckoutIndex := strings.Index(deployJob, "uses: actions/checkout@v6")
+	deployCheckoutIndex := strings.Index(deployJob, "uses: useblacksmith/checkout@v1")
 	require.NotEqual(t, -1, deployFreshnessIndex, "deploy job should define an in-lock freshness check")
 	require.NotEqual(t, -1, deployCheckoutIndex, "deploy job should checkout before deploying")
 	require.Less(t, deployFreshnessIndex, deployCheckoutIndex, "deploy job should re-check freshness before any deploy setup or SSH work")

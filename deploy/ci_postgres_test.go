@@ -29,7 +29,7 @@ func TestCIPostgresStartsAfterRegistryFallback(t *testing.T) {
 			require.Empty(t, job.Services, "database pulls must run after checkout so registry fallback can execute")
 			checkout, start, wait, cleanup := -1, -1, -1, -1
 			for i, step := range job.Steps {
-				if step.Uses == "actions/checkout@v6" {
+				if step.Uses == "useblacksmith/checkout@v1" {
 					checkout = i
 				}
 				if step.ID == "postgres" {
