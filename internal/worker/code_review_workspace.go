@@ -19,10 +19,11 @@ import (
 )
 
 type prepareCodeReviewWorkspacePayload struct {
-	OrgID              uuid.UUID `json:"org_id"`
-	MetadataID         uuid.UUID `json:"metadata_id"`
-	SessionID          uuid.UUID `json:"session_id"`
-	ExpectedGeneration int64     `json:"expected_generation"`
+	OrgID              uuid.UUID  `json:"org_id"`
+	MetadataID         uuid.UUID  `json:"metadata_id"`
+	SessionID          uuid.UUID  `json:"session_id"`
+	ExpectedGeneration int64      `json:"expected_generation"`
+	ControllerJobID    *uuid.UUID `json:"controller_job_id,omitempty"`
 }
 
 const codeReviewWorkspaceWait = 3 * time.Second
@@ -34,10 +35,18 @@ var errCodeReviewWorkspaceStopped = errors.New("code review stopped before works
 
 func codeReviewWorkspaceWaitError(reason string) *RetryableError {
 	delay, limit := codeReviewWorkspaceWait, codeReviewWorkspaceWaitLimit
-	return &RetryableError{Err: fmt.Errorf("waiting for code review workspace: %s", reason), RetryAfter: &delay, MaxRetryDuration: &limit}
+	return &RetryableError{Err: fmt.Errorf("%s %s", db.CodeReviewWorkspaceWaitErrorPrefix, reason), RetryAfter: &delay, MaxRetryDuration: &limit}
 }
 
-func codeReviewControllerWorkspaceWaitError(reason string, startedAt time.Time) error {
+// codeReviewWorkspaceControllerWait carries only the identity needed to serialize
+// a controller's lease-safe retry with publication. Preparation retries and other
+// dependency waits keep the ordinary retry path.
+type codeReviewWorkspaceControllerWait struct {
+	OrgID, ReviewID, SessionID uuid.UUID
+	ExpectedHead               string
+}
+
+func codeReviewControllerWorkspaceWaitError(reason string, startedAt time.Time) *RetryableError {
 	retry := codeReviewWorkspaceWaitError(reason)
 	retry.RetryWindowStartedAt = &startedAt
 	// The readiness gate owns the eight-minute deadline and falls back to the
@@ -148,6 +157,9 @@ func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Sto
 		OrgID: job.OrgID, MetadataID: metadata.ID, SessionID: session.ID,
 		ExpectedGeneration: session.WorkspaceGeneration,
 	}
+	if controllerID, ok := jobctx.JobIDFromContext(ctx); ok && controllerID != uuid.Nil {
+		payload.ControllerJobID = &controllerID
+	}
 	key := codeReviewWorkspacePreparationKey(metadata.ID, session.ID, session.WorkspaceGeneration)
 	startedAt, startErr := stores.Jobs.FirstJobCreatedAtByDedupeKey(ctx, job.OrgID, "agent", key)
 	if startErr != nil && !errors.Is(startErr, pgx.ErrNoRows) {
@@ -199,7 +211,11 @@ func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Sto
 		}
 	}
 	log.Debug().Str("session_id", session.ID.String()).Int64("generation", session.WorkspaceGeneration).Msg("waiting for prepared code review workspace")
-	return codeReviewControllerWorkspaceWaitError("preparation pending", startedAt)
+	retry := codeReviewControllerWorkspaceWaitError("preparation pending", startedAt)
+	retry.codeReviewWorkspaceWait = &codeReviewWorkspaceControllerWait{
+		OrgID: job.OrgID, ReviewID: job.MetadataID, SessionID: job.SessionID, ExpectedHead: job.HeadSHA,
+	}
+	return retry
 }
 
 func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, log zerolog.Logger) JobHandler {
@@ -216,6 +232,10 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 		}
 		if input.OrgID == uuid.Nil || input.MetadataID == uuid.Nil || input.SessionID == uuid.Nil || input.ExpectedGeneration < 0 {
 			return fmt.Errorf("invalid code review workspace job identity")
+		}
+		controllerJobID := uuid.Nil
+		if input.ControllerJobID != nil {
+			controllerJobID = *input.ControllerJobID
 		}
 		jobID, hasJob := jobctx.JobIDFromContext(ctx)
 		lockToken, hasToken := jobctx.LockTokenFromContext(ctx)
@@ -293,7 +313,7 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 					p := db.PublishCodeReviewWorkspaceParams{
 						OrgID: input.OrgID, ReviewID: input.MetadataID, SessionID: input.SessionID,
 						PolicyID: metadata.PolicyID, RepositoryID: metadata.RepositoryID,
-						JobID: jobID, JobLockToken: lockToken, OwnerNodeID: ownerNodeID,
+						JobID: jobID, JobLockToken: lockToken, OwnerNodeID: ownerNodeID, ControllerJobID: controllerJobID,
 						ContainerID: *session.ContainerID, ExpectedHead: metadata.HeadSHA,
 						ExpectedGeneration: input.ExpectedGeneration,
 					}
@@ -302,6 +322,7 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 						return err
 					}
 					if rearmed {
+						stores.Jobs.Notify(ctx, controllerJobID)
 						return nil
 					}
 					return codeReviewWorkspaceWaitError("live container has no active review holder")
@@ -345,7 +366,7 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 		published, publishErr := stores.CodeReviewWorkspaces.PublishPrepared(ctx, input.OrgID, db.PublishCodeReviewWorkspaceParams{
 			OrgID: input.OrgID, ReviewID: input.MetadataID, SessionID: input.SessionID,
 			PolicyID: metadata.PolicyID, RepositoryID: metadata.RepositoryID,
-			JobID: jobID, JobLockToken: lockToken, OwnerNodeID: ownerNodeID,
+			JobID: jobID, JobLockToken: lockToken, OwnerNodeID: ownerNodeID, ControllerJobID: controllerJobID,
 			ContainerID: sandbox.ID, ExpectedHead: metadata.HeadSHA,
 			ExpectedGeneration: input.ExpectedGeneration,
 		})
@@ -373,6 +394,7 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 				Str("publication_loss_reason", reason).Msg("code review workspace publication lost")
 			return nil
 		}
+		stores.Jobs.Notify(ctx, controllerJobID)
 		log.Info().Str("session_id", input.SessionID.String()).Str("container_id", sandbox.ID).Msg("published prepared code review workspace")
 		return nil
 	}

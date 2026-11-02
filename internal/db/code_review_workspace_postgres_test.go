@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -28,43 +30,56 @@ type reviewWorkspaceFixture struct {
 	params  PublishCodeReviewWorkspaceParams
 }
 
+// Bound aggregate fixture connections: four fixtures, each one admin plus five pool connections.
+var reviewWorkspaceFixtureSlots = make(chan struct{}, 4)
+
 func newReviewWorkspaceFixture(t *testing.T) reviewWorkspaceFixture {
 	t.Helper()
 	url := os.Getenv("TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("set TEST_DATABASE_URL for review workspace concurrency proof")
 	}
+	reviewWorkspaceFixtureSlots <- struct{}{}
+	t.Cleanup(func() { <-reviewWorkspaceFixtureSlots })
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, url)
 	require.NoError(t, err, "connect to disposable PostgreSQL")
+	t.Cleanup(func() {
+		require.NoError(t, admin.Close(context.Background()), "close disposable PostgreSQL connection")
+	})
 	schema := "review_workspace_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	_, err = admin.Exec(ctx, `CREATE SCHEMA `+schema)
 	require.NoError(t, err, "create isolated review workspace schema")
+	t.Cleanup(func() {
+		_, dropErr := admin.Exec(context.Background(), `DROP SCHEMA `+schema+` CASCADE`)
+		require.NoError(t, dropErr, "drop isolated review workspace schema")
+	})
 	cfg, err := pgxpool.ParseConfig(url)
 	require.NoError(t, err, "parse disposable PostgreSQL settings")
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
-	cfg.MaxConns = 12
+	cfg.MaxConns = 5
+	cfg.MinConns = 0
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	require.NoError(t, err, "open review workspace pool")
 	t.Cleanup(func() {
-		pool.Close()
-		_, dropErr := admin.Exec(context.Background(), `DROP SCHEMA `+schema+` CASCADE`)
-		require.NoError(t, dropErr, "drop isolated review workspace schema")
-		require.NoError(t, admin.Close(context.Background()), "close disposable PostgreSQL connection")
+		if pool != nil {
+			pool.Close()
+		}
 	})
+	require.NoError(t, err, "open review workspace pool")
 	_, err = pool.Exec(ctx, `
 		CREATE TABLE nodes(id text PRIMARY KEY,status text NOT NULL,last_heartbeat_at timestamptz NOT NULL);
 		CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid NOT NULL,origin text NOT NULL,status text NOT NULL,
 			revision_context jsonb,container_id text,worker_node_id text,sandbox_state text NOT NULL DEFAULT 'none',
 			workspace_generation bigint NOT NULL DEFAULT 0,snapshot_key text,turn_holding_container boolean NOT NULL DEFAULT false);
 		CREATE TABLE code_review_session_metadata(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,
-			policy_id uuid NOT NULL,repository_id uuid NOT NULL,head_sha text NOT NULL,status text NOT NULL,stale boolean NOT NULL DEFAULT false);
+			policy_id uuid NOT NULL,repository_id uuid NOT NULL,head_sha text NOT NULL,status text NOT NULL,stale boolean NOT NULL DEFAULT false,review_output_key text NOT NULL DEFAULT 'review-output');
 		CREATE TABLE jobs(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,queue text NOT NULL,
 			job_type text NOT NULL,payload jsonb NOT NULL DEFAULT '{}',priority integer NOT NULL DEFAULT 0,
 			status text NOT NULL DEFAULT 'pending',max_attempts integer NOT NULL DEFAULT 3,dedupe_key text,target_node_id text,
 			locked_by_node_id text,run_owner_id text,owner_kind text,lock_token uuid,locked_at timestamptz,
 			lease_expires_at timestamptz,created_at timestamptz NOT NULL DEFAULT now(),
-			updated_at timestamptz NOT NULL DEFAULT now(),completed_at timestamptz);
+			updated_at timestamptz NOT NULL DEFAULT now(),completed_at timestamptz,run_at timestamptz NOT NULL DEFAULT now(),
+			attempts integer NOT NULL DEFAULT 1,last_error text);
 		CREATE UNIQUE INDEX idx_workspace_jobs_dedupe ON jobs(queue,dedupe_key)
 			WHERE dedupe_key IS NOT NULL AND status IN ('pending','running');
 		CREATE TABLE session_sandbox_holders(id uuid PRIMARY KEY DEFAULT gen_random_uuid(),org_id uuid NOT NULL,
@@ -84,7 +99,7 @@ func newReviewWorkspaceFixture(t *testing.T) reviewWorkspaceFixture {
 	_, err = pool.Exec(ctx, `INSERT INTO sessions(id,org_id,origin,status,revision_context)
 		VALUES($1,$2,'code_review','idle','{"head_sha":"head-1"}')`, f.session, f.org)
 	require.NoError(t, err, "seed cold review session")
-	_, err = pool.Exec(ctx, `INSERT INTO code_review_session_metadata
+	_, err = pool.Exec(ctx, `INSERT INTO code_review_session_metadata(id,org_id,session_id,policy_id,repository_id,head_sha,status,stale)
 		VALUES($1,$2,$3,$4,$5,'head-1','running',false)`, f.review, f.org, f.session, f.policy, f.repo)
 	require.NoError(t, err, "seed active review metadata")
 	_, err = pool.Exec(ctx, `INSERT INTO jobs(id,org_id,queue,job_type,status,locked_by_node_id,lock_token,lease_expires_at)
@@ -330,4 +345,584 @@ func TestActiveCodeReviewPreparationProtectsOnlyLiveLease(t *testing.T) {
 	refs, err = NewSessionStore(f.pool).ListActiveCodeReviewPreparations(ctx)
 	require.NoError(t, err, "list preparations after lease expiry")
 	require.Empty(t, refs, "GC may reclaim an unpublished container after its publish lease expires")
+}
+
+func seedReviewWorkspaceController(t *testing.T, f reviewWorkspaceFixture) RetryCodeReviewWorkspaceControllerParams {
+	t.Helper()
+	p := RetryCodeReviewWorkspaceControllerParams{
+		OrgID: f.org, ReviewID: f.review, SessionID: f.session, JobID: uuid.New(), JobLockToken: uuid.New(),
+		ExpectedHead: "head-1", RunAt: time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond),
+		ErrorMessage: CodeReviewWorkspaceWaitErrorPrefix + " preparation pending",
+	}
+	payload := map[string]any{"org_id": f.org, "metadata_id": f.review, "session_id": f.session,
+		"policy_id": f.policy, "repository_id": f.repo, "head_sha": "head-1", "review_output_key": "review-output"}
+	_, err := f.pool.Exec(context.Background(), `INSERT INTO jobs(id,org_id,queue,job_type,status,payload,
+		locked_by_node_id,lock_token,lease_expires_at,run_at,attempts,last_error)
+		VALUES($1,$2,'agent','run_code_review','running',$3,$4,$5,clock_timestamp()+interval '5 minutes',$6,2,$7)`,
+		p.JobID, f.org, payload, f.node, p.JobLockToken, p.RunAt, p.ErrorMessage)
+	require.NoError(t, err, "seed the exact current review controller lease")
+	return p
+}
+
+type reviewWorkspaceControllerState struct {
+	Status    string
+	RunAt     time.Time
+	Token     *uuid.UUID
+	Owner     *string
+	Attempts  int
+	LastError *string
+}
+
+func readReviewWorkspaceController(t *testing.T, f reviewWorkspaceFixture, id uuid.UUID) reviewWorkspaceControllerState {
+	t.Helper()
+	var state reviewWorkspaceControllerState
+	err := f.pool.QueryRow(context.Background(), `SELECT status,run_at,lock_token,locked_by_node_id,attempts,last_error
+		FROM jobs WHERE org_id=$1 AND id=$2`, f.org, id).Scan(&state.Status, &state.RunAt, &state.Token, &state.Owner, &state.Attempts, &state.LastError)
+	require.NoError(t, err, "read controller scheduling and lease state")
+	return state
+}
+
+// The wrapper pauses after PostgreSQL actually owns the advisory lock. It does
+// not simulate readiness or mutate SQL; both competing paths run real stores.
+type reviewWorkspaceGatedDB struct {
+	TxStarter
+	started  chan uint32
+	acquired chan struct{}
+	release  <-chan struct{}
+}
+
+func (d reviewWorkspaceGatedDB) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := d.TxStarter.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if d.started != nil {
+		d.started <- tx.Conn().PgConn().PID()
+	}
+	if d.release == nil {
+		return tx, nil
+	}
+	return &reviewWorkspaceGatedTx{Tx: tx, acquired: d.acquired, release: d.release}, nil
+}
+
+type reviewWorkspaceGatedTx struct {
+	pgx.Tx
+	acquired chan struct{}
+	release  <-chan struct{}
+}
+
+func (tx *reviewWorkspaceGatedTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	tag, err := tx.Tx.Exec(ctx, sql, args...)
+	if err == nil && strings.Contains(sql, "pg_advisory_xact_lock") {
+		close(tx.acquired)
+		select {
+		case <-tx.release:
+		case <-ctx.Done():
+			return tag, ctx.Err()
+		}
+	}
+	return tag, err
+}
+
+func TestCodeReviewWorkspaceCompletionRetryRace(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		publishFirst bool
+		rearm        bool
+	}{
+		{name: "publication commits before pending retry", publishFirst: true},
+		{name: "pending retry commits before publication"},
+		{name: "rearm commits before pending retry", publishFirst: true, rearm: true},
+		{name: "pending retry commits before rearm", rearm: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReviewWorkspaceFixture(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			p := seedReviewWorkspaceController(t, f)
+			f.params.ControllerJobID = p.JobID
+			if tt.rearm {
+				published, err := NewCodeReviewWorkspaceStore(f.pool).PublishPrepared(ctx, f.org, f.params)
+				require.NoError(t, err, "prepare prior workspace before expiring its holder")
+				require.True(t, published, "prior workspace should be recorded")
+				_, err = f.pool.Exec(ctx, `UPDATE session_sandbox_holders SET expires_at=clock_timestamp()-interval '1 second'`)
+				require.NoError(t, err, "expire the prior holder so readiness requires rearm")
+				f.params.ExpectedGeneration = 1
+			}
+			release := make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			acquired := make(chan struct{})
+			started := make(chan uint32, 1)
+			first := NewCodeReviewWorkspaceStore(reviewWorkspaceGatedDB{TxStarter: f.pool, acquired: acquired, release: release})
+			second := NewCodeReviewWorkspaceStore(reviewWorkspaceGatedDB{TxStarter: f.pool, started: started})
+			publish := func(s *CodeReviewWorkspaceStore) error {
+				var won bool
+				var err error
+				if tt.rearm {
+					won, err = s.RearmExisting(ctx, f.org, f.params)
+				} else {
+					won, err = s.PublishPrepared(ctx, f.org, f.params)
+				}
+				if err == nil && !won {
+					return fmt.Errorf("valid preparation failed to publish")
+				}
+				return err
+			}
+			retry := func(s *CodeReviewWorkspaceStore) error {
+				_, ok, err := s.RetryControllerWithLease(ctx, f.org, p)
+				if err == nil && !ok {
+					return fmt.Errorf("valid controller failed retry fencing")
+				}
+				return err
+			}
+			firstOp, secondOp := retry, publish
+			if tt.publishFirst {
+				firstOp, secondOp = publish, retry
+			}
+			firstResult, secondResult := make(chan error, 1), make(chan error, 1)
+			go func() { firstResult <- firstOp(first) }()
+			select {
+			case <-acquired:
+			case <-ctx.Done():
+				t.Fatal("first transition did not acquire advisory lock")
+			}
+			go func() { secondResult <- secondOp(second) }()
+			var pid uint32
+			select {
+			case pid = <-started:
+			case <-ctx.Done():
+				t.Fatal("competing transition did not begin")
+			}
+			require.Eventually(t, func() bool {
+				var waiting bool
+				err := f.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted)`, pid).Scan(&waiting)
+				return err == nil && waiting
+			}, 2*time.Second, 5*time.Millisecond, "the competing real transaction must wait on the same readiness lock")
+			unblock()
+			require.NoError(t, <-firstResult, "first readiness transition should commit")
+			require.NoError(t, <-secondResult, "second readiness transition should observe the committed winner")
+			state := readReviewWorkspaceController(t, f, p.JobID)
+			require.Equal(t, "pending", state.Status, "completion should leave the same controller pending")
+			require.Nil(t, state.Token, "only the controller retry should release its lease")
+			require.Nil(t, state.Owner, "controller retry should clear its worker owner")
+			require.Equal(t, 1, state.Attempts, "dependency wait should refund exactly one attempt")
+			require.WithinDuration(t, time.Now(), state.RunAt, 3*time.Second, "both race orderings must make the existing controller runnable immediately")
+			var controllers int
+			require.NoError(t, f.pool.QueryRow(ctx, `SELECT count(*) FROM jobs WHERE org_id=$1 AND job_type='run_code_review'`, f.org).Scan(&controllers), "count exact existing controller jobs")
+			require.Equal(t, 1, controllers, "completion must never enqueue a replacement controller")
+		})
+	}
+}
+
+func TestCodeReviewWorkspacePublicationWakeFences(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		mutate   func(*testing.T, reviewWorkspaceFixture, RetryCodeReviewWorkspaceControllerParams)
+		noParent bool
+		wake     bool
+	}{
+		{name: "pending workspace wait wakes", wake: true},
+		{name: "running controller lease remains intact", mutate: func(t *testing.T, f reviewWorkspaceFixture, p RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE jobs SET status='running' WHERE id=$1`, p.JobID)
+		}},
+		{name: "completed controller remains terminal", mutate: func(t *testing.T, f reviewWorkspaceFixture, p RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE jobs SET status='succeeded' WHERE id=$1`, p.JobID)
+		}},
+		{name: "late publication preserves GitHub backoff", mutate: func(t *testing.T, f reviewWorkspaceFixture, p RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE jobs SET last_error='GitHub provider rate limit' WHERE id=$1`, p.JobID)
+		}},
+		{name: "legacy payload has no parent", noParent: true},
+		{name: "wrong parent tenant", mutate: func(t *testing.T, f reviewWorkspaceFixture, p RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE jobs SET payload=jsonb_set(payload,'{org_id}',to_jsonb($2::text)) WHERE id=$1`, p.JobID, uuid.New().String())
+		}},
+		{name: "wrong parent head", mutate: func(t *testing.T, f reviewWorkspaceFixture, p RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE jobs SET payload=jsonb_set(payload,'{head_sha}','"other-head"') WHERE id=$1`, p.JobID)
+		}},
+		{name: "wrong parent review output", mutate: func(t *testing.T, f reviewWorkspaceFixture, p RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE jobs SET payload=jsonb_set(payload,'{review_output_key}','"other-output"') WHERE id=$1`, p.JobID)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReviewWorkspaceFixture(t)
+			p := seedReviewWorkspaceController(t, f)
+			workspaceWakeExec(t, f, `UPDATE jobs SET status='pending' WHERE id=$1`, p.JobID)
+			if tt.mutate != nil {
+				tt.mutate(t, f, p)
+			}
+			if !tt.noParent {
+				f.params.ControllerJobID = p.JobID
+			}
+			before := readReviewWorkspaceController(t, f, p.JobID)
+			store := NewCodeReviewWorkspaceStore(f.pool)
+			published, err := store.PublishPrepared(context.Background(), f.org, f.params)
+			require.NoError(t, err, "valid publication should not depend on whether a controller can wake")
+			require.True(t, published, "valid workspace should publish once")
+			after := readReviewWorkspaceController(t, f, p.JobID)
+			if tt.wake {
+				require.WithinDuration(t, time.Now(), after.RunAt, 3*time.Second, "pending workspace wait should wake immediately")
+				before.RunAt = after.RunAt
+			}
+			require.Equal(t, before, after, "publication must preserve controller identity, attempts, lease, and unrelated scheduling")
+			published, err = store.PublishPrepared(context.Background(), f.org, f.params)
+			require.NoError(t, err, "duplicate publication should be a fenced no-op")
+			require.False(t, published, "duplicate publication cannot advance generation or holder twice")
+			require.Equal(t, after, readReviewWorkspaceController(t, f, p.JobID), "duplicate publication cannot reschedule or alter a controller")
+		})
+	}
+}
+
+func workspaceWakeExec(t *testing.T, f reviewWorkspaceFixture, query string, args ...any) {
+	t.Helper()
+	_, err := f.pool.Exec(context.Background(), query, args...)
+	require.NoError(t, err, "update isolated workspace wake fixture")
+}
+
+func TestCodeReviewWorkspaceControllerRetryFences(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		mutate      func(*testing.T, reviewWorkspaceFixture, *RetryCodeReviewWorkspaceControllerParams)
+		wantErr     bool
+		normalRetry bool
+	}{
+		{name: "stale fencing token", mutate: func(_ *testing.T, _ reviewWorkspaceFixture, p *RetryCodeReviewWorkspaceControllerParams) {
+			p.JobLockToken = uuid.New()
+		}},
+		{name: "wrong tenant", mutate: func(_ *testing.T, _ reviewWorkspaceFixture, p *RetryCodeReviewWorkspaceControllerParams) {
+			p.OrgID = uuid.New()
+		}, wantErr: true},
+		{name: "missing parent", mutate: func(_ *testing.T, _ reviewWorkspaceFixture, p *RetryCodeReviewWorkspaceControllerParams) {
+			p.JobID = uuid.Nil
+		}, wantErr: true},
+		{name: "expired current lease", mutate: func(t *testing.T, f reviewWorkspaceFixture, p *RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE jobs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE id=$1`, p.JobID)
+		}},
+		{name: "cancelled review", normalRetry: true, mutate: func(t *testing.T, f reviewWorkspaceFixture, _ *RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE code_review_session_metadata SET status='cancelled'`)
+		}},
+		{name: "cancelled session", normalRetry: true, mutate: func(t *testing.T, f reviewWorkspaceFixture, _ *RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE sessions SET status='cancelled'`)
+		}},
+		{name: "changed head", normalRetry: true, mutate: func(t *testing.T, f reviewWorkspaceFixture, _ *RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE code_review_session_metadata SET head_sha='other-head'`)
+		}},
+		{name: "wrong payload session", mutate: func(t *testing.T, f reviewWorkspaceFixture, p *RetryCodeReviewWorkspaceControllerParams) {
+			workspaceWakeExec(t, f, `UPDATE jobs SET payload=jsonb_set(payload,'{session_id}',to_jsonb($2::text)) WHERE id=$1`, p.JobID, uuid.New().String())
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReviewWorkspaceFixture(t)
+			p := seedReviewWorkspaceController(t, f)
+			id := p.JobID
+			tt.mutate(t, f, &p)
+			before := readReviewWorkspaceController(t, f, id)
+			runAt, retried, err := NewCodeReviewWorkspaceStore(f.pool).RetryControllerWithLease(context.Background(), f.org, p)
+			if tt.wantErr {
+				require.Error(t, err, "invalid request identity must fail before changing scheduling")
+			} else {
+				require.NoError(t, err, "stale authoritative state should fence retry without a database error")
+			}
+			if tt.normalRetry {
+				require.True(t, retried, "owned controller must requeue to settle terminal or changed review state promptly")
+				require.Equal(t, p.RunAt, runAt.UTC(), "terminal or changed review must retain ordinary dependency retry time")
+				after := readReviewWorkspaceController(t, f, id)
+				require.Equal(t, "pending", after.Status, "owned controller should remain schedulable for terminal settlement")
+				require.Nil(t, after.Token, "owned controller retry must release its lease")
+				return
+			}
+			require.False(t, retried, "invalid or stale controller cannot release the current lease")
+			require.Equal(t, before, readReviewWorkspaceController(t, f, id), "fenced retry must preserve the exact controller state")
+		})
+	}
+}
+
+func TestCodeReviewWorkspaceWaitUsesCurrentTime(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		transition  string
+		expiry      string
+		normalRetry bool
+	}{
+		{name: "preparation lease expires while publication waits", transition: "publish", expiry: "preparation"},
+		{name: "owner heartbeat expires while publication waits", transition: "publish", expiry: "node"},
+		{name: "preparation lease expires while rearm waits", transition: "rearm", expiry: "preparation"},
+		{name: "controller lease expires while retry waits", transition: "retry", expiry: "controller"},
+		{name: "holder expires while controller retry waits", transition: "retry", expiry: "holder", normalRetry: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReviewWorkspaceFixture(t)
+			p := seedReviewWorkspaceController(t, f)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			f.params.ControllerJobID = p.JobID
+			if tt.transition == "rearm" || tt.expiry == "holder" {
+				published, err := NewCodeReviewWorkspaceStore(f.pool).PublishPrepared(ctx, f.org, f.params)
+				require.NoError(t, err, "publish an initial container before time fencing proof")
+				require.True(t, published, "initial workspace must be ready")
+				f.params.ExpectedGeneration = 1
+				if tt.transition == "rearm" {
+					workspaceWakeExec(t, f, `UPDATE session_sandbox_holders SET expires_at=clock_timestamp()-interval '1 second'`)
+				}
+			}
+			before := readReviewWorkspaceController(t, f, p.JobID)
+			release := make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			acquired := make(chan struct{})
+			store := NewCodeReviewWorkspaceStore(reviewWorkspaceGatedDB{TxStarter: f.pool, acquired: acquired, release: release})
+			type result struct {
+				ok    bool
+				err   error
+				runAt time.Time
+			}
+			done := make(chan result, 1)
+			go func() {
+				var r result
+				switch tt.transition {
+				case "publish":
+					r.ok, r.err = store.PublishPrepared(ctx, f.org, f.params)
+				case "rearm":
+					r.ok, r.err = store.RearmExisting(ctx, f.org, f.params)
+				case "retry":
+					r.runAt, r.ok, r.err = store.RetryControllerWithLease(ctx, f.org, p)
+				}
+				done <- r
+			}()
+			select {
+			case <-acquired:
+			case <-ctx.Done():
+				t.Fatal("transition never reached its actual database lock")
+			}
+			var deadline time.Time
+			require.NoError(t, f.pool.QueryRow(ctx, `SELECT clock_timestamp()+interval '150 milliseconds'`).Scan(&deadline), "set a wall-clock deadline later than transaction start")
+			switch tt.expiry {
+			case "preparation":
+				workspaceWakeExec(t, f, `UPDATE jobs SET lease_expires_at=$2 WHERE id=$1`, f.job, deadline)
+			case "controller":
+				workspaceWakeExec(t, f, `UPDATE jobs SET lease_expires_at=$2 WHERE id=$1`, p.JobID, deadline)
+			case "node":
+				workspaceWakeExec(t, f, `UPDATE nodes SET last_heartbeat_at=$2::timestamptz-interval '90 seconds' WHERE id=$1`, f.node, deadline)
+			case "holder":
+				workspaceWakeExec(t, f, `UPDATE session_sandbox_holders SET expires_at=$1`, deadline)
+			}
+			require.Eventually(t, func() bool {
+				var expired bool
+				err := f.pool.QueryRow(ctx, `SELECT clock_timestamp()>$1`, deadline).Scan(&expired)
+				return err == nil && expired
+			}, time.Second, 5*time.Millisecond, "wall-clock lease must expire while transition transaction is already open")
+			unblock()
+			r := <-done
+			require.NoError(t, r.err, "expired ownership should fail by fencing rather than a database error")
+			if tt.normalRetry {
+				require.True(t, r.ok, "an owned controller with expired readiness should retain its normal retry")
+				require.Equal(t, p.RunAt, r.runAt.UTC(), "expired holder must never shorten the retry using transaction-start time")
+			} else {
+				require.False(t, r.ok, "a lease or node that expired during a lock wait must not authorize publication or retry")
+				require.Equal(t, before, readReviewWorkspaceController(t, f, p.JobID), "failed completion must preserve parent scheduling and lease identity")
+			}
+		})
+	}
+}
+
+func TestCodeReviewWorkspaceStaleGenerationCannotWake(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		rearm bool
+	}{
+		{name: "new publication generation mismatch"},
+		{name: "existing holder generation mismatch", rearm: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReviewWorkspaceFixture(t)
+			p := seedReviewWorkspaceController(t, f)
+			store := NewCodeReviewWorkspaceStore(f.pool)
+			if tt.rearm {
+				published, err := store.PublishPrepared(context.Background(), f.org, f.params)
+				require.NoError(t, err, "publish initial generation")
+				require.True(t, published, "initial generation should publish")
+				workspaceWakeExec(t, f, `UPDATE session_sandbox_holders SET expires_at=clock_timestamp()-interval '1 second'`)
+			}
+			workspaceWakeExec(t, f, `UPDATE sessions SET workspace_generation=workspace_generation+1`)
+			workspaceWakeExec(t, f, `UPDATE jobs SET status='pending' WHERE id=$1`, p.JobID)
+			f.params.ControllerJobID = p.JobID
+			before := readReviewWorkspaceController(t, f, p.JobID)
+			var published bool
+			var err error
+			if tt.rearm {
+				published, err = store.RearmExisting(context.Background(), f.org, f.params)
+			} else {
+				published, err = store.PublishPrepared(context.Background(), f.org, f.params)
+			}
+			require.NoError(t, err, "generation mismatch should fence without a database error")
+			require.False(t, published, "stale preparation generation cannot publish or rearm")
+			require.Equal(t, before, readReviewWorkspaceController(t, f, p.JobID), "stale generation must never wake its controller")
+		})
+	}
+}
+
+func TestCodeReviewWorkspaceReadyRetryRequiresCurrentParentMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		update string
+	}{
+		{name: "policy changed", update: `UPDATE code_review_session_metadata SET policy_id=gen_random_uuid()`},
+		{name: "repository changed", update: `UPDATE code_review_session_metadata SET repository_id=gen_random_uuid()`},
+		{name: "output identity changed", update: `UPDATE code_review_session_metadata SET review_output_key='replacement-output'`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReviewWorkspaceFixture(t)
+			p := seedReviewWorkspaceController(t, f)
+			store := NewCodeReviewWorkspaceStore(f.pool)
+			published, err := store.PublishPrepared(context.Background(), f.org, f.params)
+			require.NoError(t, err, "publish ready workspace before changing current identity")
+			require.True(t, published, "workspace should initially be ready")
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			blocker, err := f.pool.Begin(ctx)
+			require.NoError(t, err, "begin a competing owner of the controller row")
+			defer func() { _ = blocker.Rollback(context.Background()) }()
+			_, err = blocker.Exec(ctx, `SELECT id FROM jobs WHERE org_id=$1 AND id=$2 FOR UPDATE`, f.org, p.JobID)
+			require.NoError(t, err, "hold controller row while retry starts its statement snapshot")
+			started := make(chan uint32, 1)
+			retryStore := NewCodeReviewWorkspaceStore(reviewWorkspaceGatedDB{TxStarter: f.pool, started: started})
+			type result struct {
+				runAt time.Time
+				ok    bool
+				err   error
+			}
+			done := make(chan result, 1)
+			go func() {
+				runAt, ok, err := retryStore.RetryControllerWithLease(ctx, f.org, p)
+				done <- result{runAt: runAt, ok: ok, err: err}
+			}()
+			var pid uint32
+			select {
+			case pid = <-started:
+			case r := <-done:
+				require.NoError(t, r.err, "transition must begin before the row-lock proof")
+				t.Fatal("transition completed before exposing its database backend")
+			case <-ctx.Done():
+				t.Fatal("transition did not begin before the row-lock proof deadline")
+			}
+			require.Eventually(t, func() bool {
+				var waiting bool
+				err := f.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')`, pid).Scan(&waiting)
+				return err == nil && waiting
+			}, time.Second, 5*time.Millisecond, "controller retry must block after beginning its first row-lock statement")
+			workspaceWakeExec(t, f, tt.update)
+			require.NoError(t, blocker.Commit(ctx), "release controller row after authoritative metadata changed")
+			r := <-done
+			require.NoError(t, r.err, "still-owned controller can requeue after metadata change")
+			require.True(t, r.ok, "current controller lease should be released for ordinary retry")
+			require.Equal(t, p.RunAt, r.runAt.UTC(), "identity matching must use the fresh readiness snapshot after row wait")
+		})
+	}
+}
+
+func TestCodeReviewWorkspacePublicationRechecksOwnershipAfterParentLock(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		rearm      bool
+		nodeExpiry bool
+	}{
+		{name: "publish lease expires behind parent row lock"},
+		{name: "publish owner heartbeat expires behind parent row lock", nodeExpiry: true},
+		{name: "rearm lease expires behind parent row lock", rearm: true},
+		{name: "rearm owner heartbeat expires behind parent row lock", rearm: true, nodeExpiry: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newReviewWorkspaceFixture(t)
+			p := seedReviewWorkspaceController(t, f)
+			ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+			defer cancel()
+			if tt.rearm {
+				ok, err := NewCodeReviewWorkspaceStore(f.pool).PublishPrepared(ctx, f.org, f.params)
+				require.NoError(t, err, "record existing workspace before testing rearm lock wait")
+				require.True(t, ok, "initial workspace should publish")
+				f.params.ExpectedGeneration = 1
+				workspaceWakeExec(t, f, `UPDATE session_sandbox_holders SET expires_at=clock_timestamp()-interval '1 second'`)
+			}
+			f.params.ControllerJobID = p.JobID
+			workspaceWakeExec(t, f, `UPDATE jobs SET status='pending' WHERE id=$1`, p.JobID)
+			before := readReviewWorkspaceController(t, f, p.JobID)
+			blocker, err := f.pool.Begin(ctx)
+			require.NoError(t, err, "begin independent transaction owning the pending parent row")
+			defer func() { _ = blocker.Rollback(context.Background()) }()
+			_, err = blocker.Exec(ctx, `SELECT id FROM jobs WHERE org_id=$1 AND id=$2 FOR UPDATE`, f.org, p.JobID)
+			require.NoError(t, err, "hold the parent row before preparation tries to nudge it")
+			var deadline time.Time
+			require.NoError(t, f.pool.QueryRow(ctx, `SELECT clock_timestamp()+interval '5 seconds'`).Scan(&deadline), "choose ownership expiry later than transaction start")
+			if tt.nodeExpiry {
+				workspaceWakeExec(t, f, `UPDATE nodes SET last_heartbeat_at=$2::timestamptz-interval '90 seconds' WHERE id=$1`, f.node, deadline)
+			} else {
+				workspaceWakeExec(t, f, `UPDATE jobs SET lease_expires_at=$2 WHERE id=$1`, f.job, deadline)
+			}
+			started := make(chan uint32, 1)
+			store := NewCodeReviewWorkspaceStore(reviewWorkspaceGatedDB{TxStarter: f.pool, started: started})
+			type result struct {
+				ok  bool
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				var r result
+				if tt.rearm {
+					r.ok, r.err = store.RearmExisting(ctx, f.org, f.params)
+				} else {
+					r.ok, r.err = store.PublishPrepared(ctx, f.org, f.params)
+				}
+				done <- r
+			}()
+			var pid uint32
+			select {
+			case pid = <-started:
+			case r := <-done:
+				require.NoError(t, r.err, "transition must begin before the row-lock proof")
+				t.Fatal("transition completed before exposing its database backend")
+			case <-ctx.Done():
+				t.Fatal("transition did not begin before the row-lock proof deadline")
+			}
+			require.Eventually(t, func() bool {
+				var waiting bool
+				err := f.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock')`, pid).Scan(&waiting)
+				return err == nil && waiting
+			}, 3*time.Second, 5*time.Millisecond, "publication must really wait on the parent row after validating its preparation lease")
+			require.Eventually(t, func() bool {
+				var expired bool
+				err := f.pool.QueryRow(ctx, `SELECT clock_timestamp()>$1`, deadline).Scan(&expired)
+				return err == nil && expired
+			}, 6*time.Second, 10*time.Millisecond, "ownership must expire during the real parent row lock wait")
+			require.NoError(t, blocker.Commit(ctx), "release parent row after ownership has expired")
+			r := <-done
+			require.NoError(t, r.err, "ownership expiry should roll back publication without a database error")
+			require.False(t, r.ok, "publication must fail its final ownership check after nudge lock waiting")
+			require.Equal(t, before, readReviewWorkspaceController(t, f, p.JobID), "rolled-back publication must not shorten the parent retry")
+			ready, err := NewCodeReviewWorkspaceStore(f.pool).Readiness(ctx, f.org, f.review, f.session, "head-1")
+			require.NoError(t, err, "check readiness after the fenced transaction rolls back")
+			require.False(t, ready.Ready, "failed preparation ownership must not leave a newly ready holder")
+		})
+	}
 }

@@ -107,6 +107,32 @@ Acceptance: two simultaneous reviewer lanes create one sandbox and one checkout 
 
 The current completion log reports time to first reviewer **thread start**, a proxy for execution start; it does not measure first agent token. Derive production percentiles from review/session-scoped logs after rollout and compare them with M0 before marking the latency acceptance complete.
 
+#### Preparation-completion wake
+
+The preparation payload optionally identifies the existing controller job. A
+successful workspace publication or holder rearm advances that job's `run_at`
+only when it is pending on workspace preparation and still matches the same
+tenant, review, session, and captured revision. It never creates a controller or
+changes a running controller's lease. Older payloads without the controller ID
+retain polling.
+
+Publication, rearm, and the controller's workspace-specific retry acquire the
+same transaction-scoped advisory lock, keyed by tenant/review/session, before
+row locks. If publication commits first, the lease-owned retry observes current
+readiness and schedules immediately. If retry commits first, publication makes
+the pending job runnable in its readiness transaction. Lock waits are bounded;
+lease and holder validity use current database time after waiting. Identity,
+revision, cancellation, and ownership predicates remain authoritative.
+
+The existing persisted workspace-wait error prefix is a scheduling marker, with
+one shared constant for its writer and reader. Ordinary retries overwrite it,
+so late preparation cannot shorten an unrelated GitHub, provider, or result
+wait. The marker never establishes readiness or ownership. Post-commit queue
+notifications accelerate ordinary claiming; the five-second polling fallback
+recovers missed notifications, and the controller still performs its normal
+freshness and dispatch checks. Queue load and preflight remain separate sources
+of latency. This slice does not implement reviewer-result or synthesis wakes.
+
 ### M4 — Advance on durable result completion
 
 Persist the validated thread result and terminal turn state, then make the existing `run_code_review` job runnable and notify workers through the existing job notifier. Preserve the polling path as recovery for lost notifications. The controller continues to enforce reviewer quorum, fallbacks, synthesis validation, live revision checks, and publication ownership.
@@ -151,7 +177,13 @@ M2 proposes one additive migration, numbered at implementation time: extend `ses
 
 The new review-holder acquisition/renewal/release operations must be conditional on the current lease and review ownership. Holder cleanup must honor every live holder kind, not only `thread_runtime`. A rollback must drain/release new holders before removing CHECK support; do not run a destructive down migration against active holders.
 
-M4 is intended to reuse existing job state and notifier APIs. The running-job/lost-wakeup race is an explicit design gate: if the existing transaction/lease operations cannot encode it safely, specify an additive pending-wake field and its transitions here before implementing that slice. Polling remains correct until then.
+The preparation-completion wake reuses existing job payload, `last_error`,
+`run_at`, status, and lease fields; it needs no schema migration. Its advisory
+lock coordinates readiness publication with workspace retries and does not
+authorize other state transitions. M4's later result-completion wake remains a
+separate design gate: prove its running-job/lost-wakeup race against result
+durability before extending this protocol. If that requires a pending-wake
+field, specify its transitions here first. Polling remains the recovery path.
 
 M6 reuses the existing typed roster and versioned policy contract. An experiment must not silently change reviewer inheritance. M7's schema, assessment identity, routes, auth/RBAC, pagination, and SSE contracts remain owned by the linked scheduling/reuse design. No new public routes, request/response fields, error shapes, or SSE payloads are proposed by M0–M5. Routine implementation should not update public docs; any later user-visible scheduling/policy/API expansion follows repository documentation rules.
 
