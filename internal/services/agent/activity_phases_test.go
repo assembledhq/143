@@ -381,6 +381,69 @@ func TestActivityPhaseServicePublishesLifecycleEventsAfterTransitions(t *testing
 	require.Equal(t, threadID, publisher.events[1].ThreadID, "the terminal event should retain the owning thread identity")
 }
 
+func TestActivityPhaseServicePublishesExactLifecycleEvent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.November, 2, 17, 0, 0, 0, time.UTC)
+	orgID, sessionID, threadID := uuid.New(), uuid.New(), uuid.New()
+	tests := []struct {
+		name     string
+		publish  func(*ActivityPhaseService)
+		expected models.SessionStreamEvent
+	}{
+		{
+			name: "activity phase",
+			publish: func(service *ActivityPhaseService) {
+				phase := models.SessionActivityPhase{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, Status: models.ActivityPhaseStatusRunning}
+				service.publishPhase(context.Background(), models.SessionStreamEventActivityPhaseStarted, phase)
+			},
+			expected: models.SessionStreamEvent{
+				ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(string(models.SessionStreamEventActivityPhaseStarted)+":11111111-1111-1111-1111-111111111111:running")), Type: models.SessionStreamEventActivityPhaseStarted,
+				OrgID: orgID, SessionID: sessionID, ThreadID: threadID, EmittedAt: now,
+				Data: models.ActivityPhaseEvent{Phase: models.SessionActivityPhase{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, Status: models.ActivityPhaseStatusRunning}},
+			},
+		},
+		{
+			name: "inbox delivery batch",
+			publish: func(service *ActivityPhaseService) {
+				batch := models.ThreadInboxDeliveryBatch{ID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, Status: models.InboxDeliveryBatchAcknowledged}
+				service.publishBatch(context.Background(), models.SessionStreamEventInboxDeliveryAcknowledged, batch)
+			},
+			expected: models.SessionStreamEvent{
+				ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(string(models.SessionStreamEventInboxDeliveryAcknowledged)+":22222222-2222-2222-2222-222222222222:acknowledged")), Type: models.SessionStreamEventInboxDeliveryAcknowledged,
+				OrgID: orgID, SessionID: sessionID, ThreadID: threadID, EmittedAt: now,
+				Data: models.ThreadInboxDeliveryBatchEvent{Batch: models.ThreadInboxDeliveryBatch{ID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), OrgID: orgID, SessionID: sessionID, ThreadID: threadID, Status: models.InboxDeliveryBatchAcknowledged}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			publisher := &activityPhasePublisherFake{}
+			service := NewActivityPhaseService(&activityPhaseStoreFake{}, zerolog.Nop(), WithActivityPhaseEventPublisher(publisher))
+			service.now = func() time.Time { return now }
+
+			tt.publish(service)
+
+			require.Equal(t, []models.SessionStreamEvent{tt.expected}, publisher.events, "publisher should receive the exact lifecycle event")
+		})
+	}
+}
+
+func TestActivityPhaseServiceSkipsLifecycleEventConstructionWithoutPublisher(t *testing.T) {
+	t.Parallel()
+
+	service := NewActivityPhaseService(&activityPhaseStoreFake{}, zerolog.Nop())
+	service.now = func() time.Time {
+		t.Fatal("event timestamp should not be read without a publisher")
+		return time.Time{}
+	}
+
+	service.publishPhase(context.Background(), models.SessionStreamEventActivityPhaseStarted, models.SessionActivityPhase{})
+	service.publishBatch(context.Background(), models.SessionStreamEventInboxDeliveryStarted, models.ThreadInboxDeliveryBatch{})
+}
+
 func TestSeedActivityPhaseExecutionCommitsBeforePublishing(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
