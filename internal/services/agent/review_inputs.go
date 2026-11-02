@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/observability"
 	"github.com/google/uuid"
 )
 
@@ -235,9 +236,26 @@ with pathlib.Path(str(marker) + ".lock").open("a") as lock:
 `
 
 func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
+	return o.prepareCodeReviewInputs(ctx, session, sandbox, true)
+}
+
+// prepareColdCodeReviewInputs is only for a newly cloned, unpublished sandbox.
+// Its immutable input bundle cannot exist yet, so begin with local preparation
+// instead of probing the warm cache. Expired budgets still permit only verification.
+func (o *Orchestrator) prepareColdCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
+	return o.prepareCodeReviewInputs(ctx, session, sandbox, false)
+}
+
+func (o *Orchestrator) prepareCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox, verifyExisting bool) (returnErr error) {
 	if session == nil || session.Origin != models.SessionOriginCodeReview {
 		return nil
 	}
+	log := o.logger.With().Str("org_id", session.OrgID.String()).Str("session_id", session.ID.String()).Logger()
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
+		log = log.With().Str("job_id", jobID.String()).Logger()
+	}
+	stage := observability.BeginStage(true, log, "review_inputs_ensure")
+	defer func() { stage.End(observability.StageOutcome(ctx, returnErr)) }()
 	identity, err := codeReviewInputIdentityFromSession(session)
 	if err != nil {
 		return err
@@ -258,26 +276,30 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 	defer cancel()
 	var started atomic.Bool
 	manifestPath, _ := CodeReviewInputPaths(identity.OrgID, identity.SessionID, identity.RepositoryID, identity.Repository, identity.BaseSHA, identity.HeadSHA)
-	result := o.reviewInputsGroup.DoChan(sandbox.ID+":"+manifestPath, func() (any, error) {
+	result := o.reviewInputsGroup.DoChan(sandbox.ID+":"+manifestPath, func() (_ any, ownerErr error) {
 		started.Store(true)
+		ownerStage := observability.BeginStage(true, log, "review_inputs_prepare")
+		defer func() { ownerStage.End(observability.StageOutcome(prepareCtx, ownerErr)) }()
 		repo, err := o.repositories.GetByID(prepareCtx, identity.OrgID, identity.RepositoryID)
 		if err != nil {
 			return nil, codeReviewInputAvailabilityError(prepareCtx, "load shared review input repository", err)
 		}
-		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, true)
-		if verifyOnly {
-			if err != nil || exit != 0 {
-				return nil, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, errors.Join(context.DeadlineExceeded, err))
+		if verifyExisting || verifyOnly {
+			exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, true)
+			if verifyOnly {
+				if err != nil || exit != 0 {
+					return nil, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, errors.Join(context.DeadlineExceeded, err))
+				}
+				return nil, nil
 			}
-			return nil, nil
-		}
-		if err != nil || exit != 42 {
-			if err != nil {
-				return nil, err
+			if err != nil || exit != 42 {
+				if err != nil {
+					return nil, err
+				}
+				return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
 			}
-			return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
 		}
-		exit, err = o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, false)
+		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, false)
 		if err != nil || exit != 42 {
 			if err != nil {
 				return nil, err
@@ -351,7 +373,26 @@ func (o *Orchestrator) finishCodeReviewInputPreparation(ctx context.Context, ses
 	return nil
 }
 
-func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbox *Sandbox, identity codeReviewInputIdentity, repoURL, token string, hydrate, verifyOnly bool) (int, error) {
+func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbox *Sandbox, identity codeReviewInputIdentity, repoURL, token string, hydrate, verifyOnly bool) (exitCode int, returnErr error) {
+	log := o.logger.With().Str("org_id", identity.OrgID.String()).Str("session_id", identity.SessionID.String()).Bool("hydrate", hydrate).Bool("verify_only", verifyOnly).Logger()
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
+		log = log.With().Str("job_id", jobID.String()).Logger()
+	}
+	stageName := "review_inputs_local_prepare"
+	if verifyOnly {
+		stageName = "review_inputs_verify"
+	} else if hydrate {
+		stageName = "review_inputs_hydrate"
+	}
+	stage := observability.BeginStage(true, log, stageName)
+	stageCtx := ctx // Internal budget cleanup must not classify a failed attempt as cancellation.
+	defer func() {
+		outcome := observability.StageOutcome(stageCtx, returnErr)
+		if returnErr == nil && exitCode == 42 {
+			outcome = "incomplete"
+		}
+		stage.End(outcome)
+	}()
 	if !verifyOnly {
 		var cancel context.CancelFunc
 		ctx, cancel = codeReviewPreparationContext(ctx)

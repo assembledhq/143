@@ -23,23 +23,27 @@ func BeginStage(enabled bool, log zerolog.Logger, name string) StageTimer {
 		return StageTimer{}
 	}
 	started := time.Now().UTC()
-	log.Info().Str("stage", name).Time("stage_started_at", started).Msg("stage started")
+	// Keep boundaries precise independently of the logger's global timestamp
+	// format so adjacent stages can be correlated without rounding overlap.
+	log.Info().Str("stage", name).Str("stage_started_at", started.Format(time.RFC3339Nano)).Msg("stage started")
 	return StageTimer{log: log, name: name, started: started, enabled: true}
 }
 
 // End records elapsed wall time, including external waits. outcome is a
-// bounded value such as succeeded, failed, waiting, cancelled, attempted, or skipped;
+// bounded value such as succeeded, failed, incomplete, waiting, cancelled, attempted, or skipped;
 // attempted means a best-effort operation reports no success/failure result.
 // Do not put provider errors, prompts, or credentials into stage fields.
 func (t StageTimer) End(outcome string) {
 	if !t.enabled {
 		return
 	}
+	ended := time.Now().UTC()
 	t.log.Info().
 		Str("stage", t.name).
 		Str("outcome", outcome).
-		Time("stage_started_at", t.started).
-		Float64("duration_ms", DurationMillis(time.Since(t.started))).
+		Str("stage_started_at", t.started.Format(time.RFC3339Nano)).
+		Str("stage_ended_at", ended.Format(time.RFC3339Nano)).
+		Float64("duration_ms", DurationMillis(ended.Sub(t.started))).
 		Msg("stage ended")
 }
 

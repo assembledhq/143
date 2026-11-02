@@ -786,6 +786,7 @@ if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; the
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" deploy@"$HOST":/opt/143/
   ssh "${SSH_OPTS[@]}" deploy@"$HOST" "mkdir -p /opt/143/deploy /opt/143/deploy/scripts"
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/deploy/vector.yaml" deploy@"$HOST":/opt/143/deploy/
+  scp "${SCP_OPTS[@]}" "$SCRIPT_DIR/check-vector-sink.sh" deploy@"$HOST":/opt/143/deploy/scripts/
 fi
 # DNS probe is included by app and worker compose files (logging has its
 # own stack and doesn't include it). Stage the file so docker compose can
@@ -2792,6 +2793,19 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     fi
   fi
 
+  # Test prospective compose routing before disrupting application workers.
+  # A one-shot container uses the candidate environment/network without requiring
+  # the old collector route to work, so endpoint repairs can still be deployed.
+  if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
+    bash /opt/143/deploy/scripts/check-vector-sink.sh --compose "$COMPOSE_FILE" < /dev/null
+    if [ "$ROLE" = worker ] && [ "${DEPLOY_MODE:-routine}" = routine ]; then
+      # Routine deploys retain support services: validate their actual route too.
+      # Use maintenance mode to activate a repaired collector environment.
+      vector_current_id="$(docker compose -f "$COMPOSE_FILE" ps -q vector)"
+      bash /opt/143/deploy/scripts/check-vector-sink.sh "$vector_current_id" < /dev/null
+    fi
+  fi
+
   # Run migrations BEFORE restarting the app so the DB schema is ready when
   # the new code starts serving traffic. Uses `docker compose run` on the new
   # image (already pulled) to execute the migration binary without replacing
@@ -2862,6 +2876,7 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     if ! wait_vector_healthy "$VECTOR_ID"; then
       exit 1
     fi
+    bash /opt/143/deploy/scripts/check-vector-sink.sh "$VECTOR_ID" < /dev/null
   fi
 
   WORKER_ROLLOUT_PHASE=post_rollout_prune

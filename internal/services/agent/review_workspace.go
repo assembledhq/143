@@ -36,8 +36,19 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 		return nil, fmt.Errorf("code review session is missing a working branch")
 	}
 	log := o.logger.With().Str("org_id", session.OrgID.String()).Str("session_id", session.ID.String()).Str("review_head_sha", head).Logger()
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
+		log = log.With().Str("job_id", jobID.String()).Logger()
+	}
 	stage := observability.BeginStage(true, log, "review_workspace_prepare")
 	defer func() { stage.End(observability.StageOutcome(ctx, returnErr)) }()
+
+	setupStage := observability.BeginStage(true, log, "review_workspace_setup")
+	setupFinished := false
+	defer func() {
+		if !setupFinished {
+			setupStage.End(observability.StageOutcome(ctx, returnErr))
+		}
+	}()
 
 	repo, err := o.repositories.GetByID(ctx, session.OrgID, *session.RepositoryID)
 	if err != nil {
@@ -81,6 +92,9 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 		return nil, fmt.Errorf("prepare review sandbox github auth: %w", err)
 	}
 
+	setupStage.End("succeeded")
+	setupFinished = true
+
 	capacityStage := observability.BeginStage(true, log, "capacity_admission")
 	reservation, err := o.sandboxCapacity.Acquire(ctx, SandboxCapacityRequest{
 		Purpose: "prepare_code_review_workspace", SessionID: session.ID.String(), OrgID: session.OrgID.String(),
@@ -117,7 +131,7 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 		cloneBranch = *session.TargetBranch
 	}
 	cloneStage := observability.BeginStage(true, log, "repository_clone")
-	cloneErr := o.provider.CloneRepo(ctx, sandbox, repo.CloneURL, cloneBranch, token)
+	cloneErr := o.cloneRepositoryForReview(ctx, sandbox, repo.CloneURL, cloneBranch, token)
 	cloneStage.End(observability.StageOutcome(ctx, cloneErr))
 	if cloneErr != nil {
 		return nil, fmt.Errorf("clone review repository: %w", cloneErr)
@@ -134,7 +148,7 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 	if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, cfg.WorkDir, repositoryPreparationMinimalReview, log); err != nil {
 		return nil, fmt.Errorf("prepare review repository: %w", err)
 	}
-	if err := o.ensureCodeReviewInputs(ctx, session, sandbox); err != nil {
+	if err := o.prepareColdCodeReviewInputs(ctx, session, sandbox); err != nil {
 		return nil, err
 	}
 	// Ownership of a successful sandbox transfers to the caller. Its durable

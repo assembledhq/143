@@ -155,20 +155,28 @@ func (p *reviewSetupBudgetProvider) Create(ctx context.Context, cfg SandboxConfi
 	return p.reviewWorkspaceProvider.Create(ctx, cfg)
 }
 
-func (p *reviewSetupBudgetProvider) CloneRepo(ctx context.Context, sandbox *Sandbox, repository, branch, token string) error {
-	time.Sleep(2 * time.Minute)
-	return p.reviewWorkspaceProvider.CloneRepo(ctx, sandbox, repository, branch, token)
-}
-
-func (p *reviewSetupBudgetProvider) Exec(ctx context.Context, sandbox *Sandbox, command string, stdout, stderr io.Writer) (int, error) {
-	if strings.Contains(command, "identity = json.loads(sys.argv[1])") {
+func (p *reviewSetupBudgetProvider) ExecWithStdin(ctx context.Context, sandbox *Sandbox, command string, input io.Reader, stdout, stderr io.Writer) (int, error) {
+	encoded, err := io.ReadAll(input)
+	if err != nil {
+		return -1, err
+	}
+	var message struct {
+		Payload reviewWorkspacePreparationPayload `json:"payload"`
+	}
+	if err := json.Unmarshal(encoded, &message); err != nil {
+		return -1, err
+	}
+	if message.Payload.CloneDestination != "" {
+		time.Sleep(2 * time.Minute)
+	}
+	if strings.Contains(message.Payload.Prepare, "identity = json.loads(sys.argv[1])") {
 		p.prepared++
 		deadline, _ := ctx.Deadline()
 		if deadline != p.deadline || time.Until(deadline) != 5*time.Minute {
 			return -1, errors.New("input preparation renewed the setup budget")
 		}
 	}
-	return p.reviewWorkspaceProvider.Exec(ctx, sandbox, command, stdout, stderr)
+	return p.reviewWorkspaceProvider.ExecWithStdin(ctx, sandbox, command, bytes.NewReader(encoded), stdout, stderr)
 }
 
 func TestStandaloneReviewWorkspaceBudgetStartsAfterAdmission(t *testing.T) {
