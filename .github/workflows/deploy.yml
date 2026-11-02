@@ -16,7 +16,7 @@ jobs:
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main' &&
       github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: write
@@ -39,11 +39,12 @@ jobs:
             context: .
             file: Dockerfile.frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - uses: docker/setup-buildx-action@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -53,7 +54,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build & push ${{ matrix.name }} image
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
@@ -69,13 +70,11 @@ jobs:
           # sandbox/Dockerfile and adding ~9 minutes to deploys. GHCR has
           # no size cap and persists until manually deleted; the cache lives
           # at <image>:buildcache alongside :latest and :<sha>.
-          cache-from: type=registry,ref=${{ matrix.image }}:buildcache
-          cache-to: type=registry,ref=${{ matrix.image }}:buildcache,mode=max
 
   predeploy-latest:
     needs: build
     if: github.repository == 'assembledhq/143'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
     outputs:
@@ -101,7 +100,7 @@ jobs:
   deploy:
     needs: [build, predeploy-latest]
     if: github.repository == 'assembledhq/143' && needs.predeploy-latest.outputs.should_deploy == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # Completed retirement can hold a deploy job for hours while in-flight
     # work finishes across serial worker hosts. Queue overlapping deploys instead of
     # running them in parallel. cancel-in-progress is false because deploy.sh
@@ -127,7 +126,7 @@ jobs:
             echo "should_deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
         if: steps.deploy_latest.outputs.should_deploy == 'true'
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -139,7 +138,7 @@ jobs:
       # .infra is gitignored so it can never leak into builds.
       - name: Check out private secrets repo
         if: steps.deploy_latest.outputs.should_deploy == 'true'
-        uses: actions/checkout@v6
+        uses: useblacksmith/checkout@v1
         with:
           repository: assembledhq/143-infra
           ssh-key: ${{ secrets.INFRA_REPO_DEPLOY_KEY }}

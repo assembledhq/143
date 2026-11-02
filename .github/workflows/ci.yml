@@ -27,7 +27,7 @@ env:
 jobs:
   changes:
     name: Detect Changes
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: read
       pull-requests: read
@@ -41,7 +41,7 @@ jobs:
       ci: ${{ steps.filter.outputs.ci }}
       session_transcript_e2e: ${{ steps.filter.outputs.session_transcript_e2e }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -106,9 +106,9 @@ jobs:
     name: Backend Lint
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.migrations == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -123,7 +123,7 @@ jobs:
     name: Backend Test
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
       # Drives DB-backed migration behavior tests (e.g. the coding-credential
@@ -131,7 +131,7 @@ jobs:
       # must point at the job's Postgres container or they never run anywhere.
       TEST_DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
         with:
           persist-credentials: false
       - name: Test CI helper scripts
@@ -482,12 +482,12 @@ jobs:
     name: Frontend Lint & Typecheck
     needs: changes
     if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -502,12 +502,12 @@ jobs:
     name: Frontend Test
     needs: changes
     if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
         with:
           fetch-depth: 0
       - uses: actions/setup-node@v5
@@ -567,12 +567,12 @@ jobs:
     # required-checks treats a skipped job as passing, so a plain job-level
     # condition is enough — matching every other conditional job here.
     if: needs.changes.outputs.session_transcript_e2e == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -605,11 +605,11 @@ jobs:
     name: Migration Safety
     needs: changes
     if: needs.changes.outputs.migrations == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
       - name: Start Postgres with registry fallback
         id: postgres
         timeout-minutes: 10
@@ -643,7 +643,7 @@ jobs:
     name: Docker Build
     needs: changes
     if: github.event_name == 'pull_request' && (needs.changes.outputs.docker == 'true' || needs.changes.outputs.ci == 'true')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       matrix:
         include:
@@ -660,32 +660,24 @@ jobs:
             file: Dockerfile.frontend
             tags: 143-frontend:latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
-        with:
-          # Bootstrap must use the cache before BuildKit's mirror config is active.
-          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
-          # Cache Docker Hub images through Google's public mirror for CI builds.
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["mirror.gcr.io"]
+      - uses: useblacksmith/checkout@v1
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - name: Build ${{ matrix.name }} Docker image
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           push: false
           tags: ${{ matrix.tags }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
   security:
     name: Security Scan
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
 
       - name: Select cached Go
         run: python3 -B .github/scripts/select-security-go.py
@@ -701,9 +693,9 @@ jobs:
   # Config tests read repository-wide inputs; run them for every PR and push.
   deploy-config-test:
     name: Deploy Config Test
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -716,9 +708,9 @@ jobs:
     name: Deploy Scripts Test
     needs: changes
     if: needs.changes.outputs.deploy == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
-      - uses: actions/checkout@v6
+      - uses: useblacksmith/checkout@v1
       - name: Run deploy shell tests
         run: |
           set -euo pipefail
@@ -730,7 +722,7 @@ jobs:
   required-checks:
     name: All Checks Pass
     needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test, deploy-config-test]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     if: always()
     steps:
       - name: Check all jobs passed
