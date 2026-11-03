@@ -11,6 +11,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
+import { ErrorNotice } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -58,10 +59,10 @@ export default function PackageRegistriesPage() {
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader title="Package registries" description="Install private npm dependencies during controlled repository setup." />
-        {!isLoading && !admin ? <p role="alert">Administrator access is required to manage package credentials.</p> : admin && (
+        {!isLoading && !admin ? <ErrorNotice title="Administrator access required" description="Administrator access is required to manage package credentials." /> : admin && (
           <>
             <p className="text-muted-foreground">Credentials are used only for dependency installation and are unavailable to coding agents. Preview secrets are managed separately. <Link href="/docs/guides/private-packages" className="text-primary underline underline-offset-4">Setup guide</Link></p>
-            {repositories.isError ? <p role="alert">Unable to load repositories. Refresh the page to try again.</p> : repositories.isPending ? <p role="status">Loading repositories…</p> : !repositories.data?.data.length ? (
+            {repositories.isError ? <ErrorNotice title="Repositories could not be loaded" description="Retry to select a repository and manage its package credentials." action={{ label: "Retry", onClick: () => void repositories.refetch() }} /> : repositories.isPending ? <p role="status" className="text-sm text-muted-foreground">Loading repositories…</p> : !repositories.data?.data.length ? (
               <EmptyState icon={Package} title="No repositories connected" description="Connect a repository before adding a package credential." />
             ) : (
               <>
@@ -118,7 +119,7 @@ function RepositoryCredentials({ repositoryId }: { repositoryId: string }) {
           <Button size="sm" disabled={!credentials.isSuccess} onClick={() => setDialog({})}>Add credential</Button>
         </DisabledTooltip>
       </div>
-      {credentials.isPending ? <p role="status">Loading credentials…</p> : credentials.isError ? <p role="alert">Unable to load package credentials. Refresh the page to try again.</p> : !credentials.data?.data.length ? (
+      {credentials.isPending ? <p role="status" className="text-sm text-muted-foreground">Loading credentials…</p> : credentials.isError ? <ErrorNotice title="Package credentials could not be loaded" description="Retry to manage credentials for this repository." action={{ label: "Retry", onClick: () => void credentials.refetch() }} /> : !credentials.data?.data.length ? (
         <EmptyState icon={Package} title="No package credentials" description="Add a read-only token for an HTTPS npm registry and an explicit package scope." />
       ) : (
         <div className="overflow-x-auto rounded-lg border bg-card shadow-sm">
