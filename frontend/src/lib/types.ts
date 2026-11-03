@@ -584,6 +584,7 @@ export interface CodeReviewAnalytics {
 }
 
 export type CodeReviewPhase =
+  | "preparing_workspace"
   | "syncing_github"
   | "waiting_for_github"
   | "reviewing"

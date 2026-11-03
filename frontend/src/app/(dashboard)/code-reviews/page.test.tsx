@@ -2626,6 +2626,17 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByText("No outcome")).not.toBeInTheDocument();
   });
 
+  it.each(["queued", "running"] as const)("shows preparing workspace for a %s review on desktop and mobile", async (status) => {
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: [{ ...review, status, phase: "preparing_workspace", decision: undefined, acceptable: undefined, completed_at: undefined }], meta: {},
+    } satisfies ListResponse<CodeReviewListItem>)));
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("Preparing workspace")).toHaveLength(2);
+  });
+
   it("shows operational phases and the automatic GitHub retry countdown without a manual retry action", async () => {
     const waitingReview: CodeReviewListItem = {
       ...review,

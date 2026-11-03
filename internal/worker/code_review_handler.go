@@ -957,6 +957,10 @@ func recordCodeReviewAutomaticWait(ctx context.Context, store *db.CodeReviewStor
 }
 
 func codeReviewTerminalFailureStatus(err error) (models.CodeReviewStatusCode, string, bool) {
+	if agentsvc.IsTerminalNPMSetupError(err) {
+		return models.CodeReviewStatusCodeWorkerFailed,
+			"Workspace dependency setup rejected the package manifests, lockfile, or runtime requirements. Fix the npm setup inputs, then request a new review. Review did not run.", false
+	}
 	if errors.Is(err, models.ErrInvalidCodeReviewGuidanceFile) {
 		return models.CodeReviewStatusCodeWorkerFailed,
 			"REVIEW.md on the repository default branch is invalid. Fix it as a regular UTF-8 text file of at most 64 KiB, then request a new review.", false
@@ -1013,7 +1017,9 @@ func codeReviewDeadLetterReason(err error) string {
 
 	detail := "unknown worker failure"
 	var apiErr *ghservice.GitHubAPIError
-	if errors.As(err, &apiErr) {
+	if agentsvc.IsTerminalNPMSetupError(err) {
+		detail = agentsvc.NewCodeReviewWorkspacePreparationError(agentsvc.CodeReviewPreparationStageDependencySetup, err).Error()
+	} else if errors.As(err, &apiErr) {
 		detail = fmt.Sprintf("GitHub API %s %s returned %d", apiErr.Method, apiErr.Path, apiErr.StatusCode)
 	} else if err != nil && strings.TrimSpace(err.Error()) != "" {
 		detail = strings.TrimSpace(err.Error())

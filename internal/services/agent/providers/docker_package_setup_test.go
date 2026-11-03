@@ -58,6 +58,7 @@ type npmDockerFixture struct {
 	done                                 map[string]chan struct{}
 	sequence, created, removed, resolves int
 	failInstall, failCleanup             bool
+	npmFailure                           string
 	cancelInstall                        context.CancelFunc
 	privateInputs                        []byte
 	publishedBeforeRemoval               bool
@@ -130,6 +131,10 @@ func newNPMDockerFixture(t *testing.T, root, ca, port string) *npmDockerFixture 
 				script = strings.ReplaceAll(script, "url.port not in (None,443)", "url.port not in (None,443,"+fixture.port+")")
 				script = strings.ReplaceAll(script, "/private", filepath.Join(root, "private"))
 				script = strings.ReplaceAll(script, "/setup/project", filepath.Join(root, "setup/project"))
+				if fixture.npmFailure != "" {
+					failureProgram := fmt.Sprintf("import sys; print(%q); sys.exit(1)", fixture.npmFailure)
+					script = strings.ReplaceAll(script, "result=subprocess.Popen(args,", fmt.Sprintf("result=subprocess.Popen([%q,'-c',%q],", fixture.python, failureProgram))
+				}
 				if fixture.failInstall {
 					script = strings.ReplaceAll(script, "for target in p['targets']:", "raise RuntimeError('synthetic-private-token')\n for target in p['targets']:")
 				}
@@ -348,8 +353,14 @@ func TestDockerNPMSetupCleanupFailures(t *testing.T) {
 	tests := []struct {
 		name                                   string
 		installFailure, cleanupFailure, cancel bool
+		npmFailure                             string
+		terminal                               bool
 	}{
 		{name: "install error", installFailure: true},
+		{name: "permanent lock validation", npmFailure: "npm error code EUSAGE\nnpm error secret-private-token https://private.example/package", terminal: true},
+		{name: "permanent plus cleanup", npmFailure: "npm error code EUSAGE", terminal: true, cleanupFailure: true},
+		{name: "transient registry", npmFailure: "npm error code ECONNRESET\nsecret-private-token"},
+		{name: "unknown private failure", npmFailure: "npm error code EUNKNOWN\nsecret-private-token"},
 		{name: "cleanup error blocks export publication", cleanupFailure: true},
 		{name: "cancelled installer", cancel: true},
 	}
@@ -360,17 +371,31 @@ func TestDockerNPMSetupCleanupFailures(t *testing.T) {
 			require.NoError(t, err, "fixture should have canonical paths")
 			fixture := newNPMDockerFixture(t, root, "", "443")
 			fixture.failInstall = tt.installFailure
+			fixture.npmFailure = tt.npmFailure
 			fixture.failCleanup = tt.cleanupFailure
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tt.cancel {
 				fixture.cancelInstall = cancel
 			}
-			provider := NewDockerProvider(fixture, zerolog.Nop(), WithRuntime("runc"))
+			var logs bytes.Buffer
+			provider := NewDockerProvider(fixture, zerolog.New(&logs).Level(zerolog.WarnLevel), WithRuntime("runc"))
 			files := map[string]string{"package.json": `{"name":"empty-fixture","version":"1.0.0"}`, "package-lock.json": `{"name":"empty-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"empty-fixture","version":"1.0.0"}}}`}
 			output, err := provider.runIsolatedNPMSetup(ctx, &agent.Sandbox{ID: "main"}, "sha256:trusted-image", []repoconfig.NPMSetup{{Directory: "."}}, files, nil)
 			require.Error(t, err, "failed or unconfirmed private setup must never produce an artifact")
 			require.Nil(t, output, "failure and cancellation must not return dependency output for publication")
+			require.Equal(t, tt.terminal, agent.IsTerminalNPMSetupError(err), "only permanent npm failures should terminate retries")
+			require.NotContains(t, logs.String(), "secret-private-token", "private npm output must never enter structured logs")
+			if tt.terminal {
+				var event map[string]any
+				require.NoError(t, json.Unmarshal(logs.Bytes(), &event), "terminal npm failure should produce one structured event")
+				require.Equal(t, "EUSAGE", event["code"], "event should expose only validated npm code")
+				require.ElementsMatch(t, []string{"level", "message", "code", "node_version", "npm_version", "install_duration_ms"}, mapKeys(event), "event should contain exactly fixed diagnostic fields")
+			} else {
+				require.Empty(t, logs.String(), "unknown/transient output must not generate a diagnostic event")
+			}
+
+			require.NotContains(t, err.Error(), "secret-private-token", "npm diagnostics must never escape the private installer")
 			require.NotContains(t, err.Error(), "synthetic-private-token", "private provider diagnostics must never reach failure text")
 			if !tt.cleanupFailure {
 				require.Equal(t, 1, fixture.removed, "successfully removable setup must always be force-deleted")
@@ -378,4 +403,12 @@ func TestDockerNPMSetupCleanupFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func mapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
 }

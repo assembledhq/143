@@ -401,6 +401,7 @@ function ReviewActions({ onViewReview, className }: { onViewReview: () => void; 
 }
 
 const CODE_REVIEW_PHASE_LABELS: Record<NonNullable<CodeReviewListItem["phase"]>, string> = {
+  preparing_workspace: "Preparing workspace",
   syncing_github: "Syncing GitHub",
   waiting_for_github: "Waiting for GitHub",
   reviewing: "Reviewing",
