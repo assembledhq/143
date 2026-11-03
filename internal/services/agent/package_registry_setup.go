@@ -63,6 +63,10 @@ func (o *Orchestrator) preparePackageRegistryDependencies(ctx context.Context, s
 	if len(cfg.Setup.NPM) == 0 {
 		return "", nil
 	}
+	if session != nil && session.Origin == models.SessionOriginCodeReview &&
+		(cfg.Review == nil || !cfg.Review.InstallNPMDependencies) {
+		return "", nil
+	}
 	if session == nil || session.OrgID == uuid.Nil || session.RepositoryID == nil || *session.RepositoryID == uuid.Nil || o.packageCredentials == nil {
 		return "", errors.New("repository package setup requires scoped credential services")
 	}

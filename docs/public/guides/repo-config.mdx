@@ -68,12 +68,13 @@ If you also need a preview:
 
 ## Private npm dependencies
 
-Use `setup.npm` for platform-controlled installation of private npm dependencies before bootstrap and review commands. Save the read-only registry token in **Settings → Package registries**, then declare each directory containing a manifest and lockfile. See [Private npm packages](/docs/guides/private-packages) for workspace examples, lifecycle scripts, and credential boundaries.
+Use `setup.npm` for platform-controlled installation of private npm dependencies before repository bootstrap. Built-in code reviews skip npm installation by default. Set `review.install_npm_dependencies` to `true` to use the same npm setup during review preparation. Save the read-only registry token in **Settings → Package registries**, then declare each directory containing a manifest and lockfile. See [Private npm packages](/docs/guides/private-packages) for workspace examples, lifecycle scripts, and credential boundaries.
 
 ## Sections
 
 <ConfigField name="dependencies" type="object" description="Supported tools to install before bootstrap or validation commands run." />
 <ConfigField name="setup.npm" type="object[]" description="Npm project directories for controlled dependency installation before repository commands." />
+<ConfigField name="review.install_npm_dependencies" type="boolean" description="Install the projects declared in setup.npm during built-in code review preparation. Defaults to false." />
 <ConfigField name="bootstrap.commands" type="string[]" description="Deterministic setup commands, such as package installs." />
 <ConfigField name="validation.commands" type="string[]" description="Extra deterministic checks 143 should run during validation." />
 <ConfigField name="preview" type="object" description="Preview service configuration for live app review inside a session." />

@@ -68,11 +68,17 @@ type packageLifecycleHarness struct {
 	events       []string
 }
 
-func newPackageLifecycleHarness(t *testing.T, directory string, session *models.Session) *packageLifecycleHarness {
+func newPackageLifecycleHarness(t *testing.T, directory string, session *models.Session, review *repoconfig.ReviewSection) *packageLifecycleHarness {
 	t.Helper()
 	configPath := filepath.Join(directory, repoconfig.ConfigPath)
 	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o700), "setup configuration directory should exist")
-	require.NoError(t, os.WriteFile(configPath, []byte(`{"setup":{"npm":[{"directory":"."}]},"bootstrap":{"commands":["printf ready > bootstrap-ready"]}}`), 0o600), "fixture should declare platform setup and subsequent repository bootstrap")
+	config, err := json.Marshal(repoconfig.Config{
+		Setup:     repoconfig.SetupSection{NPM: []repoconfig.NPMSetup{{Directory: "."}}},
+		Bootstrap: repoconfig.CommandSection{Commands: []string{"printf ready > bootstrap-ready"}},
+		Review:    review,
+	})
+	require.NoError(t, err, "fixture repository configuration should encode")
+	require.NoError(t, os.WriteFile(configPath, config, 0o600), "fixture should declare platform setup and subsequent repository bootstrap")
 	summary := models.PackageRegistryCredentialSummary{ID: uuid.New(), RepositoryID: *session.RepositoryID, Revision: uuid.New(), RegistryURL: "https://registry.example.test/", PackageScope: "@example"}
 	h := &packageLifecycleHarness{}
 	h.resolver = &packageLifecycleResolver{registrySetupResolver: &registrySetupResolver{orgID: session.OrgID, repoID: *session.RepositoryID, metadata: []models.PackageRegistryCredentialSummary{summary}, resolved: []models.ResolvedPackageRegistryCredential{{Metadata: summary, Token: "synthetic-setup-secret"}}}, events: &h.events}
@@ -84,39 +90,64 @@ func newPackageLifecycleHarness(t *testing.T, directory string, session *models.
 
 func TestPackageRegistryBuiltinReviewPreparationLifecycle(t *testing.T) {
 	t.Parallel()
-	directory, base, head, _ := newReviewInputsGitFixture(t)
-	session := reviewInputsSession(t, base, head)
-	revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_repo": "example/repo", "github_pr_number": 42, "base_sha": base, "head_sha": head, "from_fork": false})
-	require.NoError(t, err, "same-repository review context should encode pinned identity")
-	session.RevisionContext = revision
-	h := newPackageLifecycleHarness(t, directory, session)
-	sandbox := &Sandbox{ID: "review-package-lifecycle", OrgID: session.OrgID.String(), WorkDir: directory}
-	expectedRevision, err := packageCredentialRevision(*session.RepositoryID, h.resolver.metadata)
-	require.NoError(t, err, "metadata fingerprint should be available before cold review preparation")
-	require.NoError(t, h.orchestrator.prepareColdCodeReviewInputs(context.Background(), session, sandbox), "cold builtin review must prepare package dependencies through the shared-input coordinator")
-	require.Equal(t, []string{"metadata", "setup", "trust", "resolve"}, h.events, "cold review must verify live PR trust before resolving package credentials")
-	require.Equal(t, []string{expectedRevision}, h.provider.revisions, "cold setup must receive the current repository credential revision")
-	require.Equal(t, 42, h.trust.number, "cold review trust must use the captured PR number")
-	require.Equal(t, head, h.trust.head, "cold review trust must use the exact reviewed head")
-	manifestPath, patchPath := CodeReviewInputPaths(session.OrgID, session.ID, *session.RepositoryID, "example/repo", base, head)
-	manifest, err := os.ReadFile(filepath.Join(directory, manifestPath))
-	require.NoError(t, err, "cold review must publish its immutable input manifest")
-	patch, err := os.ReadFile(filepath.Join(directory, patchPath))
-	require.NoError(t, err, "cold review must publish its captured patch")
-	h.provider.warm = true
-	require.NoError(t, h.orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "warm builtin review must verify package setup as well as existing immutable inputs")
-	require.Equal(t, []string{"metadata", "setup", "trust", "resolve", "metadata", "setup"}, h.events, "warm review must recheck metadata without resolving an already-valid installation")
-	require.Equal(t, []string{expectedRevision, expectedRevision}, h.provider.revisions, "warm setup must receive the same current credential revision")
-	require.Equal(t, 1, h.resolver.resolveCalls, "healthy warm review must not decrypt credentials again")
-	require.Equal(t, 1, h.trust.calls, "healthy warm review must not request new credential delivery")
-	manifestAfter, err := os.ReadFile(filepath.Join(directory, manifestPath))
-	require.NoError(t, err, "warm review manifest must remain readable")
-	patchAfter, err := os.ReadFile(filepath.Join(directory, patchPath))
-	require.NoError(t, err, "warm review patch must remain readable")
-	require.Equal(t, manifest, manifestAfter, "warm package verification must preserve captured review identity")
-	require.Equal(t, patch, patchAfter, "warm package verification must preserve captured review changes")
-	_, err = os.Stat(filepath.Join(directory, "bootstrap-ready"))
-	require.ErrorIs(t, err, os.ErrNotExist, "builtin review dependency setup must not execute arbitrary repository bootstrap")
+	tests := []struct {
+		name         string
+		review       *repoconfig.ReviewSection
+		coldEvents   []string
+		warmEvents   []string
+		resolveCalls int
+	}{
+		{name: "default source-only review"},
+		{
+			name:         "explicit npm setup",
+			review:       &repoconfig.ReviewSection{InstallNPMDependencies: true},
+			coldEvents:   []string{"metadata", "setup", "trust", "resolve"},
+			warmEvents:   []string{"metadata", "setup", "trust", "resolve", "metadata", "setup"},
+			resolveCalls: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			directory, base, head, _ := newReviewInputsGitFixture(t)
+			session := reviewInputsSession(t, base, head)
+			revision, err := json.Marshal(map[string]any{"kind": "code_review", "github_repo": "example/repo", "github_pr_number": 42, "base_sha": base, "head_sha": head, "from_fork": false})
+			require.NoError(t, err, "same-repository review context should encode pinned identity")
+			session.RevisionContext = revision
+			h := newPackageLifecycleHarness(t, directory, session, tt.review)
+			sandbox := &Sandbox{ID: "review-package-lifecycle", OrgID: session.OrgID.String(), WorkDir: directory}
+			expectedRevision, err := packageCredentialRevision(*session.RepositoryID, h.resolver.metadata)
+			require.NoError(t, err, "metadata fingerprint should be available before cold review preparation")
+			require.NoError(t, h.orchestrator.prepareColdCodeReviewInputs(context.Background(), session, sandbox), "cold builtin review must publish captured inputs")
+			require.Equal(t, tt.coldEvents, h.events, "cold package setup must require opt-in and verify live PR trust before resolving credentials")
+			if tt.review != nil && tt.review.InstallNPMDependencies {
+				require.Equal(t, []string{expectedRevision}, h.provider.revisions, "cold setup must receive the current repository credential revision")
+				require.Equal(t, 42, h.trust.number, "cold review trust must use the captured PR number")
+				require.Equal(t, head, h.trust.head, "cold review trust must use the exact reviewed head")
+			}
+			manifestPath, patchPath := CodeReviewInputPaths(session.OrgID, session.ID, *session.RepositoryID, "example/repo", base, head)
+			manifest, err := os.ReadFile(filepath.Join(directory, manifestPath))
+			require.NoError(t, err, "cold review must publish its immutable input manifest")
+			patch, err := os.ReadFile(filepath.Join(directory, patchPath))
+			require.NoError(t, err, "cold review must publish its captured patch")
+			h.provider.warm = true
+			require.NoError(t, h.orchestrator.ensureCodeReviewInputs(context.Background(), session, sandbox), "warm builtin review must verify existing immutable inputs")
+			require.Equal(t, tt.warmEvents, h.events, "warm review may recheck opt-in package metadata without resolving an already-valid installation")
+			require.Equal(t, tt.resolveCalls, h.resolver.resolveCalls, "warm review must not decrypt credentials")
+			require.Equal(t, tt.resolveCalls, h.trust.calls, "warm review must not request new credential delivery")
+			if tt.review != nil && tt.review.InstallNPMDependencies {
+				require.Equal(t, []string{expectedRevision, expectedRevision}, h.provider.revisions, "warm setup must receive the same current credential revision")
+			}
+			manifestAfter, err := os.ReadFile(filepath.Join(directory, manifestPath))
+			require.NoError(t, err, "warm review manifest must remain readable")
+			patchAfter, err := os.ReadFile(filepath.Join(directory, patchPath))
+			require.NoError(t, err, "warm review patch must remain readable")
+			require.Equal(t, manifest, manifestAfter, "warm package verification must preserve captured review identity")
+			require.Equal(t, patch, patchAfter, "warm package verification must preserve captured review changes")
+			_, err = os.Stat(filepath.Join(directory, "bootstrap-ready"))
+			require.ErrorIs(t, err, os.ErrNotExist, "builtin review dependency setup must not execute arbitrary repository bootstrap")
+		})
+	}
 }
 
 func TestPackageRegistryPRFeedbackPreparationTrustLifecycle(t *testing.T) {
@@ -139,7 +170,7 @@ func TestPackageRegistryPRFeedbackPreparationTrustLifecycle(t *testing.T) {
 			directory := t.TempDir()
 			repoID := uuid.New()
 			session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), RepositoryID: &repoID, Origin: models.SessionOriginManual}
-			h := newPackageLifecycleHarness(t, directory, session)
+			h := newPackageLifecycleHarness(t, directory, session, nil)
 			if tt.trustDenied {
 				h.trust.err = errors.New("synthetic trust denial")
 			}
@@ -197,7 +228,7 @@ func TestPackageRegistryAutomationPreparationTrustLifecycle(t *testing.T) {
 			directory, _, _, _ := newReviewInputsGitFixture(t)
 			repoID := uuid.New()
 			session := &models.Session{ID: uuid.New(), OrgID: uuid.New(), RepositoryID: &repoID, Origin: models.SessionOriginAutomation}
-			h := newPackageLifecycleHarness(t, directory, session)
+			h := newPackageLifecycleHarness(t, directory, session, nil)
 			h.orchestrator.automationTurns = &packageLifecycleAutomationStore{events: &h.events}
 			if tt.trustDenied {
 				h.trust.err = errors.New("synthetic trust denial")
