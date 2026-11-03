@@ -3900,6 +3900,24 @@ func codeReviewCanStopBeforeAgentFanout(agentResults []models.CodeReviewAgentRes
 	return len(agentResults) == 0
 }
 
+func codeReviewEarlyStopFinalBody(services *Services, job runCodeReviewPayload, decision models.CodeReviewDecisionEvaluation, changedFiles []codereviewsvc.PullRequestFile) string {
+	return models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
+		Decision:             decision.Decision,
+		Acceptable:           decision.Acceptable,
+		RiskReasons:          decision.RiskReasonDetails,
+		SessionURL:           codeReviewSessionURL(services.FrontendURL, job.SessionID),
+		PolicySettingsURL:    codeReviewPolicySettingsURL(services.FrontendURL),
+		ReviewNowURL:         codeReviewAvailableReviewNowURL(services, job.SessionID),
+		PriorFindingsURL:     codeReviewAvailablePriorFindingsURL(services, job.SessionID),
+		ReviewProvenance:     codeReviewOutcomeProvenance(liveCodeReviewOutcomeInput{Job: job}),
+		ChangeStatsAvailable: true,
+		FilesChanged:         len(changedFiles),
+		LinesChanged:         codeReviewLinesChanged(changedFiles),
+		HeadSHA:              job.HeadSHA,
+		AssessedAt:           time.Now().UTC(),
+	})
+}
+
 func completeCodeReviewAfterStableDeterministicFailure(
 	ctx context.Context,
 	stores *Stores,
@@ -3921,19 +3939,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		return err
 	}
 	decision := models.EvaluateCodeReviewDecision(policy, risk)
-	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
-		Decision:             decision.Decision,
-		Acceptable:           decision.Acceptable,
-		RiskReasons:          decision.RiskReasonDetails,
-		SessionURL:           codeReviewSessionURL(services.FrontendURL, job.SessionID),
-		PolicySettingsURL:    codeReviewPolicySettingsURL(services.FrontendURL),
-		ReviewNowURL:         codeReviewAvailableReviewNowURL(services, job.SessionID),
-		ChangeStatsAvailable: true,
-		FilesChanged:         len(changedFiles),
-		LinesChanged:         codeReviewLinesChanged(changedFiles),
-		HeadSHA:              job.HeadSHA,
-		AssessedAt:           time.Now().UTC(),
-	})
+	body := codeReviewEarlyStopFinalBody(services, job, decision, changedFiles)
 	if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhasePublishing); err != nil {
 		return fmt.Errorf("set deterministic early-stop publishing phase: %w", err)
 	}

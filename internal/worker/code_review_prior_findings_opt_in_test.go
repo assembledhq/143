@@ -299,3 +299,40 @@ func TestWithCodeReviewPriorFindingsSnapshot(t *testing.T) {
 	require.NotContains(t, withCodeReviewPriorFindingsSnapshot(map[string]any{}, nil), "prior_findings", "reviews without the opt-in should store nothing new")
 	require.Contains(t, withCodeReviewPriorFindingsSnapshot(map[string]any{}, []prompts.CodeReviewPriorFindingPromptData{}), "prior_findings", "an empty snapshot should still freeze the retry")
 }
+
+func TestCodeReviewEarlyStopFinalBodyPriorFindings(t *testing.T) {
+	t.Parallel()
+
+	const provenance = "This review was requested with findings from earlier review rounds (experimental)."
+	sessionID := uuid.MustParse("90d8a47d-d87e-4780-90af-040f5144685a")
+	link := "[Review with prior findings](https://143.test/code-reviews?include_prior_findings=true&review_now=" + sessionID.String() + ")"
+	optedIn := &codereviewsvc.ReviewRequestContext{IncludePriorFindings: true}
+	blocked := models.CodeReviewDecisionEvaluation{Decision: models.CodeReviewDecisionNeedsHumanReview}
+	tests := []struct {
+		name           string
+		flagOn         bool
+		context        *codereviewsvc.ReviewRequestContext
+		decision       models.CodeReviewDecisionEvaluation
+		wantLink       bool
+		wantProvenance bool
+	}{
+		{name: "blocked review offers the link when the flag is on", flagOn: true, decision: blocked, wantLink: true},
+		{name: "flag off omits the link", decision: blocked},
+		{name: "opted-in early stop discloses the opt-in", flagOn: true, context: optedIn, decision: blocked, wantLink: true, wantProvenance: true},
+		{
+			name: "approved review has no link", flagOn: true,
+			decision: models.CodeReviewDecisionEvaluation{Decision: models.CodeReviewDecisionApproved, Acceptable: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			services := &Services{FrontendURL: "https://143.test", CodeReviewPriorFindings: tt.flagOn, CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: true}}
+
+			body := codeReviewEarlyStopFinalBody(services, runCodeReviewPayload{SessionID: sessionID, HeadSHA: "head", RequestContext: tt.context}, tt.decision, nil)
+
+			require.Equal(t, tt.wantLink, strings.Contains(body, link), "the early-stop footer should match the normal review footer")
+			require.Equal(t, tt.wantProvenance, strings.Contains(body, provenance), "an early stop should disclose only opted-in reviews")
+		})
+	}
+}
