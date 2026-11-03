@@ -2204,25 +2204,24 @@
     },
     {
       "id": "internal/db/code_review_workspace.go:CodeReviewWorkspaceStore.PublishPrepared",
-      "source_sha256": "c0cec105eb9b3535bf3d5c72921c78d067a5f589791fb341719f39decaadcc9d",
-      "operation": "attach exactly prepared review container/holder",
+      "source_sha256": "cd3fe79f2ddcbf3ec35970d766e3da737c4d8470314fe0804c297ee3672cca92",
+      "operation": "attach exact prepared review container/holder and advance its existing waiting controller",
       "owner": "CodeReviewWorkspaceStore in internal/db",
-      "predicate": "Exact current prepare job token/lease/node, review policy/repo/head/not-stale, nonterminal code_review session with null container/snapshot/no hold and expected workspace_generation.",
-      "lock": "Own tx locks jobs/review/session FOR UPDATE then session update+holder insert; FK/order conflict must be reconciled with PR-first floor.",
-      "stale_result": "Missing proof or live holder conflict returns false/rolls back; existing exact generation proof is useful, but shared end/admission epoch is not central here.",
+      "predicate": "Current running prepare job with exact org/job/token/owner and wall-clock live lease/node; current nonstale queued/running review policy/repository/head and nonterminal code_review session with null container/snapshot, no turn hold and expected workspace generation. Optional wake affects only the exact pending run_code_review parent with workspace-wait marker and matching org/review/session/policy/repository/head/output payload.",
+      "lock": "Own bounded transaction takes org/review/session readiness advisory lock first, then FOR UPDATE OF jobs/review/session; session container/generation, holder and pending-parent due time commit atomically. Recheck preparation lease and node with clock_timestamp after holder/parent row waits. This readiness ordering is not the future canonical shared admission/end-epoch lock floor.",
+      "stale_result": "Missing proof, live-holder conflict or expired preparation ownership returns false and rolls back container, holder and parent wake together. Missing/mismatched/terminal/running parent or absent legacy parent ID does not block valid publication and cannot change its lease or attempts. Commit error reports uncertain publication with published=true so caller retains the possibly committed sandbox.",
       "classification": "unfenced-needs-conversion",
       "migration": "0a: retain job/review/node/container/holder fence while composing canonical shared epoch/owner mutation, explicit InTx seam and no external provider under locks.",
       "canonical_target": "MutateWorkspaceRevisionInTx / ChangeReviewOwnerInTx",
-      "authority": "WorkspaceAuthority.ReviewAuthority exact preparation job/review/head/container/workspace generation plus current admission/end epochs.",
-      "fence_outcome": "Strict typed result: invalid/stale authority rolls back the whole mutation transaction; no partial answer/grant/owner/snapshot/ack/wake. This operation does NOT have terminal-settlement F2 permission.",
+      "authority": "0a target: WorkspaceAuthority.ReviewAuthority with exact preparation job/review/head/container/workspace generation plus admission/end epochs; current readiness advisory lock does not establish those shared epochs.",
+      "fence_outcome": "0a target: Strict typed result: invalid/stale authority rolls back the whole mutation transaction; no partial answer/grant/owner/snapshot/ack/wake. This operation does NOT have terminal-settlement F2 permission.",
       "prerequisite_0a": "0a: retain job/review/node/container/holder fence while composing canonical shared epoch/owner mutation, explicit InTx seam and no external provider under locks.",
       "evidence": [
-        "internal/db/code_review_workspace.go:37",
-        "Discovered: boundary-definition, lifecycle-gate-update",
-        "Lock/transaction syntax: FOR UPDATE OF j",
-        "Lock/transaction syntax: s.db.Begin",
-        "Lock/transaction syntax: tx.Commit",
-        "SQL: UPDATE sessions SET container_id = @container_id, worker_node_id = @owner_node_id, sandbox_state = 'running', workspace_generation = workspace_generation + 1 WHERE org_id = @org_id AND id = @session_id"
+        "internal/db/code_review_workspace.go:43",
+        "Reviewed current SQL: running preparation lease/token/node and review/session/generation row fences",
+        "Reviewed transaction: readiness advisory lock, container/holder publication, exact pending-parent nudge, final wall-clock ownership recheck",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspaceCompletionRetryRace",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspacePublicationRechecksOwnershipAfterParentLock"
       ]
     },
     {
@@ -11519,18 +11518,20 @@
     },
     {
       "id": "internal/worker/code_review_workspace.go:newPrepareCodeReviewWorkspaceHandler",
-      "source_sha256": "8070251d9e2f2853c170ee08798a46e71dd56cce58e6882e8988542bd142cc21",
-      "operation": "newPrepareCodeReviewWorkspaceHandler: indirect lifecycle caller",
+      "source_sha256": "9ebbff1192388d0036ddd56de5122df0ecc544515568da0fe955ea9de9e3964d",
+      "operation": "prepare or rearm review workspace through delegated database fences and notify the existing controller after commit",
       "owner": "newPrepareCodeReviewWorkspaceHandler in internal/worker",
-      "predicate": "AST-observed guard expressions: !hasJob || !hasToken || !hasOwner || strings.TrimSpace(ownerNodeID) == \"\" | *session.WorkerNodeID != ownerNodeID | input.OrgID == uuid.Nil || input.MetadataID == uuid.Nil || input.SessionID == uuid.Nil || input.ExpectedGeneration < 0 | lockToken := (jobctx.LockTokenFromContext(ctx)) | metadata.ID != input.MetadataID || metadata.Stale || codeReviewMetadataTerminal(metadata.Status) | session.ContainerID != nil || session.SnapshotKey != nil || session.WorkspaceGeneration != input.ExpectedGeneration | session.Status == models.SessionStatusCancelled || session.Status == models.SessionStatusFailed || session.Status == models.SessionStatusCompleted | session.WorkspaceGeneration != input.ExpectedGen [excerpt; see symbol source]",
-      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: stores.CodeReviewWorkspaces.PublishPrepared; stores.CodeReviewWorkspaces.PublishPrepared(ctx, input.OrgID, db.PublishCodeReviewWorkspaceParams{OrgID: input.OrgID, ReviewID: input.MetadataID, SessionID: input.SessionID, PolicyID: metadata.PolicyID, RepositoryID: metadata.RepositoryID, JobID: jobID, JobLockToken: lockToken, OwnerNodeID: ownerNodeID, ContainerID: sandbox.ID, ExpectedHead: metadata.HeadSHA, ExpectedGeneration: input.ExpectedGeneration})",
-      "stale_result": "Observed guard/error branches: !hasJob || !hasToken || !hasOwner || strings.TrimSpace(ownerNodeID) == \"\"; *session.WorkerNodeID != ownerNodeID; input.OrgID == uuid.Nil || input.MetadataID == uuid.Nil || input.SessionID == uuid.Nil || input.ExpectedGeneration < 0; lockToken := (jobctx.LockTokenFromContext(ctx)); metadata.ID != input.MetadataID || metadata.Stale || codeReviewMetadataTerminal(metadata.Status); session.ContainerID != nil || session.SnapshotKey != nil || session.WorkspaceGeneration != input.ExpectedGeneration; session.Status == models.SessionStatusCancelled || session.Status == models.SessionStatusFailed || sess [excerpt; see symbol source]. These are syntax observations, not a proven stale-result contract.",
+      "predicate": "Preparation-enabled handler validates org/review/session/generation plus actual preparation job/token/worker context, captured policy ownership, current nonterminal nonstale review/session, cold eligibility and expected generation. Optional ControllerJobID is correlation only; legacy absence remains valid and retains polling. Physical Docker probe/preparation does not establish database publication authority.",
+      "lock": "No handler transaction or provider operation under database locks. PublishPrepared and RearmExisting own the readiness advisory/row locks, atomic publication/parent nudge and final live-lease checks. ReconcileMissing retains its separate exact-owner recovery fence. Jobs.Notify runs only after successful publication/rearm returns and wakes ordinary priority-aware queue polling.",
+      "stale_result": "Obsolete review/session/generation returns without dispatch; missing ownership context errors. Database publication/rearm rejection cannot wake or steal a controller lease; definite losing new sandboxes are destroyed, while uncertain committed publication is retained. Best-effort notification is not readiness proof; live controller gates and polling remain required.",
       "classification": "unfenced-needs-conversion",
-      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "migration": "M0 reviewed indirect caller; retain delegated preparation/recovery fences, physical-probe ordering, legacy polling and uncertain-publication retention. 0a still requires the named canonical workspace/review authority transaction and shared admission/end epochs; optional controller correlation or Redis notification grants no independent mutation authority.",
       "evidence": [
-        "internal/worker/code_review_workspace.go:205",
-        "Discovered: boundary-caller",
-        "Boundary/call candidate: stores.CodeReviewWorkspaces.PublishPrepared"
+        "internal/worker/code_review_workspace.go:221",
+        "Delegated boundaries: CodeReviewWorkspaceStore.PublishPrepared, RearmExisting and ReconcileMissing",
+        "Current post-commit effect: Jobs.Notify for optional existing ControllerJobID; no controller enqueue or direct reviewer dispatch",
+        "internal/worker/code_review_workspace_test.go:TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation",
+        "internal/worker/code_review_workspace_retry_test.go:TestWorkerWorkspaceControllerRetryUsesDurableHandshake"
       ]
     },
     {

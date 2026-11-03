@@ -615,24 +615,96 @@
     },
     {
       "id": "internal/db/code_review_workspace.go:CodeReviewWorkspaceStore.PublishPrepared:sql:1",
-      "source_sha256": "80ac2bc7bb8d087454d76f3cbe9e44719abae68eb59f3a9e69d95d0224ccaeb5",
+      "source_sha256": "21d2b16c97ab2aab723d477a8cf59c2d0562784836f50f5756f44bfb7159252b",
       "classification": "lease-owned",
-      "action_0a": "Retain running plus the exact job/lock-token and required live-lease guard; convert lifecycle mutation to its named authority seam. awaiting_start_control has no execution lease and must never satisfy this predicate.",
-      "reason": "This operation spends current execution/publication authority, not logical input ownership.",
+      "action_0a": "Retain running-only prepare_code_review_workspace eligibility with exact org/job/token/owner, wall-clock live lease and active fresh node. Keep current review/session/generation fences and final post-wait ownership recheck. awaiting_start_control has no execution lease and must never satisfy this predicate; 0a must still compose the canonical workspace/review authority and shared epochs.",
+      "reason": "Current preparation execution authority is required before publishing or rearming a holder. The org/review/session readiness advisory lock precedes row locks; final wall-clock lease/node validation fences ownership lost during holder or parent waits. Missing proof rolls back publication and its parent nudge; this does not claim implemented shared admission/end epochs.",
       "evidence": [
-        "internal/db/code_review_workspace.go:47",
-        "j . status = 'running'"
+        "internal/db/code_review_workspace.go:58",
+        "j . status = 'running'",
+        "CodeReviewWorkspaceStore.PublishPrepared / RearmExisting transaction and reviewWorkspacePreparationLeaseLive",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspaceWaitUsesCurrentTime",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspacePublicationRechecksOwnershipAfterParentLock"
       ]
     },
     {
       "id": "internal/db/code_review_workspace.go:CodeReviewWorkspaceStore.RearmExisting:sql:1",
-      "source_sha256": "934f038aff76dbf1311eb186ba89e855c9a2a83a67c0424c6748a22b422684b2",
+      "source_sha256": "5e6d957df5542da9698f39802c0cc0f23d9a7bd9585df1c3d70e2d1435c8e7e7",
       "classification": "lease-owned",
-      "action_0a": "Retain running plus the exact job/lock-token and required live-lease guard; convert lifecycle mutation to its named authority seam. awaiting_start_control has no execution lease and must never satisfy this predicate.",
-      "reason": "This operation spends current execution/publication authority, not logical input ownership.",
+      "action_0a": "Retain running-only prepare_code_review_workspace eligibility with exact org/job/token/owner, wall-clock live lease and active fresh node. Keep current review/session/generation fences and final post-wait ownership recheck. awaiting_start_control has no execution lease and must never satisfy this predicate; 0a must still compose the canonical workspace/review authority and shared epochs.",
+      "reason": "Current preparation execution authority is required before publishing or rearming a holder. The org/review/session readiness advisory lock precedes row locks; final wall-clock lease/node validation fences ownership lost during holder or parent waits. Missing proof rolls back publication and its parent nudge; this does not claim implemented shared admission/end epochs.",
       "evidence": [
-        "internal/db/code_review_workspace.go:138",
-        "j . status = 'running'"
+        "internal/db/code_review_workspace.go:166",
+        "j . status = 'running'",
+        "CodeReviewWorkspaceStore.PublishPrepared / RearmExisting transaction and reviewWorkspacePreparationLeaseLive",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspaceWaitUsesCurrentTime",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspacePublicationRechecksOwnershipAfterParentLock"
+      ]
+    },
+    {
+      "id": "internal/db/code_review_workspace.go:CodeReviewWorkspaceStore.RetryControllerWithLease:sql:1",
+      "source_sha256": "6c673942293d4c78c0acd15eeaed44b916d2e7bf8f54d300cbd1d55f9fd05836",
+      "classification": "lease-owned",
+      "action_0a": "Retain running-only source eligibility for the exact run_code_review org/job/token/live lease and captured org/review/session/head payload. awaiting_start_control cannot enter this execution-lease retry; parked controls require their canonical lifecycle seam.",
+      "reason": "The bounded retry transaction takes the shared readiness advisory lock before FOR UPDATE OF the exact controller row. This lock orders publication/retry only; fresh readiness and current policy/repository/output identity decide acceleration afterward. Missing/stale lease or payload identity returns false without scheduling or clearing a successor lease.",
+      "evidence": [
+        "internal/db/code_review_workspace.go:429",
+        "j . status = 'running'",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspaceControllerRetryFences"
+      ]
+    },
+    {
+      "id": "internal/db/code_review_workspace.go:CodeReviewWorkspaceStore.RetryControllerWithLease:sql:2",
+      "source_sha256": "66743ec29999da3e42be777f2b545ccc051b32fa5c813234f47b97131f5e14e3",
+      "classification": "lease-owned",
+      "action_0a": "Retain running-only source eligibility and exact org/job/type/token/live-lease CAS after all waits. awaiting_start_control is lease-free and cannot be retried or reclaimed by this operation. Pending is only the successful same-job destination of the exact lease-owned retry, not an additional eligible source. Refund one attempt and clear only the proven current lease; preserve normal retry time unless fresh readiness and current parent identity authorize acceleration. Do not transition awaiting_start_control here.",
+      "reason": "Under the readiness advisory lock, the already row-locked controller is requeued without consuming an attempt. Fresh readiness yields an immediate due time; absent/expired readiness or changed/terminal review metadata keeps ordinary polling. The final wall-clock lease CAS rejects expired/replaced ownership without a partial retry; no new controller is enqueued.",
+      "evidence": [
+        "internal/db/code_review_workspace.go:448",
+        "status = 'pending'",
+        "status = 'running'",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspaceCompletionRetryRace",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspaceReadyRetryRequiresCurrentParentMetadata"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "status = 'pending'",
+          "classification": "lease-owned",
+          "action_0a": "Pending is only the successful same-job destination of the exact lease-owned retry, not an additional eligible source. Refund one attempt and clear only the proven current lease; preserve normal retry time unless fresh readiness and current parent identity authorize acceleration. Do not transition awaiting_start_control here."
+        },
+        {
+          "fact": "status = 'running'",
+          "classification": "lease-owned",
+          "action_0a": "Retain running-only source eligibility and exact org/job/type/token/live-lease CAS after all waits. awaiting_start_control is lease-free and cannot be retried or reclaimed by this operation."
+        }
+      ]
+    },
+    {
+      "id": "internal/db/code_review_workspace.go:nudgeCodeReviewWorkspaceController:sql:1",
+      "source_sha256": "b62ca9efb64e2e806c49bc7c3392ed7297c7cd198875b8d09b0d07287467c968",
+      "classification": "runnable",
+      "action_0a": "Retain pending-only due-time acceleration for the exact existing run_code_review parent, workspace-wait phase marker and full current org/review/session/policy/repository/head/output identity. Never widen to running or awaiting_start_control, create a replacement job, consume an attempt, claim execution or clear a lease. Parked input controls remain under canonical lifecycle ownership.",
+      "reason": "This helper executes inside publication/rearm after the org/review/session readiness advisory lock and existing publication row fences. It updates only run_at/updated_at; absent legacy parent ID or mismatched/nonpending/provider-backoff parent is a no-op. A final preparation lease/node recheck before commit rolls back this nudge with publication if ownership expired during the parent-row wait.",
+      "evidence": [
+        "internal/db/code_review_workspace.go:357",
+        "j . status = 'pending'",
+        "CodeReviewWorkspaceWaitErrorPrefix restricts the existing parent to workspace polling",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspacePublicationWakeFences",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspacePublicationRechecksOwnershipAfterParentLock"
+      ]
+    },
+    {
+      "id": "internal/db/code_review_workspace.go:reviewWorkspacePreparationLeaseLive:sql:1",
+      "source_sha256": "64506b150592e7d2af2a47b73332755e699496e793b4204cd323093d4f89bee5",
+      "classification": "lease-owned",
+      "action_0a": "Keep running-only exact prepare job/token/owner and wall-clock live lease plus active/fresh node as a final publication/rearm authority check. This is not observation-only eligibility; awaiting_start_control has no execution lease. Preserve it when composing future canonical workspace/review and admission/end-epoch authority.",
+      "reason": "After publication holds the preparation/review/session rows and may have waited on holder or parent conflicts, this helper revalidates the already locked preparation lease and owner heartbeat using clock_timestamp. False or error prevents commit and rolls back container/holder/parent wake together; transaction-start time is insufficient authority.",
+      "evidence": [
+        "internal/db/code_review_workspace.go:384",
+        "j . status = 'running'",
+        "Called by PublishPrepared and RearmExisting immediately before commit",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspaceWaitUsesCurrentTime",
+        "internal/db/code_review_workspace_postgres_test.go:TestCodeReviewWorkspacePublicationRechecksOwnershipAfterParentLock"
       ]
     },
     {
