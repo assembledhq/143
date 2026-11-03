@@ -43,6 +43,38 @@ describe("PackageRegistriesPage", () => {
     expect(screen.queryByText("@example")).not.toBeInTheDocument();
     expect(requests).toEqual(["repo-1", "repo-2"]);
   });
+  it("uses the standard error notice to retry loading repositories", async () => {
+    let attempts = 0;
+    server.use(http.get("*/api/v1/repositories", () => {
+      attempts += 1;
+      return attempts === 1
+        ? HttpResponse.json({ error: { code: "UNAVAILABLE", message: "try again" } }, { status: 503 })
+        : HttpResponse.json({ data: [{ id: "repo-1", full_name: "example/application" }], meta: {} });
+    }));
+    renderWithProviders(<PackageRegistriesPage />);
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveAttribute("data-slot", "error-notice");
+    expect(notice).toHaveTextContent("Repositories could not be loaded");
+    await userEvent.click(within(notice).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("combobox", { name: "Repository" })).toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
+  it("uses the standard error notice to retry loading package credentials", async () => {
+    let attempts = 0;
+    server.use(http.get("*/api/v1/repositories/repo-1/package-registry-credentials", () => {
+      attempts += 1;
+      return attempts === 1
+        ? HttpResponse.json({ error: { code: "UNAVAILABLE", message: "try again" } }, { status: 503 })
+        : HttpResponse.json({ data: [credential], meta: {} });
+    }));
+    renderWithProviders(<PackageRegistriesPage />);
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveAttribute("data-slot", "error-notice");
+    expect(notice).toHaveTextContent("Package credentials could not be loaded");
+    await userEvent.click(within(notice).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText(credential.registry_url)).toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
   it("creates with a password input, clears after success, and never caches the token", async () => {
     const bodies: unknown[] = [];
     server.use(http.post("*/api/v1/repositories/repo-1/package-registry-credentials", async ({ request }) => { bodies.push(await request.json()); return HttpResponse.json({ data: credential }, { status: 201 }); }));
