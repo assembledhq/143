@@ -69,6 +69,7 @@ describe("review link from a GitHub comment", () => {
     const dialog = await screen.findByRole("dialog", { name: "Request full review" });
     const optIn = await within(dialog).findByRole("checkbox", { name: /Include findings from earlier rounds/ });
     if (toggle) await user.click(optIn);
+    expect(within(dialog).getByText(expected.include_prior_findings ? /Starts a new full review/ : /may be reused/)).toBeInTheDocument();
     await user.click(await within(dialog).findByRole("button", { name: "Request full review" }));
     await waitFor(() => expect(bodies).toEqual([{ request_id: expect.any(String), mode: "review_now", ...expected }]));
   });

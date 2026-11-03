@@ -166,6 +166,14 @@ func testSchedulingPriorFindingsOptInStartsReview(t *testing.T, pool *pgxpool.Po
 	err = pool.QueryRow(ctx, `SELECT (revision_context->'request_context'->>'include_prior_findings')::boolean FROM sessions WHERE org_id=$1 AND id=$2`, org, latest.SessionID).Scan(&includePriorFindings)
 	require.NoError(t, err, "read the opted-in review's request context")
 	require.True(t, includePriorFindings, "the new review must carry the opt-in")
+
+	completeSchedulingTeamReview(t, pool, org, latest.SessionID)
+	_, err = service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow, IncludePriorFindings: true})
+	require.NoError(t, err, "repeat the prior findings opt-in on the same head")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "start the repeated opted-in review")
+	repeated, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read the repeated opted-in review")
+	require.NotEqual(t, latest.SessionID, repeated.SessionID, "a repeated opt-in must not reuse the last opted-in review, or it would miss that review's findings and newer replies")
 }
 
 func testSchedulingFullAssessmentJoinSettlement(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {

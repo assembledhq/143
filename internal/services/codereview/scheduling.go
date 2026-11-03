@@ -513,6 +513,9 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		force = force || (requestID != uuid.Nil && input.ChangeReason == explicitReviewRequestChangeReason &&
 			input.TriggerSource == models.CodeReviewTriggerSourceTeamReviewer && latestErr == nil &&
 			latest.Status == models.CodeReviewSessionStatusCompleted)
+		// Each opt-in must see findings and replies newer than the last review.
+		force = force || (requestID != uuid.Nil && input.RequestContext != nil && input.RequestContext.IncludePriorFindings &&
+			latestErr == nil && latest.Status == models.CodeReviewSessionStatusCompleted)
 		if input.ExplicitRequest && latestErr == nil && latest.HeadSHA == snapshot.HeadSHA {
 			var hasResults bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_agent_results WHERE org_id=$1 AND session_id=$2)`, input.OrgID, latest.SessionID).Scan(&hasResults); err != nil {

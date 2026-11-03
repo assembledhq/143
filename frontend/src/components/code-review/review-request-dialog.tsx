@@ -101,6 +101,7 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
           {error ? <ErrorNotice title="Unable to load review" description={error} /> : null}
           {target && !loading && !error ? <p className="text-sm text-muted-foreground">{isRecheck
             ? "Previous findings stay in place. Changes to code or review policy require a full review."
+            : includePriorFindings ? "Starts a new full review unless one with this option is already running."
             : "A running or completed review may be reused if it already covers these changes."}</p> : null}
           {!isRecheck && target && !loading && !error ? <div className="flex items-start gap-2">
             <Checkbox id="include-prior-findings" className="mt-0.5" checked={includePriorFindings} onCheckedChange={(checked) => { setIncludePriorFindings(checked === true); requestID.current = null; }} />
