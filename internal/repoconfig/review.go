@@ -26,9 +26,10 @@ const (
 // VerifyCommands are repository commands, not inherently read-only operations;
 // the platform never executes them after the shared preparation deadline.
 type ReviewSection struct {
-	Commands       []string              `json:"commands,omitempty"`
-	VerifyCommands []string              `json:"verify_commands,omitempty"`
-	Evidence       []ReviewEvidenceEntry `json:"evidence,omitempty"`
+	InstallNPMDependencies bool                  `json:"install_npm_dependencies,omitempty"`
+	Commands               []string              `json:"commands,omitempty"`
+	VerifyCommands         []string              `json:"verify_commands,omitempty"`
+	Evidence               []ReviewEvidenceEntry `json:"evidence,omitempty"`
 }
 
 type ReviewEvidenceEntry struct {
