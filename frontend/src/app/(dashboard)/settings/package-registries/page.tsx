@@ -11,6 +11,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
+import { ErrorNotice, ErrorText } from "@/components/ui/error-notice";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -58,10 +59,10 @@ export default function PackageRegistriesPage() {
     <PageContainer size="default">
       <div className="space-y-6">
         <PageHeader title="Package registries" description="Install private npm dependencies during controlled repository setup." />
-        {!isLoading && !admin ? <p role="alert">Administrator access is required to manage package credentials.</p> : admin && (
+        {!isLoading && !admin ? <ErrorNotice title="Administrator access required" description="Administrator access is required to manage package credentials." /> : admin && (
           <>
             <p className="text-muted-foreground">Credentials are used only for dependency installation and are unavailable to coding agents. Preview secrets are managed separately. <Link href="/docs/guides/private-packages" className="text-primary underline underline-offset-4">Setup guide</Link></p>
-            {repositories.isError ? <p role="alert">Unable to load repositories. Refresh the page to try again.</p> : repositories.isPending ? <p role="status">Loading repositories…</p> : !repositories.data?.data.length ? (
+            {repositories.isError ? <ErrorNotice title="Unable to load repositories" description="Refresh the page to try again." /> : repositories.isPending ? <p role="status">Loading repositories…</p> : !repositories.data?.data.length ? (
               <EmptyState icon={Package} title="No repositories connected" description="Connect a repository before adding a package credential." />
             ) : (
               <>
@@ -118,7 +119,7 @@ function RepositoryCredentials({ repositoryId }: { repositoryId: string }) {
           <Button size="sm" disabled={!credentials.isSuccess} onClick={() => setDialog({})}>Add credential</Button>
         </DisabledTooltip>
       </div>
-      {credentials.isPending ? <p role="status">Loading credentials…</p> : credentials.isError ? <p role="alert">Unable to load package credentials. Refresh the page to try again.</p> : !credentials.data?.data.length ? (
+      {credentials.isPending ? <p role="status">Loading credentials…</p> : credentials.isError ? <ErrorNotice title="Unable to load package credentials" description="Refresh the page to try again." /> : !credentials.data?.data.length ? (
         <EmptyState icon={Package} title="No package credentials" description="Add a read-only token for an HTTPS npm registry and an explicit package scope." />
       ) : (
         <div className="overflow-x-auto rounded-lg border bg-card shadow-sm">
@@ -142,7 +143,7 @@ function RepositoryCredentials({ repositoryId }: { repositoryId: string }) {
       <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open && !deleting) setDeleteTarget(null); }}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>Delete package credential?</AlertDialogTitle><AlertDialogDescription>Future setup for {deleteTarget?.package_scope} at {deleteTarget?.registry_url} will no longer have this credential. Existing installations are unaffected.</AlertDialogDescription></AlertDialogHeader>
-          {deleteError && <p role="alert" className="text-destructive">{deleteError}</p>}
+          {deleteError && <ErrorText role="alert">{deleteError}</ErrorText>}
           <AlertDialogFooter>
             <DisabledTooltip disabled={deleting} content="Wait for deletion to finish."><AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel></DisabledTooltip>
             <DisabledTooltip disabled={deleting} content="Wait for deletion to finish."><AlertDialogAction disabled={deleting} onClick={removeCredential} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">{deleting ? "Deleting…" : "Delete credential"}</AlertDialogAction></DisabledTooltip>
@@ -197,7 +198,7 @@ function CredentialDialog({ repositoryId, credential, onClose, onSaved }: { repo
             <div className="space-y-2"><Label htmlFor="package-scope">Package scope</Label><Input id="package-scope" placeholder="@example" value={scope} onChange={(event) => setScope(event.target.value)} required /><p className="text-xs text-muted-foreground">An explicit lowercase npm scope, such as @example. One credential per origin and scope.</p></div>
           </>}
           <div className="space-y-2"><Label htmlFor="package-token">Token</Label><Input id="package-token" type="password" autoComplete="new-password" value={token} onChange={(event) => setToken(event.target.value)} required /><p className="text-xs text-muted-foreground">Used only by controlled setup. Never passed to agents or preview applications.</p></div>
-          {error && <p role="alert" className="text-destructive">{error}</p>}
+          {error && <ErrorText role="alert">{error}</ErrorText>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={close}>Cancel</Button>
             <DisabledTooltip disabled={!valid || saving} content={saving ? "Wait for the credential to save." : "Enter an HTTPS registry origin, a valid npm scope, and a token."}><Button type="submit" disabled={!valid || saving}>{saving ? "Saving…" : credential ? "Rotate credential" : "Add credential"}</Button></DisabledTooltip>

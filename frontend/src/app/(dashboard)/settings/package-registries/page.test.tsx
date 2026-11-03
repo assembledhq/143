@@ -130,7 +130,17 @@ describe("PackageRegistriesPage", () => {
   });
   it.each(["member", "viewer", "builder"])("denies %s without requesting credential data", (role) => {
     auth.role = role; const get = vi.fn(); server.use(http.get("*/api/v1/repositories/:id/package-registry-credentials", () => { get(); return HttpResponse.json({ data: [], meta: {} }); }));
-    renderWithProviders(<PackageRegistriesPage />); expect(screen.getByRole("alert")).toHaveTextContent("Administrator access is required"); expect(screen.queryByRole("combobox")).not.toBeInTheDocument(); expect(get).not.toHaveBeenCalled();
+    renderWithProviders(<PackageRegistriesPage />); expect(screen.getByRole("alert")).toHaveAttribute("data-slot", "error-notice"); expect(screen.getByRole("alert")).toHaveTextContent("Administrator access is required"); expect(screen.queryByRole("combobox")).not.toBeInTheDocument(); expect(get).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["repositories", "*/api/v1/repositories", "Unable to load repositories"],
+    ["credentials", "*/api/v1/repositories/:id/package-registry-credentials", "Unable to load package credentials"],
+  ])("uses the standard error notice when %s fail to load", async (_area, path, message) => {
+    server.use(http.get(path, () => new HttpResponse(null, { status: 500 })));
+    renderWithProviders(<PackageRegistriesPage />);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveAttribute("data-slot", "error-notice");
+    expect(alert).toHaveTextContent(message);
   });
   it.each([[503, "PACKAGE_REGISTRY_ENCRYPTION_UNAVAILABLE", "Package credential storage is unavailable. Try again later."], [403, "FORBIDDEN", "Administrator access is required to manage package credentials."], [409, "PACKAGE_REGISTRY_CREDENTIAL_EXISTS", "This registry origin or package scope already has a credential. Rotate the existing credential instead."], [409, "CONFLICT", "This credential changed. Refresh the page before trying again."], [500, "INTERNAL", "Unable to update the package credential. Try again."]])("shows a safe error for status %s", async (status, code, message) => {
     server.use(http.post("*/api/v1/repositories/repo-1/package-registry-credentials", () => HttpResponse.json({ error: { code, message: secret } }, { status: Number(status) })));
