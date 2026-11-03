@@ -82,11 +82,23 @@ func main() {
 
 	switch os.Args[1] {
 	case "up":
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := verifyRuntimeRevertBeforeUp(ctx, m, dbURL); err != nil {
+			fmt.Fprintf(os.Stderr, "Inactive runtime preflight refused: %v\n", err)
+			os.Exit(1)
+		}
 		if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 			logMigrationError("up", m, err)
 			os.Exit(1)
 		}
-		fmt.Println("Migrations applied successfully.")
+		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer verifyCancel()
+		if err := verifyInactiveRuntimeSchema(verifyCtx, dbURL, 393); err != nil {
+			fmt.Fprintf(os.Stderr, "Inactive runtime post-migration check refused: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Migrations applied successfully; inactive runtime compatibility verified.")
 	case "down":
 		if err := m.Down(); err != nil && err != migrate.ErrNoChange {
 			logMigrationError("down", m, err)
@@ -126,6 +138,13 @@ func main() {
 // Operators must exclude activation and other deployments throughout rollback;
 // this bounded read-only snapshot is not a fleet-wide maintenance lock.
 func verifyInactiveBinaryRollback(ctx context.Context, rawURL string) (result error) {
+	return verifyInactiveRuntimeSchema(ctx, rawURL, 392)
+}
+
+// verifyInactiveRuntimeSchema shares the retained-history proof with the pinned
+// binary rollback check. The source revert additionally supports schema 393,
+// whose only added table stores unrelated package-registry credentials.
+func verifyInactiveRuntimeSchema(ctx context.Context, rawURL string, expectedSchema uint) (result error) {
 	// Worker DATABASE_URL values include pool options. Parse them as a pool
 	// configuration so they are not sent to PostgreSQL as runtime parameters;
 	// the inspector still opens only one direct connection, never a pool.
@@ -157,8 +176,8 @@ func verifyInactiveBinaryRollback(ctx context.Context, rawURL string) (result er
 	err = tx.QueryRow(ctx, `SELECT CASE
  WHEN current_setting('transaction_read_only') <> 'on' THEN 'inspection is not read-only'
  WHEN (SELECT count(*) FROM public.schema_migrations) <> 1
-   OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version=392 AND NOT dirty)
-   THEN 'expected clean migration 392'
+   OR NOT EXISTS (SELECT 1 FROM public.schema_migrations WHERE version=$1 AND NOT dirty)
+   THEN $2
  WHEN (SELECT count(*) FROM public.caller_send_intent_control) <> 1
    OR NOT EXISTS (SELECT 1 FROM public.caller_send_intent_control
      WHERE singleton AND schema_ready AND dispatch_status_ready AND NOT intents_enabled)
@@ -174,7 +193,7 @@ func verifyInactiveBinaryRollback(ctx context.Context, rawURL string) (result er
    OR EXISTS (SELECT 1 FROM public.session_review_loops WHERE startup_send_version IS NOT NULL)
    OR EXISTS (SELECT 1 FROM public.code_review_session_metadata WHERE status_code='code_reviewer_dispatch_unresolved')
    THEN 'retained caller history exists'
- ELSE '' END`).Scan(&refusal)
+ ELSE '' END`, expectedSchema, fmt.Sprintf("expected clean migration %d", expectedSchema)).Scan(&refusal)
 	if err != nil {
 		return fmt.Errorf("inspect inactive rollback state: %w", err)
 	}

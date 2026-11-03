@@ -43,16 +43,14 @@ func newThreadHandlerWithFileEvents(t *testing.T) (*SessionThreadHandler, *threa
 		logStore:     &mockLogStore{},
 		jobStore:     &mockJobStore{},
 	}
-	svc, err := thread.NewService(
+	svc := thread.NewService(
 		deps.threadStore,
 		deps.sessionStore,
 		deps.messageStore,
 		deps.logStore,
 		deps.jobStore,
-		requiredThreadSendDependencies(t),
 		zerolog.Nop(),
 	)
-	require.NoError(t, err, "construct the file-event handler fixture with mandatory send dependencies")
 	fileEvents := &mockFileEventStoreForHandlers{}
 	svc.SetFileEventStore(fileEvents)
 	return NewSessionThreadHandler(svc), deps, fileEvents

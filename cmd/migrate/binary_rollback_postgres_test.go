@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 	tests := []struct {
 		name, mutation, refusal string
 		workerURL               bool
+		source                  bool
 	}{
 		{name: "inactive schema"},
 		{name: "worker pool settings", workerURL: true},
@@ -27,13 +29,35 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 		{name: "retained unsupported status", mutation: "UPDATE code_review_session_metadata SET status_code='code_reviewer_dispatch_unresolved'", refusal: "retained caller history"},
 		{name: "retained lifecycle stamp", mutation: "ALTER TABLE sessions DISABLE TRIGGER USER; UPDATE sessions SET lifecycle_version=1", refusal: "lifecycle activation"},
 	}
+	original := len(tests)
+	for i := 0; i < original; i++ {
+		tc := tests[i]
+		tc.name = "source revert " + tc.name
+		tc.source = true
+		if tc.name == "source revert different schema" {
+			tc.mutation = "UPDATE schema_migrations SET version=394"
+		}
+		tc.refusal = strings.ReplaceAll(tc.refusal, "392", "393")
+		if strings.Contains(tc.name, "dirty ledger") {
+			tc.refusal = "dirty migration ledger"
+		}
+		if tc.name == "source revert different schema" {
+			tc.refusal = "schema through 393 only"
+		}
+		tests = append(tests, tc)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			m, conn := newContentMigrationPostgres(t, false)
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			require.NoError(t, m.Migrate(392), "install the historical inactive schema supported by binary rollback")
+			schema := uint(392)
+			if tt.source {
+				schema = 393
+			}
+			require.NoError(t, m.Migrate(schema), "install the historical inactive schema supported by binary rollback")
 			f := seedCallerIntentMigrationLegacy(t, ctx, conn)
 			seedCallerDispatchStatusMigrationMetadata(t, ctx, conn, f)
 			if tt.mutation != "" {
@@ -56,7 +80,15 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 				parsed.RawQuery = query.Encode()
 				rawURL = parsed.String()
 			}
-			err := verifyInactiveBinaryRollback(ctx, rawURL)
+			var err error
+			if tt.source {
+				err = verifyRuntimeRevertBeforeUp(ctx, m, rawURL)
+				if err == nil {
+					err = verifyInactiveRuntimeSchema(ctx, rawURL, 393)
+				}
+			} else {
+				err = verifyInactiveBinaryRollback(ctx, rawURL)
+			}
 			if tt.refusal == "" {
 				require.NoError(t, err, "clean inactive schema should permit binary-only rollback")
 			} else {

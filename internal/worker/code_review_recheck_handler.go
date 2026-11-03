@@ -370,21 +370,27 @@ func recheckRequirements(policy models.CodeReviewPolicyConfig, files []coderevie
 
 func registerCodeReviewRecheckDeadLetterReconciliation(ctx context.Context, stores *Stores, logger zerolog.Logger, a models.CodeReviewAssessment) {
 	jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, deadLetterErr error) {
-		outcome, scope, committed := committedCodeReviewTerminalOutcome(hookCtx, a.OrgID, models.JobTypeRunCodeReviewRecheck)
-		if !committed || !codeReviewTerminalScopeMatchesAssessment(scope, a) {
-			logger.Warn().Str("assessment_id", a.ID.String()).Msg("skipping assessment cleanup without its exact committed retirement outcome")
+		current, loadErr := stores.CodeReviewAssessments.GetByID(hookCtx, a.OrgID, a.ID)
+		if loadErr != nil {
+			logger.Warn().Err(loadErr).Str("assessment_id", a.ID.String()).Msg("load dead-lettered assessment failed")
 			return
 		}
-		if stores == nil {
-			logger.Warn().Str("assessment_id", a.ID.String()).Msg("cannot settle committed assessment without its configured stores")
-			return
+		// Worker retirement already failed the eligible assessment atomically.
+		// Direct handler callers retain the same guarded failure behavior.
+		if current.Status != models.CodeReviewAssessmentFailed {
+			if current.Status != models.CodeReviewAssessmentRunning && current.Status != models.CodeReviewAssessmentReserved &&
+				!(current.Status == models.CodeReviewAssessmentPublishing && current.PublicationState == models.CodeReviewPublicationReserved) {
+				return
+			}
+			if failErr := stores.CodeReviewAssessments.Fail(hookCtx, current.OrgID, current.ID, current.Generation, current.InputDigest, codeReviewDeadLetterReason(deadLetterErr)); failErr != nil {
+				logger.Warn().Err(failErr).Str("assessment_id", a.ID.String()).Msg("reconcile dead-lettered assessment failed")
+				return
+			}
 		}
-		if settleErr := db.SettleCodeReviewTerminalAssessment(hookCtx, a.OrgID, stores.ThreadSendDependencies.Transactions, outcome); settleErr != nil {
+		if settleErr := settleCodeReviewAssessment(hookCtx, stores, current); settleErr != nil {
 			logger.Warn().Err(settleErr).Str("assessment_id", a.ID.String()).Msg("settle dead-lettered assessment failed")
 		}
-		if stores != nil && stores.CodeReviews != nil {
-			stores.CodeReviews.PublishCodeReviewTerminalOutcome(hookCtx, a.OrgID, outcome)
-		}
+		stores.CodeReviews.PublishAssessmentUpdated(hookCtx, current)
 	})
 }
 

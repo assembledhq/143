@@ -61,3 +61,22 @@ a separate authorized maintenance procedure with its own compatibility gates.
 Ordinary deployments without either rollback variable still run both the existing
 known-dirty repair check and `migrate up` before replacing the API. There is no
 unconditional skip-migrations option.
+
+## Source revert with retained migrations
+
+A source revert of the lifecycle runtime is different from deploying an older
+binary. Keep migrations through 392 unchanged, along with any unrelated later
+migrations. The reverted runtime includes schema 393 for package-registry
+credentials and retains the normal migration runner.
+
+For this source revert, `migrate up` checks clean schemas 392 and 393 for disabled
+participation and absence of incompatible lifecycle/caller history before making
+changes. It verifies the same inactive-state conditions at clean schema 393 after
+migration, including on fresh installations and no-change runs. Unsupported later
+schemas fail closed. These checks do not disable activation or delete retained
+history. A refusal requires investigation; do not bypass it or run down migrations.
+
+Keep activation excluded throughout deployment. Review and validate this source
+revision with the retained schema before separately authorizing deployment. The
+binary-only rollback command above remains pinned to schema 392; this source
+revert does not extend that command to schema 393.

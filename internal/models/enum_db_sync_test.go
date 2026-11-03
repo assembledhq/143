@@ -72,10 +72,6 @@ func TestEnumValuesMatchCheckConstraints(t *testing.T) {
 	// Map of constraint name -> Go enum values. Only enums with typed
 	// constants in internal/models are covered.
 	goEnumValues := map[string][]string{
-		"jobs_status": toStrings(
-			JobStatusPending, JobStatusRunning, JobStatusAwaitingStartControl,
-			JobStatusSucceeded, JobStatusFailed, JobStatusCancelled, JobStatusDeadLetter,
-		),
 		// session_enums.go
 		"sessions_status": toStrings(
 			SessionStatusPending, SessionStatusRunning, SessionStatusIdle,

@@ -365,9 +365,7 @@ func newAnswerGrantPostgresPool(t *testing.T) *pgxpool.Pool {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := admin.Close(ctx); err != nil {
-			t.Errorf("close this fixture's administrator connection: %v", err)
-		}
+		require.NoError(t, admin.Close(ctx), "close this fixture's administrator connection")
 	})
 	var version int
 	require.NoError(t, admin.QueryRow(ctx, "SELECT current_setting('server_version_num')::integer").Scan(&version), "read the full-schema PostgreSQL version prerequisite")
@@ -377,33 +375,10 @@ func newAnswerGrantPostgresPool(t *testing.T) *pgxpool.Pool {
 	_, err = admin.Exec(ctx, "CREATE DATABASE "+identifier)
 	require.NoError(t, err, "create only this fixture's generated database")
 	t.Cleanup(func() {
-		// Use the shared fixture cleanup budget, while retaining this test's
-		// stricter no-FORCE ownership check. Report surviving backends instead
-		// of terminating connections that this fixture does not own.
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-		var remaining int
-		for {
-			err := admin.QueryRow(ctx, "SELECT count(*) FROM pg_stat_activity WHERE datname=$1", name).Scan(&remaining)
-			if err != nil {
-				t.Errorf("inspect exact fixture cleanup readiness (last backend count %d): %v", remaining, err)
-				return
-			}
-			if remaining == 0 {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				t.Errorf("wait for exact fixture cleanup readiness (%d backends remain): %v", remaining, ctx.Err())
-				return
-			case <-ticker.C:
-			}
-		}
-		if _, err := admin.Exec(ctx, "DROP DATABASE "+identifier); err != nil {
-			t.Errorf("drop the exact generated fixture after owned connections close, without force: %v", err)
-		}
+		_, err := admin.Exec(ctx, "DROP DATABASE "+identifier)
+		require.NoError(t, err, "drop the exact generated fixture after owned connections close, without force")
 	})
 	target, err := url.Parse(raw)
 	require.True(t, err == nil, "parse the fixture URI without exposing its private details")
@@ -419,23 +394,12 @@ func newAnswerGrantPostgresPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err, "resolve the complete unmodified schema migration chain")
 	migration, err := migrate.New("file://"+source, isolated)
 	require.True(t, err == nil, "open the real migration driver on only this fixture")
-	migrationClosed := false
 	t.Cleanup(func() {
-		if !migrationClosed {
-			sourceErr, databaseErr := migration.Close()
-			if err := errors.Join(sourceErr, databaseErr); err != nil {
-				t.Errorf("close the migration resources before database cleanup: %v", err)
-			}
-		}
+		sourceErr, databaseErr := migration.Close()
+		require.NoError(t, sourceErr, "close the migration source")
+		require.NoError(t, databaseErr, "close the migration driver before database cleanup")
 	})
-	upErr := migration.Up()
-	// Migration connections are setup-only; release them before the parallel
-	// business cases use their explicitly bounded pool.
-	sourceErr, databaseErr := migration.Close()
-	migrationClosed = true
-	require.NoError(t, upErr, "apply the full unchanged production schema before actual Answer tests")
-	require.NoError(t, sourceErr, "close the migration source after schema setup")
-	require.NoError(t, databaseErr, "close the migration driver before the test cases start")
+	require.NoError(t, migration.Up(), "apply the full unchanged production schema before actual Answer tests")
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	require.True(t, err == nil, "open the bounded fully migrated fixture pool without exposing private details")
 	t.Cleanup(pool.Close)

@@ -25,7 +25,6 @@ import (
 	"github.com/assembledhq/143/internal/services/codexauth"
 	githubratelimit "github.com/assembledhq/143/internal/services/github/ratelimit"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -59,7 +58,7 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 			cfg := &config.Config{EncryptionMasterKey: tt.masterKey}
 			codexSvc := codexauth.NewService(nil, zerolog.Nop())
 			claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
-			router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 			if tt.expectErr {
 				require.Error(t, err, "NewRouter should return an error when encryption key is invalid")
 				require.Nil(t, router, "NewRouter should not construct a router with an invalid encryption key")
@@ -72,21 +71,13 @@ func TestNewRouter_EncryptionKeyValidation(t *testing.T) {
 	}
 }
 
-func TestNewRouterRejectsMissingThreadSendPool(t *testing.T) {
-	t.Parallel()
-	cfg := &config.Config{}
-	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexauth.NewService(nil, zerolog.Nop()), claudecodeauth.NewService(nil, zerolog.Nop()), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	require.EqualError(t, err, "construct API code review terminal transactions: thread send transactions: pool is required", "missing mandatory transaction plumbing must fail at the first explicit router capability constructor")
-	require.Nil(t, router, "invalid router construction must expose no partial router")
-}
-
 func TestInternalProjectProposalRouteIsUnavailable(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{}
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
-	router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "router should build for route availability test")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/internal/projects/propose", bytes.NewBufferString(`{}`))
@@ -120,7 +111,7 @@ func TestRemovedPMAutopilotRoutesAreUnavailable(t *testing.T) {
 			cfg := &config.Config{}
 			router, _, _, _, _, err := NewRouter(
 				cfg,
-				&pgxpool.Pool{}, // Constructor-only inert pool; route checks acquire no connection.
+				nil,
 				zerolog.Nop(),
 				nil,
 				codexauth.NewService(nil, zerolog.Nop()),
@@ -276,7 +267,7 @@ func TestNewRouter_WiresCodeReviewTriggerConfig(t *testing.T) {
 	aliasConfig := strings.Index(string(source), `AliasLogins:       cfg.CodeReviewAliasLogins`)
 	teamConfig := strings.Index(string(source), `TeamSlugs:         cfg.CodeReviewTeamSlugs`)
 	setService := strings.Index(string(source), `webhookHandler.SetCodeReviewService(codeReviewSvc, pullRequestStore)`)
-	threadServiceConstruction := strings.Index(string(source), `threadSvc, err := threadservice.NewService`)
+	threadServiceConstruction := strings.Index(string(source), `threadSvc := threadservice.NewService`)
 	setThreadCanceller := strings.Index(string(source), `codeReviewSvc.SetThreadCanceller(threadSvc)`)
 
 	require.NotEqual(t, -1, appReviewerConfig, "router should pass configured app reviewer logins into the code review service")
@@ -335,7 +326,7 @@ func TestNewRouter_GitHubAppConfigBuildsRouter(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should build successfully when GitHub App credentials are valid")
 	require.NotNil(t, router, "NewRouter should construct a router when GitHub App credentials are valid")
 }
@@ -347,7 +338,7 @@ func TestNewRouter_WithRedisWiringBuildsRouter(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, &cache.Client{}, &cache.SessionStreams{})
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, &cache.Client{}, &cache.SessionStreams{})
 	require.NoError(t, err, "router construction should accept optional Redis dependencies")
 	require.NotNil(t, router, "router should still be constructed with Redis wiring enabled")
 }
@@ -376,7 +367,7 @@ func TestNewRouter_BuildsWithoutOptionalReviewWiring(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should still construct the router without session-review wiring")
 	require.NotNil(t, router, "NewRouter should still construct the router without session-review wiring")
 }
@@ -390,7 +381,7 @@ func TestNewRouter_PublicAuthRoutesWarmAndRequireCSRF(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should build successfully for public auth CSRF wiring")
 	require.NotNil(t, router, "NewRouter should construct a router for public auth CSRF wiring")
 
@@ -429,7 +420,7 @@ func TestNewRouter_InternalPreviewRoutesSkipGlobalBodyLimit(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should build successfully for worker preview route tests")
 	require.NotNil(t, router, "NewRouter should construct a router for worker preview route tests")
 
@@ -453,7 +444,7 @@ func TestNewRouter_InternalPreviewRoutesSkipGlobalRateLimit(t *testing.T) {
 	codexSvc := codexauth.NewService(nil, zerolog.Nop())
 	claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
 
-	router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "NewRouter should build successfully for worker preview route tests")
 	require.NotNil(t, router, "NewRouter should construct a router for worker preview route tests")
 
@@ -740,7 +731,7 @@ func TestNewRouterUsesInjectedGitHubController(t *testing.T) {
 	// A graph must not construct a second controller from its config when an
 	// already validated process controller is supplied.
 	cfg := &config.Config{GitHubRateLimitMode: "must-not-be-reconstructed"}
-	router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexauth.NewService(nil, zerolog.Nop()), claudecodeauth.NewService(nil, zerolog.Nop()), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, RouterSharedDependencies{GitHubRateLimitController: controller})
+	router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexauth.NewService(nil, zerolog.Nop()), claudecodeauth.NewService(nil, zerolog.Nop()), nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, RouterSharedDependencies{GitHubRateLimitController: controller})
 	require.NoError(t, err, "router should reuse the injected controller without rebuilding policy")
 	require.NotNil(t, router, "shared controller should support ordinary router construction")
 }
@@ -787,7 +778,7 @@ func TestRouterReportsOnlyConfiguredAdmissionWriter(t *testing.T) {
 			evidence := codereviewsvc.NewAdmissionProcessEvidence("api", "synthetic-build")
 			codexSvc := codexauth.NewService(nil, zerolog.Nop())
 			claudeSvc := claudecodeauth.NewService(nil, zerolog.Nop())
-			router, _, _, _, _, err := NewRouter(cfg, &pgxpool.Pool{}, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, RouterSharedDependencies{CodeReviewAdmissionEvidence: evidence})
+			router, _, _, _, _, err := NewRouter(cfg, nil, zerolog.Nop(), nil, codexSvc, claudeSvc, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, RouterSharedDependencies{CodeReviewAdmissionEvidence: evidence})
 			require.NoError(t, err, "actual router graph should build with or without configured GitHub snapshots")
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))

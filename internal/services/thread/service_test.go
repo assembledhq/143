@@ -26,7 +26,6 @@ type mockThreadStore struct {
 	archiveFn           func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	claimIdleFn         func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
 	claimForResumeFn    func(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (models.SessionThread, error)
-	activeCountFn       func(ctx context.Context, orgID, sessionID uuid.UUID) (int, error)
 	updateFn            func(ctx context.Context, t *models.SessionThread) error
 	updateStatusFn      func(ctx context.Context, orgID, threadID uuid.UUID, status models.ThreadStatus) error
 	incrementPendingFn  func(ctx context.Context, orgID, threadID uuid.UUID) error
@@ -412,7 +411,6 @@ type testDeps struct {
 type mockOwnerLossRecovery struct {
 	calls []ownerLossRecoveryCall
 	err   error
-	check func(context.Context)
 }
 
 type ownerLossRecoveryCall struct {
@@ -422,9 +420,6 @@ type ownerLossRecoveryCall struct {
 }
 
 func (m *mockOwnerLossRecovery) RecoverLostOwner(ctx context.Context, orgID, sessionID uuid.UUID, threadID *uuid.UUID) error {
-	if m.check != nil {
-		m.check(ctx)
-	}
 	var copiedThreadID *uuid.UUID
 	if threadID != nil {
 		id := *threadID
@@ -444,9 +439,7 @@ func newTestService(t *testing.T) (*Service, *testDeps) {
 		jobStore:     &mockJobStore{},
 		inboxStore:   &mockThreadInboxStore{},
 	}
-	svc, err := NewService(deps.threadStore, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, requiredTestSendDependencies(t), zerolog.Nop())
-	require.NoError(t, err, "construct the thread service with explicit mandatory send dependencies")
-	installLegacyGuardFixture(t, svc)
+	svc := NewService(deps.threadStore, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, zerolog.Nop())
 	return svc, deps
 }
 
@@ -1514,7 +1507,7 @@ func TestService_SendMessage(t *testing.T) {
 				// service should enqueue an independent thread-scoped job rather
 				// than parking the message behind the active sibling.
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{}, pgx.ErrNoRows
+					return models.Session{}, fmt.Errorf("session already running")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, ContainerID: &containerID, WorkerNodeID: &ownerNodeID}, nil
@@ -1559,10 +1552,10 @@ func TestService_SendMessage(t *testing.T) {
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, pgx.ErrNoRows
+					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, pgx.ErrNoRows
+					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 			},
 			expectErr: ErrThreadNotFound,
@@ -1581,7 +1574,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, pgx.ErrNoRows
+					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusRunning}, nil
@@ -1616,7 +1609,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, pgx.ErrNoRows
+					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusRunning}, nil
@@ -1637,7 +1630,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, pgx.ErrNoRows
+					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusRunning}, nil
@@ -1663,7 +1656,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, pgx.ErrNoRows
+					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning}, nil
@@ -1680,9 +1673,6 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "follow up after completion",
 			},
 			setupDeps: func(deps *testDeps) {
-				deps.threadStore.activeCountFn = func(context.Context, uuid.UUID, uuid.UUID) (int, error) {
-					return models.MaxRunningThreadsPerSession, nil
-				}
 				// Resume path hits the same per-session running cap as the
 				// idle claim path. The service should treat this identically
 				// to the idle-cap case: queue the message against the still-
@@ -1690,7 +1680,7 @@ func TestService_SendMessage(t *testing.T) {
 				// the resume happy path lives in
 				// TestService_SendMessage_ResumesAcrossAllResumableStatuses.
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, pgx.ErrNoRows
+					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 3, Status: models.ThreadStatusCompleted}, nil
@@ -1741,7 +1731,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "session mismatch aborts without compensation",
+			name: "session mismatch reverts to idle",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -1756,7 +1746,7 @@ func TestService_SendMessage(t *testing.T) {
 			expectErr: ErrThreadNotFound,
 		},
 		{
-			name: "message creation failure aborts without compensation",
+			name: "message creation failure reverts to idle",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -1785,7 +1775,7 @@ func TestService_SendMessage(t *testing.T) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1}, nil
 				}
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{}, pgx.ErrNoRows
+					return models.Session{}, fmt.Errorf("session already running")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
@@ -1796,7 +1786,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "enqueue failure aborts without compensation",
+			name: "enqueue failure reverts to idle",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -1830,7 +1820,7 @@ func TestService_SendMessage(t *testing.T) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1}, nil
 				}
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{}, pgx.ErrNoRows
+					return models.Session{}, fmt.Errorf("session already running")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
@@ -1872,7 +1862,7 @@ func TestService_SendMessage(t *testing.T) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 4, Status: models.ThreadStatusRunning}, nil
 				}
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{}, pgx.ErrNoRows
+					return models.Session{}, fmt.Errorf("no rows in result set")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted, CurrentTurn: 4}, nil
@@ -1910,18 +1900,24 @@ func TestService_SendMessage(t *testing.T) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning}, nil
 				}
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{}, pgx.ErrNoRows
+					return models.Session{}, fmt.Errorf("no rows")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted}, nil
 				}
 				deps.sessionStore.claimForResumeFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{}, pgx.ErrNoRows
+					return models.Session{}, fmt.Errorf("no rows")
 				}
-				deps.threadStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, _ models.ThreadStatus) error {
-					t.Fatal("a failed atomic parent claim must not compensate the rolled-back thread claim")
+				revertedThread := false
+				deps.threadStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status models.ThreadStatus) error {
+					if status == models.ThreadStatusIdle {
+						revertedThread = true
+					}
 					return nil
 				}
+				t.Cleanup(func() {
+					require.True(t, revertedThread, "thread must be reverted to idle when neither claim succeeds")
+				})
 			},
 			expectErr: ErrSessionNotResumable,
 		},
@@ -1942,7 +1938,7 @@ func TestService_SendMessage(t *testing.T) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, Status: models.ThreadStatusRunning}, nil
 				}
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{}, pgx.ErrNoRows
+					return models.Session{}, fmt.Errorf("no rows")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted, SandboxState: models.SandboxStateDestroyed}, nil
@@ -1964,7 +1960,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 			setupDeps: func(deps *testDeps) {
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-					return models.SessionThread{}, pgx.ErrNoRows
+					return models.SessionThread{}, fmt.Errorf("no rows")
 				}
 				readCount := 0
 				deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
@@ -2005,7 +2001,7 @@ func TestService_SendMessage(t *testing.T) {
 			},
 		},
 		{
-			name: "message create failure after resume aborts without compensation",
+			name: "preserves original status on message create failure after resume",
 			input: SendMessageInput{
 				SessionID: sessionID,
 				OrgID:     orgID,
@@ -2013,14 +2009,16 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
-				// The resumed parent and message share one transaction.
-				// Rollback must preserve the completed parent without
-				// issuing an independent compensating status write.
+				// After ClaimForResume moves a 'completed' session to
+				// 'running' and the message create then fails, the revert
+				// must put the session back to 'completed' (not 'idle').
+				// Otherwise a transient DB error would silently re-arm a
+				// finished session as a new task in the user's idle list.
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
 				}
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{}, pgx.ErrNoRows
+					return models.Session{}, fmt.Errorf("no rows")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusCompleted}, nil
@@ -2031,10 +2029,16 @@ func TestService_SendMessage(t *testing.T) {
 				deps.messageStore.createFn = func(_ context.Context, _ *models.SessionMessage) error {
 					return fmt.Errorf("db error")
 				}
-				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, _ models.SessionStatus) error {
-					t.Fatal("a failed atomic send must not compensate the resumed parent with a status write")
+				revertedToOriginal := false
+				deps.sessionStore.updateStatusFn = func(_ context.Context, _, _ uuid.UUID, status models.SessionStatus) error {
+					if status == models.SessionStatusCompleted {
+						revertedToOriginal = true
+					}
 					return nil
 				}
+				t.Cleanup(func() {
+					require.True(t, revertedToOriginal, "session must revert to its pre-claim status (completed) on send failure, not idle")
+				})
 			},
 		},
 		{
@@ -2046,14 +2050,16 @@ func TestService_SendMessage(t *testing.T) {
 				Message:   "hi",
 			},
 			setupDeps: func(deps *testDeps) {
-				// The sibling owns the running parent. A message failure
-				// rolls back this send's thread claim without issuing any
-				// independent parent or thread status mutation.
+				// Sibling-running case: ClaimIdle fails, GetByID returns
+				// running, no claim is taken. If message create then fails,
+				// reverting the session to idle would yank the running
+				// sibling — so the revert must skip the session entirely
+				// and only put the thread back to idle.
 				deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 					return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
 				}
 				deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-					return models.Session{}, pgx.ErrNoRows
+					return models.Session{}, fmt.Errorf("no rows")
 				}
 				deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 					return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning}, nil
@@ -2085,12 +2091,6 @@ func TestService_SendMessage(t *testing.T) {
 			tt.setupDeps(deps)
 
 			result, err := svc.SendMessage(context.Background(), tt.input)
-			if err != nil {
-				require.Empty(t, deps.sessionStore.updateCalls, "a failed atomic send must not issue a compensating parent status write")
-				for _, event := range svc.send.Transactions.(*legacyGuardFixtureRunner).events {
-					require.NotContains(t, event, "effect", "an aborted atomic send must publish no effects")
-				}
-			}
 			if tt.expectErr != nil {
 				require.ErrorIs(t, err, tt.expectErr, "should return expected error")
 				require.Nil(t, result, "should not return a result on error")
@@ -2100,8 +2100,8 @@ func TestService_SendMessage(t *testing.T) {
 				return
 			}
 			switch tt.name {
-			case "message creation failure aborts without compensation",
-				"message create failure after resume aborts without compensation",
+			case "message creation failure reverts to idle",
+				"preserves original status on message create failure after resume",
 				"skips session revert when sibling tab is mid-turn":
 				require.Error(t, err, "should return error on message creation failure")
 				return
@@ -2321,7 +2321,7 @@ func TestService_SendMessage_RunningThreadEnqueuesLiveInboxDelivery(t *testing.T
 	svc.SetThreadInboxStore(deps.inboxStore)
 
 	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-		return models.SessionThread{}, pgx.ErrNoRows
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
 	}
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{
@@ -2406,16 +2406,12 @@ func TestService_SendMessage_QueueOnlyWithTxCommitsInboxAndPendingCountAtomicall
 	mock.ExpectExec(`UPDATE session_threads[\s\S]*pending_message_count = pending_message_count \+ 1[\s\S]*archived_at IS NULL`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	jobID := uuid.New()
-	mock.ExpectQuery("INSERT INTO jobs").
-		WithArgs(sendPersistenceAnyArgs(6)...).
-		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(jobID))
 	mock.ExpectCommit()
 
 	svc, deps := newTestService(t)
 	svc.SetThreadInboxStore(deps.inboxStore, mock)
 	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-		return models.SessionThread{}, pgx.ErrNoRows
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
 	}
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{
@@ -2426,8 +2422,12 @@ func TestService_SendMessage_QueueOnlyWithTxCommitsInboxAndPendingCountAtomicall
 			Status:      models.ThreadStatusRunning,
 		}, nil
 	}
-	persistence := svc.send.Legacy.(*legacyHookPersistence)
-	persistence.sqlEnqueue = true
+	var enqueued []db.EnqueueOpts
+	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, gotOrgID uuid.UUID, opts db.EnqueueOpts) (uuid.UUID, error) {
+		require.Equal(t, orgID, gotOrgID, "live delivery enqueue should stay org scoped")
+		enqueued = append(enqueued, opts)
+		return uuid.New(), nil
+	}
 
 	result, err := svc.SendMessage(context.Background(), SendMessageInput{
 		SessionID: sessionID,
@@ -2452,15 +2452,12 @@ func TestService_SendMessage_QueueOnlyWithTxCommitsInboxAndPendingCountAtomicall
 		Payload:   map[string]string{"org_id": orgID.String(), "session_id": sessionID.String(), "thread_id": threadID.String()},
 		Priority:  7,
 		DedupeKey: &expectedDedupeKey,
-	}}, persistence.enqueues, "queue-only send should enqueue the exact live-delivery job inside the atomic mutation attempt")
-	runner := svc.send.Transactions.(*legacyGuardFixtureRunner)
-	require.Equal(t, []string{"begin", "commit", "begin", "claim-thread-false", "message", "inbox", "pending", "enqueue", "commit", "job-effect"}, runner.events, "message, inbox, pending count and job SQL must finish before a single commit and postcommit effects")
-	require.Equal(t, []uuid.UUID{jobID}, runner.jobIDs, "the committed database job must be notified after the whole unit")
+	}}, enqueued, "queue-only send should enqueue the exact live-delivery job after the transaction commits")
 	require.Empty(t, deps.threadStore.pendingCalls, "queue-only transactional admission should not call the non-transactional thread store increment path")
 	require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
 }
 
-func TestService_SendMessage_LiveInboxDeliveryEnqueueFailureRejectsAtomicSend(t *testing.T) {
+func TestService_SendMessage_LiveInboxDeliveryEnqueueFailureDoesNotRejectAcceptedMessage(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -2472,7 +2469,7 @@ func TestService_SendMessage_LiveInboxDeliveryEnqueueFailureRejectsAtomicSend(t 
 	svc.SetThreadInboxStore(deps.inboxStore)
 
 	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-		return models.SessionThread{}, pgx.ErrNoRows
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
 	}
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{
@@ -2488,9 +2485,8 @@ func TestService_SendMessage_LiveInboxDeliveryEnqueueFailureRejectsAtomicSend(t 
 		msg.CreatedAt = time.Now()
 		return nil
 	}
-	failure := errors.New("synthetic database enqueue failure")
 	deps.jobStore.enqueueWithOptsFn = func(_ context.Context, _ uuid.UUID, _ db.EnqueueOpts) (uuid.UUID, error) {
-		return uuid.Nil, failure
+		return uuid.Nil, fmt.Errorf("queue unavailable")
 	}
 
 	result, err := svc.SendMessage(context.Background(), SendMessageInput{
@@ -2498,15 +2494,13 @@ func TestService_SendMessage_LiveInboxDeliveryEnqueueFailureRejectsAtomicSend(t 
 		OrgID:     orgID,
 		ThreadID:  threadID,
 		UserID:    &userID,
-		Message:   "queue this atomically",
+		Message:   "this should still be accepted",
 	})
 
-	require.ErrorIs(t, err, failure, "database enqueue failure must reject the whole send")
-	require.Nil(t, result, "an aborted send must not return a captured message or inbox entry")
-	runner := svc.send.Transactions.(*legacyGuardFixtureRunner)
-	require.Equal(t, []string{"begin", "commit", "begin", "claim-thread-false", "message", "inbox", "pending", "enqueue", "rollback"}, runner.events, "all database mutations must precede one known rollback and publish no effects")
-	require.Empty(t, runner.jobIDs, "a failed database enqueue must not notify a job")
-	require.Empty(t, deps.sessionStore.updateCalls, "the atomic rollback must not trigger compensation")
+	require.NoError(t, err, "SendMessage should not reject already-committed input when live-delivery notification fails")
+	require.NotNil(t, result, "SendMessage should return the accepted message despite notification failure")
+	require.Len(t, deps.inboxStore.appendCalls, 1, "SendMessage should keep durable inbox state for later recovery")
+	require.Equal(t, []uuid.UUID{threadID}, deps.threadStore.pendingCalls, "SendMessage should still reflect queued input in pending counts")
 }
 
 func TestService_SendMessage_QueueOnlyWithTxReturnsNotFoundWhenArchiveWinsAtInboxAdmission(t *testing.T) {
@@ -2539,7 +2533,7 @@ func TestService_SendMessage_QueueOnlyWithTxReturnsNotFoundWhenArchiveWinsAtInbo
 	svc, deps := newTestService(t)
 	svc.SetThreadInboxStore(deps.inboxStore, mock)
 	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-		return models.SessionThread{}, pgx.ErrNoRows
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
 	}
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{
@@ -2604,7 +2598,7 @@ func TestService_SendMessage_QueueOnlyWithTxRollsBackOnPendingCountWriteFailure(
 	svc, deps := newTestService(t)
 	svc.SetThreadInboxStore(deps.inboxStore, mock)
 	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-		return models.SessionThread{}, pgx.ErrNoRows
+		return models.SessionThread{}, fmt.Errorf("thread is already running")
 	}
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{
@@ -2820,7 +2814,7 @@ func TestService_SendMessage_AnswersThreadHumanInputRequest(t *testing.T) {
 
 	svc, deps := newTestService(t)
 	deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-		return models.SessionThread{}, pgx.ErrNoRows
+		return models.SessionThread{}, fmt.Errorf("no rows")
 	}
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusAwaitingInput}, nil
@@ -2829,7 +2823,7 @@ func TestService_SendMessage_AnswersThreadHumanInputRequest(t *testing.T) {
 		return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusRunning}, nil
 	}
 	deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-		return models.Session{}, pgx.ErrNoRows
+		return models.Session{}, fmt.Errorf("no rows")
 	}
 	deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 		return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusAwaitingInput, CurrentTurn: 5}, nil
@@ -2867,7 +2861,7 @@ func TestService_SendMessage_AnswersThreadHumanInputRequest(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet(), "all transaction expectations should be met")
 }
 
-func TestService_SendMessage_QueueAtCapacity_DoesNotAnswerHumanInputRequest(t *testing.T) {
+func TestService_QueueMessageWaitingForSlot_DoesNotAnswerHumanInputRequest(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -2875,9 +2869,6 @@ func TestService_SendMessage_QueueAtCapacity_DoesNotAnswerHumanInputRequest(t *t
 	threadID := uuid.New()
 	userID := uuid.New()
 	svc, deps := newTestService(t)
-	deps.threadStore.claimIdleFn = func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.SessionThread, error) {
-		return models.SessionThread{}, db.ErrThreadRunningLimitReached
-	}
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{
 			ID:          threadID,
@@ -2894,7 +2885,7 @@ func TestService_SendMessage_QueueAtCapacity_DoesNotAnswerHumanInputRequest(t *t
 	}
 	svc.SetHumanInputRequestStore(db.NewSessionHumanInputRequestStore(nil))
 
-	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+	result, err := svc.queueMessageWaitingForSlot(context.Background(), SendMessageInput{
 		SessionID: sessionID,
 		OrgID:     orgID,
 		ThreadID:  threadID,
@@ -2909,7 +2900,7 @@ func TestService_SendMessage_QueueAtCapacity_DoesNotAnswerHumanInputRequest(t *t
 	require.Equal(t, []uuid.UUID{threadID}, deps.threadStore.pendingCalls, "queue path should increment pending message count")
 }
 
-func TestService_SendMessage_QueueAtCapacity_ReturnsNotFoundWhenArchiveWinsBeforeInboxAppend(t *testing.T) {
+func TestService_QueueMessageWaitingForSlot_ReturnsNotFoundWhenArchiveWinsBeforeInboxAppend(t *testing.T) {
 	t.Parallel()
 
 	orgID := uuid.New()
@@ -2917,9 +2908,6 @@ func TestService_SendMessage_QueueAtCapacity_ReturnsNotFoundWhenArchiveWinsBefor
 	threadID := uuid.New()
 
 	svc, deps := newTestService(t)
-	deps.threadStore.claimIdleFn = func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.SessionThread, error) {
-		return models.SessionThread{}, db.ErrThreadRunningLimitReached
-	}
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{
 			ID:          threadID,
@@ -2938,7 +2926,7 @@ func TestService_SendMessage_QueueAtCapacity_ReturnsNotFoundWhenArchiveWinsBefor
 	}
 	svc.SetThreadInboxStore(deps.inboxStore)
 
-	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+	result, err := svc.queueMessageWaitingForSlot(context.Background(), SendMessageInput{
 		SessionID: sessionID,
 		OrgID:     orgID,
 		ThreadID:  threadID,
@@ -2950,7 +2938,7 @@ func TestService_SendMessage_QueueAtCapacity_ReturnsNotFoundWhenArchiveWinsBefor
 	require.Empty(t, deps.threadStore.pendingCalls, "archive-win queue admission should not increment the queued counter after append rejection")
 }
 
-func TestService_SendMessage_QueueAtCapacity_RollsBackTxWhenArchiveWinsBeforePendingIncrement(t *testing.T) {
+func TestService_QueueMessageWaitingForSlot_RollsBackTxWhenArchiveWinsBeforePendingIncrement(t *testing.T) {
 	t.Parallel()
 
 	mock, err := pgxmock.NewPool()
@@ -2988,9 +2976,6 @@ func TestService_SendMessage_QueueAtCapacity_RollsBackTxWhenArchiveWinsBeforePen
 	mock.ExpectRollback()
 
 	svc, deps := newTestService(t)
-	deps.threadStore.claimIdleFn = func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (models.SessionThread, error) {
-		return models.SessionThread{}, db.ErrThreadRunningLimitReached
-	}
 	deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 		return models.SessionThread{
 			ID:          threadID,
@@ -3002,7 +2987,7 @@ func TestService_SendMessage_QueueAtCapacity_RollsBackTxWhenArchiveWinsBeforePen
 	}
 	svc.SetThreadInboxStore(deps.inboxStore, mock)
 
-	result, err := svc.SendMessage(context.Background(), SendMessageInput{
+	result, err := svc.queueMessageWaitingForSlot(context.Background(), SendMessageInput{
 		SessionID: sessionID,
 		OrgID:     orgID,
 		ThreadID:  threadID,
@@ -3037,7 +3022,7 @@ func TestService_SendMessage_ResumesAcrossAllResumableStatuses(t *testing.T) {
 
 			svc, deps := newTestService(t)
 			deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-				return models.SessionThread{}, pgx.ErrNoRows
+				return models.SessionThread{}, fmt.Errorf("no rows")
 			}
 			deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 				return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 5, Status: status}, nil
@@ -3075,9 +3060,12 @@ func TestService_SendMessage_ResumesAcrossAllResumableStatuses(t *testing.T) {
 }
 
 // TestService_SendMessage_ResolvesReviewComments exercises the
-// comment-resolution call order through the supplied atomic transaction.
-// The fixture runner owns the mock transaction before the callback; real
-// PostgreSQL tests separately prove rollback and durability for the whole send.
+// comment-resolution path end-to-end against a real tx, using pgxmock as
+// the txStarter and a real db.SessionReviewCommentStore so the SQL
+// invariants (INSERT message → SELECT comments → UPDATE comments → COMMIT)
+// run inside a single transaction. Mirrors the session-level
+// TestSessionHandler_SendMessage_ResolvesReviewComments coverage so the
+// thread send path inherits the same atomic guarantee.
 func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 	t.Parallel()
 
@@ -3096,13 +3084,10 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
 			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
 		}
-		// Comment resolution uses the session returned by the successful
-		// claim: CurrentTurn=2 must become the exact update argument.
-		deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
+		// GetByID is called once per resolution path to pick up CurrentTurn
+		// for the resolution pass; CurrentTurn=2 → resolved_by_pass=2.
+		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 			return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, CurrentTurn: 2}, nil
-		}
-		deps.sessionStore.getByIDFn = func(context.Context, uuid.UUID, uuid.UUID) (models.Session, error) {
-			return models.Session{}, errors.New("comment resolution must use the claimed session snapshot without a separate lookup")
 		}
 	}
 
@@ -3151,7 +3136,7 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		resolvedAt := now
 		resolvedByPass := 2
 		mock.ExpectQuery("UPDATE session_review_comments SET resolved = true").
-			WithArgs(2, []uuid.UUID{commentID}, orgID, sessionID).
+			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnRows(
 				pgxmock.NewRows(commentRowColumns).
 					AddRow(commentID, sessionID, orgID, commentUserID, "main.go",
@@ -3222,7 +3207,7 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 1, Status: models.ThreadStatusRunning}, nil
 		}
 		deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-			return models.Session{}, pgx.ErrNoRows
+			return models.Session{}, fmt.Errorf("no rows")
 		}
 		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 			return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusAwaitingInput, CurrentTurn: 2}, nil
@@ -3280,11 +3265,8 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		mock.ExpectCommit()
 
 		svc, deps := newTestService(t)
-		deps.threadStore.activeCountFn = func(context.Context, uuid.UUID, uuid.UUID) (int, error) {
-			return models.MaxRunningThreadsPerSession + 1, nil
-		}
 		deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-			return models.SessionThread{}, pgx.ErrNoRows
+			return models.SessionThread{}, fmt.Errorf("no rows")
 		}
 		deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 4, Status: models.ThreadStatusAwaitingInput}, nil
@@ -3344,7 +3326,7 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 		ownerNodeID := "worker-1"
 		containerID := "sandbox-live"
 		deps.threadStore.claimIdleFn = func(_ context.Context, _, _, _ uuid.UUID) (models.SessionThread, error) {
-			return models.SessionThread{}, pgx.ErrNoRows
+			return models.SessionThread{}, fmt.Errorf("no rows")
 		}
 		deps.threadStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.SessionThread, error) {
 			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusAwaitingInput}, nil
@@ -3353,7 +3335,7 @@ func TestService_SendMessage_ResolvesReviewComments(t *testing.T) {
 			return models.SessionThread{ID: threadID, SessionID: sessionID, OrgID: orgID, CurrentTurn: 2, Status: models.ThreadStatusRunning}, nil
 		}
 		deps.sessionStore.claimIdleFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
-			return models.Session{}, pgx.ErrNoRows
+			return models.Session{}, fmt.Errorf("session already running")
 		}
 		deps.sessionStore.getByIDFn = func(_ context.Context, _, _ uuid.UUID) (models.Session, error) {
 			return models.Session{ID: sessionID, OrgID: orgID, Status: models.SessionStatusRunning, ContainerID: &containerID, WorkerNodeID: &ownerNodeID}, nil
@@ -3859,8 +3841,7 @@ func (m *mockTranscriptStore) ListThreadWindow(ctx context.Context, orgID, threa
 func newServiceWithTranscript(t *testing.T, ts TranscriptStore) (*Service, *mockThreadStore) {
 	t.Helper()
 	threadStore := &mockThreadStore{}
-	svc, err := NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, requiredTestSendDependencies(t), zerolog.Nop())
-	require.NoError(t, err, "construct the transcript fixture with required send dependencies")
+	svc := NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, zerolog.Nop())
 	if ts != nil {
 		svc.SetTranscriptStore(ts)
 	}
@@ -3972,9 +3953,7 @@ func TestService_GetTranscriptWindow(t *testing.T) {
 			var threadStore *mockThreadStore
 			if tt.useNilStore {
 				threadStore = &mockThreadStore{}
-				var err error
-				svc, err = NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, requiredTestSendDependencies(t), zerolog.Nop())
-				require.NoError(t, err, "construct the missing-transcript fixture with required send dependencies")
+				svc = NewService(threadStore, &mockSessionStore{}, &mockMessageStore{}, &mockLogStore{}, &mockJobStore{}, zerolog.Nop())
 				// intentionally do NOT call svc.SetTranscriptStore
 			} else {
 				svc, threadStore = newServiceWithTranscript(t, ts)
