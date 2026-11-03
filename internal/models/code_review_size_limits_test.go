@@ -67,6 +67,70 @@ func TestEvaluateCodeReviewIndependentSizeLimits(t *testing.T) {
 	}
 }
 
+func TestEvaluateCodeReviewSizeLimitExemptAuthors(t *testing.T) {
+	t.Parallel()
+	overLimits := []CodeReviewRiskReason{
+		{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 2, Limit: 1},
+		{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 101, Limit: 100},
+		{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: 901, Limit: 900},
+	}
+	tests := []struct {
+		name     string
+		exempt   []string
+		author   string
+		expected []CodeReviewRiskReason
+	}{
+		{"no exemptions", nil, "anya", overLimits},
+		{"exempt author", []string{"anya"}, "anya", nil},
+		{"login matches case-insensitively", []string{"Anya"}, "anya", nil},
+		{"other author", []string{"anya"}, "ben", overLimits},
+		{"unknown author", []string{"anya"}, "", overLimits},
+		{"author class entries are literal logins", []string{"all", "human"}, "anya", overLimits},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			policy := DefaultCodeReviewPolicyConfig()
+			policy.RiskPolicy.MaxFilesChanged, policy.RiskPolicy.MaxAdditions, policy.RiskPolicy.MaxDeletions = 1, 100, 900
+			policy.RiskPolicy.SizeLimitExemptAuthors = tt.exempt
+			risk := EvaluateCodeReviewRisk(policy, CodeReviewRiskInput{FilesChanged: 2, Additions: 101, Deletions: 901, Author: tt.author, AuthorClass: "human", DescriptionPassed: true})
+			require.Equal(t, tt.expected, risk.ReasonDetails, "only an exact exempt login should skip the size limits")
+			require.Equal(t, len(tt.expected) == 0, risk.Acceptable, "skipping the size limits should leave the diff eligible for approval")
+		})
+	}
+}
+
+func TestCodeReviewSizeLimitExemptAuthorKeepsOtherSafeguards(t *testing.T) {
+	t.Parallel()
+	policy := DefaultCodeReviewPolicyConfig()
+	policy.RiskPolicy.MaxAdditions = 100
+	policy.RiskPolicy.SizeLimitExemptAuthors = []string{"anya"}
+	risk := EvaluateCodeReviewRisk(policy, CodeReviewRiskInput{Additions: 101, Author: "anya", AuthorClass: "human", DescriptionPassed: true, BlockingFindings: 1})
+	require.Equal(t, []CodeReviewRiskReason{{Code: CodeReviewRiskReasonBlockingFindings}}, risk.ReasonDetails, "an exempt author should still be blocked by other safeguards")
+	require.False(t, risk.Acceptable, "blocking findings should still prevent approval")
+}
+
+func TestResolveCodeReviewPolicyConfigRetainsSizeLimitExemptAuthors(t *testing.T) {
+	t.Parallel()
+	resolved := ResolveCodeReviewPolicyConfig(&CodeReviewPolicyConfig{RiskPolicy: CodeReviewRiskPolicy{SizeLimitExemptAuthors: []string{"anya"}}})
+	require.Equal(t, []string{"anya"}, resolved.RiskPolicy.SizeLimitExemptAuthors, "resolving a saved policy should keep its exempt authors")
+	require.Empty(t, DefaultCodeReviewPolicyConfig().RiskPolicy.SizeLimitExemptAuthors, "no author should be exempt by default")
+}
+
+func TestApplyCodeReviewPolicyMergePatchSizeLimitExemptAuthors(t *testing.T) {
+	t.Parallel()
+	patched, err := ApplyCodeReviewPolicyMergePatch(DefaultCodeReviewPolicyConfig(), json.RawMessage(`{"risk_policy":{"size_limit_exempt_authors":["anya"]}}`))
+	require.NoError(t, err, "adding an exempt author should be a valid patch")
+	require.Equal(t, []string{"anya"}, patched.RiskPolicy.SizeLimitExemptAuthors, "the patch should save the exempt author")
+
+	cleared, err := ApplyCodeReviewPolicyMergePatch(patched, json.RawMessage(`{"risk_policy":{"size_limit_exempt_authors":[]}}`))
+	require.NoError(t, err, "removing the last exempt author should be a valid patch")
+	require.Empty(t, cleared.RiskPolicy.SizeLimitExemptAuthors, "an empty list should remove every exemption")
+
+	_, err = ApplyCodeReviewPolicyMergePatch(patched, json.RawMessage(`{"risk_policy":{"size_limit_exempt_authors":["*"]}}`))
+	require.Error(t, err, "a wildcard exemption should be rejected on save")
+}
+
 func TestCodeReviewSizeLimitValidation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

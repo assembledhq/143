@@ -491,6 +491,12 @@ func TestCodeReviewPolicyConfigValidate(t *testing.T) {
 		{name: "rejects malformed eligible author team", mutate: func(c *CodeReviewPolicyConfig) {
 			c.RiskPolicy.EligibleAuthorTeams = []string{"acme/platform/reviewers"}
 		}, expectErr: true},
+		{name: "accepts size limit exempt user and bot logins", mutate: func(c *CodeReviewPolicyConfig) {
+			c.RiskPolicy.SizeLimitExemptAuthors = []string{"anya", "build-helper[bot]"}
+		}},
+		{name: "rejects size limit exempt wildcard", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SizeLimitExemptAuthors = []string{"*"} }, expectErr: true},
+		{name: "rejects size limit exempt login prefix", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SizeLimitExemptAuthors = []string{"login:anya"} }, expectErr: true},
+		{name: "rejects blank size limit exempt author", mutate: func(c *CodeReviewPolicyConfig) { c.RiskPolicy.SizeLimitExemptAuthors = []string{" "} }, expectErr: true},
 		{name: "rejects no reviewers", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = nil }, expectErr: true},
 		{name: "rejects unsupported reviewer", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.Reviewers = []AgentType{AgentTypePMAgent} }, expectErr: true},
 		{name: "rejects reviewer model count mismatch", mutate: func(c *CodeReviewPolicyConfig) { c.AgentRoster.ReviewerModels = []string{DefaultCodexModel} }, expectErr: true},

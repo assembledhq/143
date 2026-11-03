@@ -2645,6 +2645,21 @@ function AdvancedPolicySettings({
                           })
                         }
                       />
+                      <div className="lg:col-span-2">
+                        <PolicyStringListEditor
+                          label="Size limit exempt authors"
+                          description="PRs by these exact GitHub logins skip the files, additions, and deletions limits. Every other safeguard still applies."
+                          placeholder="GitHub user or bot login"
+                          emptyText="No authors are exempt from size limits."
+                          serverValue={config?.risk_policy.size_limit_exempt_authors ?? []}
+                          disabled={!config}
+                          onCommitItems={(items) =>
+                            commitPolicy((next) => {
+                              next.risk_policy.size_limit_exempt_authors = items;
+                            })
+                          }
+                        />
+                      </div>
                     </div>
                   </FineTuningSection>
 

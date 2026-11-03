@@ -4003,6 +4003,26 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByText("build-helper[bot]")).not.toBeInTheDocument();
   });
 
+  it("saves size limit exempt authors", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+    await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
+
+    expect(screen.getByText("No authors are exempt from size limits.")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "Size limit exempt authors" }), "anya{Enter}");
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy,
+      size_limit_exempt_authors: ["anya"],
+    }));
+
+    await user.click(await screen.findByRole("button", { name: "Remove anya" }));
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy,
+      size_limit_exempt_authors: [],
+    }));
+  });
+
   it("saves independent additions and deletions limits", async () => {
     const user = userEvent.setup();
     const state = mockCodeReviewBaseHandlers();
