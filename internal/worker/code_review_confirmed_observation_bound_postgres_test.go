@@ -34,7 +34,12 @@ func confirmedObservationBoundCapture(t *testing.T, ctx context.Context, pool *p
 	require.NoError(t, err, "read the actual unstaged predecessor before legally capturing a large comparison digest")
 	f.assessment, f.job.OutputKey = uuid.New(), "synthetic-bound-successor:"+uuid.NewString()
 	f.manifest.InputDigest = strings.Repeat("d", confirmedObservationBoundBytes+1)
-	manifest, payload := fullAssessmentDispatchJSON(t, f.manifest), fullAssessmentDispatchJSON(t, f.job)
+	// These consumers bound the stored comparison digest and receipt, not the
+	// input manifest. Keep that independent JSON object small so real Create's
+	// manifest canonicalization does not dominate the bounded fixture setup.
+	// The oversized digest still enters through Create and matches the receipt.
+	manifest := json.RawMessage(`{"synthetic":"oversized comparison digest"}`)
+	payload := fullAssessmentDispatchJSON(t, f.job)
 	capture := models.CodeReviewAssessmentCapture{ID: f.assessment, OrgID: f.job.OrgID,
 		RepositoryID: previous.RepositoryID, PullRequestID: previous.PullRequestID, PolicyID: previous.PolicyID,
 		SessionID: previous.SessionID, Generation: previous.Generation + 1, PreviousAssessmentID: &previous.ID,
