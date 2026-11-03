@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
@@ -24,6 +25,9 @@ type migrateLogger struct{ verbose bool }
 const (
 	prReadinessDirtyMigrationVersion        = 267
 	codeReviewDisputesDirtyMigrationVersion = 281
+	// Bump only after reviewing compatibility with the inactive runtime.
+	// TestRuntimeRevertSchemaPinMatchesMigrations catches a newer source schema.
+	inactiveRuntimeSchemaVersion = 393
 )
 
 type dirtyMigrationRepairer interface {
@@ -94,11 +98,11 @@ func main() {
 		}
 		verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer verifyCancel()
-		if err := verifyInactiveRuntimeSchema(verifyCtx, dbURL, 393); err != nil {
+		if err := verifyInactiveRuntimeSchema(verifyCtx, dbURL, inactiveRuntimeSchemaVersion); err != nil {
 			fmt.Fprintf(os.Stderr, "Inactive runtime post-migration check refused: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("Migrations applied successfully; inactive runtime compatibility verified.")
+		fmt.Println("Migrations applied successfully.")
 	case "down":
 		if err := m.Down(); err != nil && err != migrate.ErrNoChange {
 			logMigrationError("down", m, err)
@@ -133,6 +137,32 @@ func main() {
 	}
 }
 
+// The source revert keeps the migration history but removes participating
+// writers. Refuse active or retained protocol state before upgrading an existing
+// full lifecycle schema. Fresh/older installations are checked after migration,
+// before the deployment can start the application. Activation must remain
+// excluded throughout deployment; this read-only snapshot is not a global lock.
+// Keep this helper in main.go: Make and CI invoke that file directly.
+func verifyRuntimeRevertBeforeUp(ctx context.Context, ledger interface{ Version() (uint, bool, error) }, rawURL string) error {
+	version, dirty, err := ledger.Version()
+	if errors.Is(err, migrate.ErrNilVersion) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read migration ledger: %w", err)
+	}
+	if dirty {
+		return errors.New("dirty migration ledger")
+	}
+	if version > inactiveRuntimeSchemaVersion {
+		return fmt.Errorf("inactive runtime supports schema through %d only", inactiveRuntimeSchemaVersion)
+	}
+	if version < 392 {
+		return nil
+	}
+	return verifyInactiveRuntimeSchema(ctx, rawURL, version)
+}
+
 // verifyInactiveBinaryRollback is deliberately limited to the unactivated 0a
 // schema. A later schema or any retained protocol history needs a new review.
 // Operators must exclude activation and other deployments throughout rollback;
@@ -154,6 +184,14 @@ func verifyInactiveRuntimeSchema(ctx context.Context, rawURL string, expectedSch
 		return errors.New("invalid rollback database connection settings")
 	}
 	cfg := poolConfig.ConnConfig
+	// golang-migrate consumes x-* options itself, and lib/pq consumes its
+	// fallback name locally. Neither is a PostgreSQL server setting. Preserve
+	// the actual database target and all other options for the inspector.
+	for key := range cfg.RuntimeParams {
+		if strings.HasPrefix(key, "x-") || key == "fallback_application_name" {
+			delete(cfg.RuntimeParams, key)
+		}
+	}
 	cfg.RuntimeParams["application_name"] = "143:inactive-rollback-preflight"
 	cfg.RuntimeParams["default_transaction_read_only"] = "on"
 	cfg.RuntimeParams["statement_timeout"] = "30000"

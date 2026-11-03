@@ -3,11 +3,45 @@ package main
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRuntimeRevertSchemaPinMatchesMigrations(t *testing.T) {
+	t.Parallel()
+	files, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.up.sql"))
+	require.NoError(t, err, "read the migration source used by deployments")
+	require.NotEmpty(t, files, "the schema compatibility pin requires a nonempty migration source")
+	var highest uint64
+	for _, file := range files {
+		prefix, _, ok := strings.Cut(filepath.Base(file), "_")
+		require.True(t, ok, "each migration must have a numeric version prefix")
+		version, err := strconv.ParseUint(prefix, 10, 64)
+		require.NoError(t, err, "parse the source migration version")
+		highest = max(highest, version)
+	}
+	require.Equal(t, uint64(inactiveRuntimeSchemaVersion), highest, "new migrations require a compatibility review and an explicit update of the inactive runtime schema pin")
+}
+
+func TestRuntimeRevertSingleFileEntrypoint(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	// Make and CI invoke this single file. Package-only compilation would miss
+	// references to helpers that are accidentally moved into sibling files.
+	command := exec.CommandContext(ctx, "go", "run", "main.go", "verify-inactive-rollback", "393")
+	output, err := command.CombinedOutput()
+	require.Error(t, err, "the pinned binary rollback command must reject schema 393 without connecting")
+	require.NoError(t, ctx.Err(), "the entry point must compile and return within the test budget")
+	require.Equal(t, "inactive binary rollback supports only explicitly pinned schema 392\nexit status 1\n", string(output), "the single-file entry point must reach its argument guard rather than fail compilation")
+}
 
 func TestRuntimeRevertMigrationPreflight(t *testing.T) {
 	t.Parallel()

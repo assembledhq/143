@@ -177,7 +177,7 @@ func TestCallerSendIntentMigrationCommandPostgres(t *testing.T) {
 	if err := build.Run(); err != nil {
 		t.Fatal("build the actual migration executable without publishing its captured output")
 	}
-	workingDirectory := callerIntentMigrationCommandSource(t)
+	workingDirectory := callerIntentMigrationCommandSourceThrough(t, 393)
 	migration, conn := newContentMigrationPostgres(t, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -185,6 +185,14 @@ func TestCallerSendIntentMigrationCommandPostgres(t *testing.T) {
 	f := seedCallerIntentMigrationLegacy(t, ctx, conn)
 	beforeLegacy := callerIntentMigrationRows(t, ctx, conn, f.org, true)
 	conn = runCallerIntentMigrationCommand(t, ctx, binary, workingDirectory, "up", false, conn)
+	requireCallerIntentMigrationLedger(t, ctx, migration, conn, 393, false)
+	conn = runCallerIntentMigrationCommand(t, ctx, binary, workingDirectory, "up", false, conn)
+	requireCallerIntentMigrationLedger(t, ctx, migration, conn, 393, false)
+	// The runtime command only accepts a complete supported schema. After
+	// proving upgrade and no-change acceptance, pin this isolated fixture to
+	// the historical down guard being tested; production never runs this step.
+	require.NoError(t, migration.Migrate(389), "prepare the isolated historical rollback boundary after a supported command upgrade")
+	workingDirectory = callerIntentMigrationCommandSource(t)
 	requireCallerIntentMigrationLedger(t, ctx, migration, conn, 389, false)
 	requireCallerIntentMigrationCatalog(t, ctx, conn, 389, true, true, true)
 	require.True(t, callerIntentMigrationRowsEqual(beforeLegacy, callerIntentMigrationRows(t, ctx, conn, f.org, true)), "the actual binary up must preserve the existing legacy graph")
