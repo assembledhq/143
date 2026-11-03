@@ -180,6 +180,7 @@ func (s PublicationPolicySource) ValidateReview() error {
 }
 
 type SessionPublication struct {
+	ReviewStartID           *uuid.UUID                        `db:"review_start_id" json:"-"`
 	ID                      uuid.UUID                         `db:"id" json:"id"`
 	OrgID                   uuid.UUID                         `db:"org_id" json:"org_id"`
 	SessionID               uuid.UUID                         `db:"session_id" json:"session_id"`

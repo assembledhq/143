@@ -61,7 +61,9 @@ func TestServiceCancelThreadTurn(t *testing.T) {
 				return true, nil
 			}}
 			deps.threadStore.getByIDFn = func(context.Context, uuid.UUID, uuid.UUID) (models.SessionThread, error) { return current, nil }
-			service = NewService(store, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, service.logger)
+			var err error
+			service, err = NewService(store, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, requiredTestSendDependencies(t), service.logger)
+			require.NoError(t, err, "construct the exact-turn cancellation fixture with required send dependencies")
 			canceller := &exactTurnCanceller{mockCanceller: &mockCanceller{}, local: tt.local}
 			service.SetCanceller(canceller)
 			var queued []db.EnqueueOpts

@@ -20,10 +20,13 @@ func TestFleetWorkerCanaryWaitsForRetirementAndStopsOnFailure(t *testing.T) {
 		inheritedDetach string
 		expected        []string
 		wantError       bool
+		rollback        bool
 	}{
 		{name: "all workers complete despite inherited detach", inheritedDetach: "1", expected: []string{"app:started", "app:complete", "worker-a:started", "worker-a:retired", "worker-b:started", "worker-b:retired", "worker-c:started", "worker-c:retired"}},
 		{name: "canary failure holds every later worker", failedHost: "worker-a", inheritedDetach: "0", expected: []string{"app:started", "app:complete", "worker-a:started", "worker-a:failed"}, wantError: true},
 		{name: "later failure holds remaining workers", failedHost: "worker-b", expected: []string{"app:started", "app:complete", "worker-a:started", "worker-a:retired", "worker-b:started", "worker-b:failed"}, wantError: true},
+		{name: "binary rollback preserves serial retirement", rollback: true, expected: []string{"app:started", "app:complete", "worker-a:started", "worker-a:retired", "worker-b:started", "worker-b:retired", "worker-c:started", "worker-c:retired"}},
+		{name: "binary rollback app refusal holds workers", rollback: true, failedHost: "app-host", expected: []string{"app:started", "app:failed"}, wantError: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -39,7 +42,12 @@ func TestFleetWorkerCanaryWaitsForRetirementAndStopsOnFailure(t *testing.T) {
 set -euo pipefail
 role="$1"; host="$2"; state="${FAKE_STATE:?}"
 if [ "$role" = app ]; then
-  printf 'app:started\napp:complete\n' >> "$state/trace"
+  printf 'app:started\n' >> "$state/trace"
+  if [ "$host" = "${FAKE_FAILED_HOST:-}" ]; then
+    printf 'app:failed\n' >> "$state/trace"
+    exit 44
+  fi
+  printf 'app:complete\n' >> "$state/trace"
   exit 0
 fi
 [ "$role" = worker ] || exit 41
@@ -62,6 +70,9 @@ printf '%s:retired\n' "$host" >> "$state/trace"
 			defer cancel()
 			command := exec.CommandContext(ctx, "bash", path, "synthetic-key", "synthetic-tag", "app,worker")
 			command.Env = append(os.Environ(), "FLEET_HOSTS=app:app-host,worker:worker-a,worker:worker-b,worker:worker-c", "DEPLOY_JOBS=4", "FAKE_STATE="+state, "FAKE_FAILED_HOST="+tt.failedHost, "WORKER_DEPLOY_DETACH="+tt.inheritedDetach)
+			if tt.rollback {
+				command.Env = append(command.Env, "BINARY_ROLLBACK_GUARD_TAG=2222222222222222222222222222222222222222", "BINARY_ROLLBACK_SCHEMA_VERSION=392")
+			}
 			output, err := command.CombinedOutput()
 			if tt.wantError {
 				require.Error(t, err, "an incomplete host must hold the remainder of the fleet: %s", output)

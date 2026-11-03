@@ -29,6 +29,7 @@ import (
 )
 
 type runCodeReviewPayload struct {
+	originalPayload         json.RawMessage                     `json:"-"`
 	OrgID                   uuid.UUID                           `json:"org_id"`
 	SessionID               uuid.UUID                           `json:"session_id"`
 	MetadataID              uuid.UUID                           `json:"metadata_id"`
@@ -132,6 +133,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if err := json.Unmarshal(payload, &job); err != nil {
 			return fmt.Errorf("decode code review job payload: %w", err)
 		}
+		job.originalPayload = append(json.RawMessage(nil), payload...)
 		if job.OrgID == uuid.Nil || job.SessionID == uuid.Nil {
 			return fmt.Errorf("org_id and session_id are required")
 		}
@@ -176,8 +178,17 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}()
 		registerCodeReviewDeadLetterReconciliation(ctx, stores, services, logger, job)
 		registerCodeReviewRetryScheduledWait(ctx, stores.CodeReviews, logger, job)
+		hasRetainedReviewers, err := reconcileRetainedCodeReviewDispatches(ctx, stores, logger, job, codeReviewObserveRetainedOnly)
+		if err != nil {
+			return fmt.Errorf("reconcile retained reviewer commands: %w", err)
+		}
 		if recovered, err := recoverStagedFullAssessment(reviewLog.WithContext(ctx), stores, services, job); recovered || err != nil {
-			if errors.Is(err, errCodeReviewPublicationSuperseded) || errors.Is(err, errCodeReviewPublicationPaused) || errors.Is(err, errCodeReviewParentCancelled) {
+			if errors.Is(err, errCodeReviewPublicationPaused) {
+				reviewLog.Warn().Str("reason", "operator_reconciliation_required").
+					Msg("code review publication paused for operator reconciliation")
+				return nil
+			}
+			if errors.Is(err, errCodeReviewPublicationSuperseded) || errors.Is(err, errCodeReviewParentCancelled) {
 				return nil
 			}
 			if err == nil {
@@ -248,6 +259,11 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if settledEnded {
 			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 			return nil
+		}
+		if hasRetainedReviewers && !resumeSaved {
+			if _, err := reconcileRetainedCodeReviewDispatches(ctx, stores, logger, job, codeReviewAllowPendingDispatch); err != nil {
+				return fmt.Errorf("reconcile eligible pending reviewer commands: %w", err)
+			}
 		}
 		// Reviewer and orchestrator waits requeue this job every few seconds. Use
 		// their durable result/thread state as a phase checkpoint so polling does
@@ -627,7 +643,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		completionStage := observability.BeginStage(true, reviewLog, "review_completion_persist")
 		var completionErr error
 		if assessment != nil {
-			completionErr = completeFullAssessment(ctx, stores.ThreadSendTx, *assessment, completion, assessmentOutcome, assessmentCoverage, body)
+			completionErr = completeFullAssessment(ctx, stores.ThreadSendDependencies.Transactions, *assessment, completion, assessmentOutcome, assessmentCoverage, body)
 		} else {
 			_, completionErr = stores.CodeReviews.CompleteReview(ctx, job.OrgID, completion)
 		}
@@ -757,9 +773,34 @@ func cancelActiveCodeReviewThreads(ctx context.Context, stores *Stores, services
 	if stores == nil || stores.SessionThreads == nil || stores.Sessions == nil || stores.Jobs == nil {
 		return nil
 	}
-	threads := newWorkerThreadService(stores, logger)
+	threads, err := newWorkerThreadService(stores, logger)
+	if err != nil {
+		return err
+	}
 	if services != nil && services.Orchestrator != nil {
 		threads.SetCanceller(codeReviewThreadCanceller{orchestrator: services.Orchestrator})
+	}
+	_, protected, err := codeReviewReviewerDispatchStates(ctx, stores, job)
+	if err != nil {
+		return err
+	}
+	if len(protected) > 0 {
+		// Metadata has already been terminalized by the caller. New claims
+		// cannot win; retain every independently unresolved lane and use the
+		// ordinary targeted cancellation path for the remaining active lanes.
+		lanes, err := stores.SessionThreads.ListBySession(ctx, job.OrgID, job.SessionID)
+		if err != nil {
+			return err
+		}
+		for _, lane := range lanes {
+			if protected[lane.ID] || !codeReviewThreadStillRunning(lane.Status) {
+				continue
+			}
+			if _, err := threads.CancelThread(ctx, job.OrgID, job.SessionID, lane.ID); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	cancelled, err := threads.CancelActiveThreads(ctx, job.OrgID, []uuid.UUID{job.SessionID})
 	if err != nil {
@@ -774,6 +815,18 @@ func cancelActiveCodeReviewThreads(ctx context.Context, stores *Stores, services
 }
 
 func failCodeReviewWithoutReviewerOutput(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, results []models.CodeReviewAgentResult) error {
+	// Both zero-output callers remain behind the unanswered product-policy
+	// gate. Do not silently select generic failed/retry guidance for an
+	// unresolved admission. S1 remains disabled until that policy is adopted.
+	states, _, err := codeReviewReviewerDispatchStates(ctx, stores, job)
+	if err != nil {
+		return err
+	}
+	for _, state := range states {
+		if codeReviewDispatchUnresolved(state) {
+			return fmt.Errorf("zero reviewer output with unresolved dispatch requires an approved outcome policy")
+		}
+	}
 	reason := codeReviewNoUsableReviewerOutputReason(results)
 	if _, err := stores.CodeReviews.FailReviewWithStatus(ctx, job.OrgID, db.FailCodeReviewParams{
 		SessionID: job.SessionID,
@@ -871,6 +924,10 @@ func reconcileCodeReviewSessionJobFailure(ctx context.Context, stores *Stores, j
 }
 
 func reconcileCodeReviewSessionFailureWithDetails(ctx context.Context, stores *Stores, job runCodeReviewPayload, reason, category string, nextSteps []string) error {
+	return reconcileCodeReviewSessionFailureWithRetry(ctx, stores, job, reason, category, nextSteps, true)
+}
+
+func reconcileCodeReviewSessionFailureWithRetry(ctx context.Context, stores *Stores, job runCodeReviewPayload, reason, category string, nextSteps []string, retryable bool) error {
 	if stores == nil || stores.Sessions == nil {
 		return nil
 	}
@@ -889,7 +946,7 @@ func reconcileCodeReviewSessionFailureWithDetails(ctx context.Context, stores *S
 			return fmt.Errorf("reconcile code review parent session to failed: %w", err)
 		}
 	}
-	if err := stores.Sessions.UpdateFailure(ctx, job.OrgID, job.SessionID, reason, category, nextSteps, true); err != nil {
+	if err := stores.Sessions.UpdateFailure(ctx, job.OrgID, job.SessionID, reason, category, nextSteps, retryable); err != nil {
 		return fmt.Errorf("record code review parent session failure details: %w", err)
 	}
 	return nil
@@ -901,25 +958,38 @@ func registerCodeReviewDeadLetterReconciliation(ctx context.Context, stores *Sto
 			logger.Warn().Err(deadLetterErr).Str("session_id", job.SessionID.String()).Msg("ended review recovery remains fenced after controller exhaustion")
 			return
 		}
+		outcome, scope, committed := committedCodeReviewTerminalOutcome(hookCtx, job.OrgID, models.JobTypeRunCodeReview)
+		if !committed || !codeReviewTerminalScopeMatchesFull(scope, job) {
+			logger.Warn().Str("session_id", job.SessionID.String()).Msg("skipping code review cleanup without its exact committed retirement outcome")
+			return
+		}
+		if outcome.CompletionRecoveryPending() {
+			// A confirmed provider result is not a failed review. The atomic
+			// retirement preserved its active domain state and cancelled only
+			// original pending intents. Existing receipt recovery owns actual
+			// completion and its normal success effects; do not settle its
+			// reservation, fail the parent or publish failure/retry guidance.
+			return
+		}
 		reason := codeReviewDeadLetterReason(deadLetterErr)
-		if stores != nil && stores.CodeReviews != nil {
-			code, message, retryable := codeReviewTerminalFailureStatus(deadLetterErr)
-			if _, err := stores.CodeReviews.FailReviewWithStatus(hookCtx, job.OrgID, db.FailCodeReviewParams{
-				SessionID: job.SessionID,
-				Reason:    reason,
-				Code:      code,
-				Message:   message,
-				Retryable: retryable,
-			}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				logger.Warn().Err(err).
-					Str("session_id", job.SessionID.String()).
-					Msg("failed to reconcile dead-lettered code review metadata")
+		if stores != nil {
+			// A guarded exact-owner cleanup is still needed when the assessment
+			// was already terminal before retirement. Events remain change-only.
+			if err := db.SettleCodeReviewTerminalAssessment(hookCtx, job.OrgID, stores.ThreadSendDependencies.Transactions, outcome); err != nil {
+				logger.Warn().Err(err).Str("assessment_id", scope.AssessmentID.String()).Msg("failed to settle dead-lettered full assessment")
 			}
 		}
-		if err := failFullAssessmentForSession(hookCtx, stores, job, reason); err != nil {
-			logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("failed to reconcile dead-lettered full assessment")
+		if stores != nil && stores.CodeReviews != nil {
+			stores.CodeReviews.PublishCodeReviewTerminalOutcome(hookCtx, job.OrgID, outcome)
 		}
-		if err := reconcileCodeReviewSessionJobFailure(hookCtx, stores, job, reason); err != nil {
+		var err error
+		if outcome.UnresolvedDispatch() {
+			err = reconcileCodeReviewSessionFailureWithRetry(hookCtx, stores, job, reason,
+				"code_reviewer_dispatch_unresolved", []string{"A reviewer dispatch is still unconfirmed. The original intent is retained for reconciliation; do not resend it."}, false)
+		} else {
+			err = reconcileCodeReviewSessionJobFailure(hookCtx, stores, job, reason)
+		}
+		if err != nil {
 			logger.Warn().Err(err).
 				Str("session_id", job.SessionID.String()).
 				Msg("failed to reconcile dead-lettered code review session")
@@ -1173,7 +1243,7 @@ func supersedeCodeReviewForCapturedIdentity(ctx context.Context, stores *Stores,
 	}
 	pr, snapshot := captured.PullRequest, captured.Snapshot
 	queued, err := replacement.QueueCapturedIdentityReplacement(ctx, codereviewsvc.ReviewChangedInput{
-		OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, PriorSessionID: job.SessionID,
+		OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, PriorSessionID: job.SessionID, PriorMetadataID: &metadata.ID,
 		GitHubRepo: pr.GitHubRepo, GitHubPRNumber: snapshot.Number, GitHubPRURL: snapshot.HTMLURL,
 		PullRequestTitle: snapshot.Title, PullRequestAuthor: snapshot.AuthorLogin, BaseSHA: snapshot.BaseSHA, HeadSHA: snapshot.HeadSHA,
 		FromFork: snapshot.FromFork, RequestedReviewerLogin: job.RequestedReviewerLogin, RequestedTeamSlug: job.RequestedTeamSlug,
@@ -1187,6 +1257,14 @@ func supersedeCodeReviewForCapturedIdentity(ctx context.Context, stores *Stores,
 	}
 	if !queued.Processed {
 		return fmt.Errorf("captured-identity replacement was not durably accepted: %s", queued.IgnoredReason)
+	}
+	if queued.IgnoredReason == codereviewsvc.CaptureIdentitySourceCompletionPendingReason {
+		// Confirmed original publication is recovery ownership, not a replacement
+		// handoff. Never stale its source or publish terminal effects here.
+		if queued.SessionID != job.SessionID || queued.MetadataID != metadata.ID {
+			return fmt.Errorf("confirmed captured-identity source scope does not match")
+		}
+		return nil
 	}
 	if queued.IgnoredReason == "source_review_retired" {
 		source, err := stores.CodeReviews.GetBySessionID(ctx, job.OrgID, job.SessionID)
@@ -1287,20 +1365,21 @@ func codeReviewCanRunReviewerThreads(stores *Stores) bool {
 }
 
 type codeReviewReviewerStructuredResult struct {
-	ReviewerKey       string  `json:"reviewer_key"`
-	ReviewerIndex     int     `json:"reviewer_index"`
-	ThreadID          string  `json:"thread_id"`
-	PromptRecordKey   string  `json:"prompt_record_key,omitempty"`
-	FindingCount      int     `json:"finding_count,omitempty"`
-	CostCents         float64 `json:"cost_cents,omitempty"`
-	RawRecordKey      string  `json:"raw_record_key,omitempty"`
-	NativeReview      bool    `json:"native_review,omitempty"`
-	ReadOnly          bool    `json:"read_only,omitempty"`
-	ReadOnlyViolation bool    `json:"read_only_violation,omitempty"`
-	Reverted          bool    `json:"reverted,omitempty"`
-	Unavailable       bool    `json:"unavailable,omitempty"`
-	Error             string  `json:"error,omitempty"`
-	CompletedAt       string  `json:"completed_at,omitempty"`
+	ReviewerKey        string  `json:"reviewer_key"`
+	ReviewerIndex      int     `json:"reviewer_index"`
+	ThreadID           string  `json:"thread_id"`
+	PromptRecordKey    string  `json:"prompt_record_key,omitempty"`
+	FindingCount       int     `json:"finding_count,omitempty"`
+	CostCents          float64 `json:"cost_cents,omitempty"`
+	RawRecordKey       string  `json:"raw_record_key,omitempty"`
+	NativeReview       bool    `json:"native_review,omitempty"`
+	ReadOnly           bool    `json:"read_only,omitempty"`
+	ReadOnlyViolation  bool    `json:"read_only_violation,omitempty"`
+	Reverted           bool    `json:"reverted,omitempty"`
+	Unavailable        bool    `json:"unavailable,omitempty"`
+	DispatchUnresolved bool    `json:"dispatch_unresolved,omitempty"`
+	Error              string  `json:"error,omitempty"`
+	CompletedAt        string  `json:"completed_at,omitempty"`
 }
 
 // MarshalJSON/UnmarshalJSON keep the pre-rename prompt and raw output keys
@@ -1398,6 +1477,11 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 	if err != nil {
 		return fmt.Errorf("list code review reviewer results: %w", err)
 	}
+	dispatchStates, _, err := codeReviewReviewerDispatchStates(ctx, stores, job)
+	if err != nil {
+		return err
+	}
+	results = annotateCodeReviewReviewerDispatches(results, dispatchStates)
 	existing := codeReviewReviewerResultsByKey(results)
 	cfg := policy.Config()
 	rootKey := codeReviewPromptRecordRoot(metadata, job)
@@ -1406,7 +1490,10 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			return fmt.Errorf("set code review prompt record key: %w", err)
 		}
 	}
-	threads := newWorkerThreadService(stores, logger)
+	threads, err := newWorkerThreadService(stores, logger)
+	if err != nil {
+		return err
+	}
 	fileScope := codeReviewChangedPaths(changedFiles)
 	timedOutBeforeStart := codeReviewReviewTimedOut(cfg, metadata)
 	selections, err := resolveCodeReviewReviewerAvailability(ctx, services, job.OrgID, cfg, results, timedOutBeforeStart)
@@ -1422,10 +1509,30 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		if _, ok := existing[key]; ok {
 			continue
 		}
+		owner, err := readCodeReviewReviewerOwner(ctx, stores.ThreadSendDependencies.Transactions, job, key)
+		if err != nil {
+			return fmt.Errorf("resolve original reviewer owner: %w", err)
+		}
+		if owner.Found {
+			if owner.Retained {
+				if err := dispatchRetainedCodeReviewReviewer(ctx, stores.ThreadSendDependencies.Transactions, threads, job, owner.Result.ID, codeReviewReviewDeadline(cfg, metadata)); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		retainedMode := owner.IntentsEnabled
 		if !selection.Available {
 			result := unavailableCodeReviewReviewerResult(job, idx, agentType, agentModel)
-			if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
+			result.ID = uuid.New()
+			committed, retained, err := prepareCodeReviewReviewerOwner(ctx, stores.ThreadSendDependencies.Transactions, job, key, result, threadsvc.CallerSendCommand{}, nil, false)
+			if err != nil {
 				return fmt.Errorf("create unavailable code review reviewer result: %w", err)
+			}
+			if retained {
+				if err := dispatchRetainedCodeReviewReviewer(ctx, stores.ThreadSendDependencies.Transactions, threads, job, committed.ID, codeReviewReviewDeadline(cfg, metadata)); err != nil {
+					return err
+				}
 			}
 			logger.Info().
 				Str("session_id", job.SessionID.String()).
@@ -1491,8 +1598,15 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		if err != nil {
 			if errors.Is(err, errCodeReviewFallbackCapacityExhausted) {
 				result := failedCodeReviewReviewerResult(job, idx, agentType, agentModel, models.CodeReviewAgentResultStatusFailed, codeReviewReviewerCapacityUnavailableMessage, false)
-				if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
+				result.ID = uuid.New()
+				committed, retained, err := prepareCodeReviewReviewerOwner(ctx, stores.ThreadSendDependencies.Transactions, job, key, result, threadsvc.CallerSendCommand{}, nil, false)
+				if err != nil {
 					return fmt.Errorf("record exhausted code review reviewer capacity: %w", err)
+				}
+				if retained {
+					if err := dispatchRetainedCodeReviewReviewer(ctx, stores.ThreadSendDependencies.Transactions, threads, job, committed.ID, codeReviewReviewDeadline(cfg, metadata)); err != nil {
+						return err
+					}
 				}
 				continue
 			}
@@ -1506,6 +1620,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			ReadOnly:        true,
 		})
 		result := &models.CodeReviewAgentResult{
+			ID:               uuid.New(),
 			OrgID:            job.OrgID,
 			SessionID:        job.SessionID,
 			AgentProvider:    string(agentType),
@@ -1514,9 +1629,33 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 			Status:           models.CodeReviewAgentResultStatusQueued,
 			StructuredResult: structured,
 		}
-		if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
-			return fmt.Errorf("create code review reviewer result: %w", err)
+		var command threadsvc.CallerSendCommand
+		var wake json.RawMessage
+		if retainedMode {
+			command, err = threadsvc.NewCallerSendCommand(threadsvc.CallerSendCodeReviewReviewerDispatch, result.ID, codeReviewAgentMessageInput(job, thread.ID, codeReviewReviewerMessage(agentType, promptText), codeReviewNativeReviewCommands(agentType, promptText), visualEvidence))
+			if err != nil {
+				return fmt.Errorf("freeze reviewer command: %w", err)
+			}
+			wake, err = freezeCodeReviewReviewerDispatchWake(job, job.originalPayload)
+			if err != nil {
+				return err
+			}
 		}
+		committed, retained, err := prepareCodeReviewReviewerOwner(ctx, stores.ThreadSendDependencies.Transactions, job, key, result, command, wake, retainedMode)
+		if err != nil {
+			return err
+		}
+		if retained {
+			if err := dispatchRetainedCodeReviewReviewer(ctx, stores.ThreadSendDependencies.Transactions, threads, job, committed.ID, codeReviewReviewDeadline(cfg, metadata)); err != nil {
+				return err
+			}
+			continue
+		}
+		// A different already-settled legacy owner is adopted, never resent.
+		if committed.ID != result.ID {
+			continue
+		}
+		*result = committed
 		if thread.Status != models.ThreadStatusIdle || thread.CurrentTurn > 0 {
 			continue
 		}
@@ -1602,15 +1741,33 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 	}
 	deadline := codeReviewReviewDeadline(policy.Config(), metadata)
 	timedOut := time.Now().After(deadline)
+	dispatchStates, _, err := codeReviewReviewerDispatchStates(ctx, stores, job)
+	if err != nil {
+		return err
+	}
 	changedPaths := codeReviewChangedPaths(changedFiles)
 	for _, result := range results {
 		if result.Role != models.CodeReviewAgentRoleReviewer || codeReviewReviewerResultTerminal(result.Status) {
 			continue
 		}
+		if codeReviewDispatchUnresolved(dispatchStates[result.ID]) {
+			if timedOut {
+				state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
+				if !ok {
+					return db.ErrReviewerDispatchInput
+				}
+				state.CompletedAt = deadline.UTC().Format(time.RFC3339)
+				raw := "Reviewer did not produce a completed contribution before the review deadline."
+				if err := closeCodeReviewReviewerDispatchDeadline(ctx, stores, job, result.ID, &raw, marshalCodeReviewReviewerStructuredResult(state), deadline); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		state, ok := parseCodeReviewReviewerStructuredResult(result.StructuredResult)
 		if !ok {
 			raw := "reviewer result has a malformed structured result"
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, result.StructuredResult); err != nil {
+			if _, err := updateCodeReviewReviewerOutcome(ctx, stores, job, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, result.StructuredResult, time.Time{}); err != nil {
 				return fmt.Errorf("mark malformed reviewer result failed: %w", err)
 			}
 			continue
@@ -1619,7 +1776,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			raw := "reviewer result is missing its thread id"
 			state.Error = raw
 			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
+			if _, err := updateCodeReviewReviewerOutcome(ctx, stores, job, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewReviewerStructuredResult(state), time.Time{}); err != nil {
 				return fmt.Errorf("mark malformed reviewer result failed: %w", err)
 			}
 			continue
@@ -1629,7 +1786,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			raw := "reviewer result has an invalid thread id: " + err.Error()
 			state.Error = raw
 			state.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
+			if _, err := updateCodeReviewReviewerOutcome(ctx, stores, job, result.ID, models.CodeReviewAgentResultStatusFailed, &raw, marshalCodeReviewReviewerStructuredResult(state), time.Time{}); err != nil {
 				return fmt.Errorf("mark invalid reviewer result failed: %w", err)
 			}
 			continue
@@ -1658,7 +1815,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 				}
 			}
 			state.CompletedAt = completedAt.Format(time.RFC3339)
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusTimedOut, &raw, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
+			if _, err := updateCodeReviewReviewerOutcome(ctx, stores, job, result.ID, models.CodeReviewAgentResultStatusTimedOut, &raw, marshalCodeReviewReviewerStructuredResult(state), deadline); err != nil {
 				return fmt.Errorf("mark reviewer timed out: %w", err)
 			}
 			continue
@@ -1699,7 +1856,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 				return err
 			}
 			state.RawRecordKey = rawRecordKey
-			if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
+			if _, err := updateCodeReviewReviewerOutcome(ctx, stores, job, result.ID, models.CodeReviewAgentResultStatusFailed, rawOutput, marshalCodeReviewReviewerStructuredResult(state), time.Time{}); err != nil {
 				return fmt.Errorf("mark reviewer failed: %w", err)
 			}
 			continue
@@ -1724,7 +1881,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 					return err
 				}
 				state.RawRecordKey = rawRecordKey
-				if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
+				if _, err := updateCodeReviewReviewerOutcome(ctx, stores, job, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewReviewerStructuredResult(state), time.Time{}); err != nil {
 					return fmt.Errorf("mark read-only-violating reviewer completed: %w", err)
 				}
 			}
@@ -1746,7 +1903,7 @@ func harvestCodeReviewReviewerResults(ctx context.Context, stores *Stores, servi
 			return err
 		}
 		state.RawRecordKey = rawRecordKey
-		if _, err := stores.CodeReviews.UpdateAgentResultOutcome(ctx, job.OrgID, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewReviewerStructuredResult(state)); err != nil {
+		if _, err := updateCodeReviewReviewerOutcome(ctx, stores, job, result.ID, models.CodeReviewAgentResultStatusCompleted, rawOutput, marshalCodeReviewReviewerStructuredResult(state), time.Time{}); err != nil {
 			return fmt.Errorf("mark reviewer completed: %w", err)
 		}
 		resultLog := codeReviewTimingLogger(ctx, logger, job)
@@ -1955,7 +2112,10 @@ func cancelCodeReviewThread(ctx context.Context, stores *Stores, logger zerolog.
 	if stores == nil || stores.SessionThreads == nil {
 		return models.SessionThread{}, fmt.Errorf("session thread store is required")
 	}
-	threads := newWorkerThreadService(stores, logger)
+	threads, err := newWorkerThreadService(stores, logger)
+	if err != nil {
+		return models.SessionThread{}, err
+	}
 	return threads.CancelThread(ctx, job.OrgID, job.SessionID, threadID)
 }
 
@@ -3210,7 +3370,10 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}); err != nil {
 		return err
 	}
-	threads := newWorkerThreadService(stores, logger)
+	threads, err := newWorkerThreadService(stores, logger)
+	if err != nil {
+		return err
+	}
 	// Legacy first synthesis uses Main. Assessment-enabled reviews use an
 	// explicit read-only synthesis thread; runtime fallbacks use separate
 	// threads because an agent's provider cannot be edited after its first turn.
@@ -3560,7 +3723,10 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis, visualEvidence)
 		}
 		if synthesisErr != nil {
-			threads := newWorkerThreadService(stores, logger)
+			threads, err := newWorkerThreadService(stores, logger)
+			if err != nil {
+				return err
+			}
 			repairHandled, repairStarted, repairErr := requestCodeReviewOrchestratorSynthesisRepair(
 				ctx,
 				stores,
@@ -3866,7 +4032,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	completionStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "review_completion_persist")
 	var completionErr error
 	if assessment != nil {
-		completionErr = completeFullAssessment(ctx, stores.ThreadSendTx, *assessment, completion, assessmentOutcome, false, body)
+		completionErr = completeFullAssessment(ctx, stores.ThreadSendDependencies.Transactions, *assessment, completion, assessmentOutcome, false, body)
 	} else {
 		_, completionErr = stores.CodeReviews.CompleteReview(ctx, job.OrgID, completion)
 	}
@@ -4991,7 +5157,11 @@ func codeReviewAgentSummaries(results []models.CodeReviewAgentResult, findings [
 				summaries = append(summaries, name+" failed")
 			}
 		case models.CodeReviewAgentResultStatusTimedOut:
-			summaries = append(summaries, name+" timed out")
+			if codeReviewReviewerRetainsDispatch(result) {
+				summaries = append(summaries, name+" contribution deadline reached; dispatch confirmation remains unresolved")
+			} else {
+				summaries = append(summaries, name+" timed out")
+			}
 		default:
 			summaries = append(summaries, name+" pending")
 		}

@@ -1377,6 +1377,46 @@ type metadataStub struct {
 	staleResults        []models.CodeReviewSessionMetadata
 	staleErr            error
 	events              *[]string
+	completionPending   map[uuid.UUID]bool
+	completionErr       error
+	completionErrors    map[uuid.UUID]error
+	completionCalls     []uuid.UUID
+	completionScopes    [][2]uuid.UUID
+	captureSource       *db.CodeReviewCaptureIdentitySource
+	captureSourceErr    error
+	captureSourceHints  []*uuid.UUID
+}
+
+func (s *metadataStub) HasConfirmedFullAssessmentCompletionPending(_ context.Context, orgID uuid.UUID, metadataID uuid.UUID) (bool, error) {
+	s.completionCalls = append(s.completionCalls, metadataID)
+	s.completionScopes = append(s.completionScopes, [2]uuid.UUID{orgID, metadataID})
+	if err := s.completionErrors[metadataID]; err != nil {
+		return false, err
+	}
+	return s.completionPending[metadataID], s.completionErr
+}
+
+func (s *metadataStub) ResolveCaptureIdentitySource(_ context.Context, orgID, sessionID, pullRequestID uuid.UUID, metadataID *uuid.UUID) (db.CodeReviewCaptureIdentitySource, error) {
+	var hint *uuid.UUID
+	if metadataID != nil {
+		copy := *metadataID
+		hint = &copy
+	}
+	s.captureSourceHints = append(s.captureSourceHints, hint)
+	if s.captureSourceErr != nil {
+		return db.CodeReviewCaptureIdentitySource{}, s.captureSourceErr
+	}
+	if s.captureSource != nil {
+		return *s.captureSource, nil
+	}
+	metadata := s.getBySession
+	if metadata.ID == uuid.Nil {
+		metadata = s.latest
+	}
+	if metadata.ID == uuid.Nil || metadata.SessionID != sessionID || metadata.PullRequestID != pullRequestID || (metadata.OrgID != uuid.Nil && metadata.OrgID != orgID) || (metadataID != nil && metadata.ID != *metadataID) {
+		return db.CodeReviewCaptureIdentitySource{}, pgx.ErrNoRows
+	}
+	return db.CodeReviewCaptureIdentitySource{MetadataID: metadata.ID, OrgID: orgID, SessionID: sessionID, PullRequestID: pullRequestID, Status: metadata.Status, TriggerSource: metadata.TriggerSource}, nil
 }
 
 func (s *metadataStub) CreateSessionMetadata(_ context.Context, metadata *models.CodeReviewSessionMetadata) error {

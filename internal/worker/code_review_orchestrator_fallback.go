@@ -217,7 +217,7 @@ func codeReviewAgentThreadResultStates(results []models.CodeReviewAgentResult) m
 			continue
 		}
 		state := states[threadID]
-		if codeReviewReviewerResultTerminal(result.Status) {
+		if codeReviewReviewerResultTerminal(result.Status) && !codeReviewReviewerRetainsDispatch(result) {
 			state.terminal = true
 		} else {
 			state.nonTerminal = true

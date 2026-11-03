@@ -67,6 +67,10 @@ should_deploy_role() {
 }
 
 validate_requested_roles
+if [ -n "${BINARY_ROLLBACK_GUARD_TAG:-}${BINARY_ROLLBACK_SCHEMA_VERSION:-}" ] && [ "$REQUESTED_ROLES" != app,worker ]; then
+  echo "ERROR: binary rollback requires the app,worker fleet barrier; stateful roles are excluded." >&2
+  exit 1
+fi
 if ! [[ "$DEPLOY_JOBS" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: DEPLOY_JOBS must be a positive integer, got '$DEPLOY_JOBS'." >&2
   exit 1

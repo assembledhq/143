@@ -149,7 +149,9 @@ func TestService_CancelThread(t *testing.T) {
 			// Replace the threadStore with a wrapper that also tracks
 			// MarkCancelRequested calls. We rebuild the service so the
 			// service holds the wrapped reference.
-			svc = NewService(tracker, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, svc.logger)
+			var err error
+			svc, err = NewService(tracker, deps.sessionStore, deps.messageStore, deps.logStore, deps.jobStore, requiredTestSendDependencies(t), svc.logger)
+			require.NoError(t, err, "construct the cancellation fixture with required send dependencies")
 			canceller := &mockCanceller{}
 			svc.SetCanceller(canceller)
 			tt.setup(deps, tracker, canceller)

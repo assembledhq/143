@@ -96,6 +96,7 @@ type schedulerLock interface {
 }
 
 type Scheduler struct {
+	callerSendWakes interface{ RepairMissingWakes(context.Context) error }
 	reviewSchedules interface{ RepairMissingWakes(context.Context) error }
 	lock            schedulerLock
 	jobs            schedulerJobStore
@@ -291,6 +292,11 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	if s.reviewSchedules != nil {
 		if err := s.reviewSchedules.RepairMissingWakes(ctx); err != nil {
 			s.logger.Warn().Err(err).Msg("repair missing code review schedule wakes")
+		}
+	}
+	if s.callerSendWakes != nil {
+		if err := s.callerSendWakes.RepairMissingWakes(ctx); err != nil {
+			s.logger.Warn().Err(err).Msg("repair missing retained caller send wakes")
 		}
 	}
 	orgIDs, err := s.integrations.ListOrgsWithActiveIntegrations(ctx)
@@ -760,4 +766,9 @@ func (s *Scheduler) scheduleAutomationRuns(ctx context.Context, now time.Time) {
 // SetCodeReviewScheduleReconciler enables bounded repair of pending review wakes.
 func (s *Scheduler) SetCodeReviewScheduleReconciler(reconciler interface{ RepairMissingWakes(context.Context) error }) {
 	s.reviewSchedules = reconciler
+}
+
+// SetCallerSendWakeReconciler supplies integration-independent durable repair.
+func (s *Scheduler) SetCallerSendWakeReconciler(reconciler interface{ RepairMissingWakes(context.Context) error }) {
+	s.callerSendWakes = reconciler
 }

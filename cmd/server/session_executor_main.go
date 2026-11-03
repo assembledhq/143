@@ -187,7 +187,14 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 	// Code review lifecycle fanout so reviews run by the executor refresh the
 	// live code reviews list. nil-safe when redisClient is unavailable.
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
-	codeReviewStore := db.NewCodeReviewStore(pool)
+	codeReviewTransactions, err := db.NewThreadSendTransactions(pool)
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor code review terminal transactions: %w", err)
+	}
+	codeReviewStore, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, codeReviewTransactions)
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor code review terminal store: %w", err)
+	}
 	codeReviewStore.SetJobStore(jobStore)
 	codeReviewStore.SetStreams(codeReviewStreams)
 	codeReviewStore.SetLogger(logger)
@@ -256,7 +263,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
 	threadCancelRegistry := agent.NewThreadCancelRegistry(logger)
-	services := buildServices(
+	services, err := buildServices(
 		cfg,
 		pool,
 		logger,
@@ -290,6 +297,9 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		sessionStreams,
 		fileReader,
 	)
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor services: %w", err)
+	}
 	if services == nil {
 		return nil, shutdown, fmt.Errorf("worker services unavailable")
 	}
@@ -306,12 +316,19 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		},
 	)
 	codeReviewLifecycle.SetReviewStatusCommentJobs(jobStore)
-	threadSvc := threadservice.NewService(sessionThreadStore, sessionStore, sessionMessageStore, sessionLogStore, jobStore, logger)
+	threadSendDependencies, err := threadservice.NewSendDependencies(pool, sessionStore, sessionThreadStore, jobStore)
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor thread send dependencies: %w", err)
+	}
+	threadSvc, err := threadservice.NewService(sessionThreadStore, sessionStore, sessionMessageStore, sessionLogStore, jobStore, threadSendDependencies, logger)
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor thread service: %w", err)
+	}
 	threadSvc.SetCanceller(threadCancelRegistry)
 	codeReviewLifecycle.SetThreadCanceller(threadSvc)
 	services.CodeReviewLifecycle = codeReviewLifecycle
 
-	stores := buildSessionExecutorStores(sessionExecutorStoreDeps{
+	stores, err := buildSessionExecutorStores(sessionExecutorStoreDeps{
 		Pool:                pool,
 		Issues:              issueStore,
 		Sessions:            sessionStore,
@@ -332,6 +349,9 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		PullRequests:        pullRequestStore,
 		CodeReviews:         codeReviewStore,
 	})
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor stores: %w", err)
+	}
 	if services.LinearAgentDeps != nil {
 		services.LinearAgentDeps.Stores = stores
 	}
@@ -380,7 +400,7 @@ type sessionExecutorStoreDeps struct {
 	CodeReviews         *db.CodeReviewStore
 }
 
-func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
+func buildSessionExecutorStores(deps sessionExecutorStoreDeps) (*worker.Stores, error) {
 	pool := deps.Pool
 	if deps.Issues == nil {
 		deps.Issues = db.NewIssueStore(pool)
@@ -433,68 +453,76 @@ func buildSessionExecutorStores(deps sessionExecutorStoreDeps) *worker.Stores {
 	if deps.PullRequests == nil {
 		deps.PullRequests = db.NewPullRequestStore(pool)
 	}
+	threadSendDependencies, err := threadservice.NewSendDependencies(pool, deps.Sessions, deps.SessionThreads, deps.Jobs)
+	if err != nil {
+		return nil, fmt.Errorf("construct session executor store thread send dependencies: %w", err)
+	}
 	if deps.CodeReviews == nil {
-		deps.CodeReviews = db.NewCodeReviewStore(pool)
+		deps.CodeReviews, err = db.NewCodeReviewStoreWithTerminalTransactions(pool, threadSendDependencies.Transactions)
+		if err != nil {
+			return nil, fmt.Errorf("construct session executor fallback code review terminal store: %w", err)
+		}
 	}
 	deps.CodeReviews.SetJobStore(deps.Jobs)
 	codeReviewRecheckStore := db.NewCodeReviewRecheckStore(pool)
 	codeReviewRecheckStore.SetJobStore(deps.Jobs)
 	return &worker.Stores{
-		Issues:                deps.Issues,
-		Sessions:              deps.Sessions,
-		SessionChangesets:     db.NewSessionChangesetStore(pool),
-		SessionPublications:   db.NewSessionPublicationStore(pool),
-		SessionPRIntents:      db.NewSessionPRIntentStore(pool),
-		TeamReviewRequests:    db.NewTeamReviewRequestStore(pool),
-		Jobs:                  deps.Jobs,
-		Integrations:          deps.Integrations,
-		Memberships:           db.NewOrganizationMembershipStore(pool),
-		Webhooks:              db.NewWebhookDeliveryStore(pool),
-		PriorityScores:        deps.PriorityScores,
-		ComplexityEstimates:   deps.ComplexityEstimates,
-		Projects:              deps.Projects,
-		ProjectTasks:          deps.ProjectTasks,
-		Credentials:           deps.Credentials,
-		AuditLogs:             db.NewAuditLogStore(pool),
-		Organizations:         deps.Organizations,
-		Users:                 db.NewUserStore(pool),
-		SessionLogs:           deps.SessionLogs,
-		EvalTasks:             db.NewEvalTaskStore(pool),
-		EvalRuns:              db.NewEvalRunStore(pool),
-		EvalBatches:           db.NewEvalBatchStore(pool),
-		EvalBootstraps:        deps.EvalBootstraps,
-		EvalReleaseGates:      db.NewEvalReleaseGateStore(pool),
-		Repositories:          deps.Repositories,
-		GitHubInstallations:   db.NewGitHubInstallationStore(pool),
-		SessionMessages:       deps.SessionMessages,
-		IssueSnapshots:        db.NewSessionTurnIssueSnapshotStore(pool),
-		SessionThreads:        deps.SessionThreads,
-		ThreadInbox:           db.NewThreadInboxStore(pool),
-		ThreadSendTx:          pool,
-		HumanInputRequests:    db.NewSessionHumanInputRequestStore(pool),
-		ThreadFileEvents:      db.NewSessionThreadFileEventStore(pool),
-		SandboxHolders:        db.NewSessionSandboxHolderStore(pool),
-		Automations:           db.NewAutomationStore(pool),
-		AutomationRuns:        deps.AutomationRuns,
-		ReviewLoops:           db.NewSessionReviewLoopStore(pool),
-		CodeReviews:           deps.CodeReviews,
-		CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool),
-		CodeReviewRechecks:    codeReviewRecheckStore,
-		SessionIssueLinks:     db.NewSessionIssueLinkStore(pool),
-		Previews:              db.NewPreviewStore(pool),
-		PullRequests:          deps.PullRequests,
-		PullRequestFeedback:   db.NewPullRequestFeedbackStore(pool),
-		SlackInstallations:    db.NewSlackInstallationStore(pool),
-		SlackOrgSelections:    db.NewSlackOrgSelectionStore(pool),
-		SlackBotSettings:      db.NewSlackBotSettingsStore(pool),
-		SlackUserLinks:        db.NewSlackUserLinkStore(pool),
-		LinearUserLinks:       db.NewLinearUserLinkStore(pool),
-		ExternalUserLinks:     db.NewExternalUserLinkStore(pool),
-		ExternalSuggestions:   db.NewExternalUserLinkSuggestionStore(pool),
-		SlackChannels:         db.NewSlackChannelSettingsStore(pool),
-		SlackSessionLinks:     db.NewSlackSessionLinkStore(pool),
-		SlackInboundEvents:    db.NewSlackInboundEventStore(pool),
-		SlackOutbound:         db.NewSlackOutboundMessageStore(pool),
-		SessionAttributions:   db.NewSessionAttributionStore(pool),
-	}
+		Issues:                 deps.Issues,
+		Sessions:               deps.Sessions,
+		SessionChangesets:      db.NewSessionChangesetStore(pool),
+		SessionPublications:    db.NewSessionPublicationStore(pool),
+		SessionPRIntents:       db.NewSessionPRIntentStore(pool),
+		TeamReviewRequests:     db.NewTeamReviewRequestStore(pool),
+		Jobs:                   deps.Jobs,
+		Integrations:           deps.Integrations,
+		Memberships:            db.NewOrganizationMembershipStore(pool),
+		Webhooks:               db.NewWebhookDeliveryStore(pool),
+		PriorityScores:         deps.PriorityScores,
+		ComplexityEstimates:    deps.ComplexityEstimates,
+		Projects:               deps.Projects,
+		ProjectTasks:           deps.ProjectTasks,
+		Credentials:            deps.Credentials,
+		AuditLogs:              db.NewAuditLogStore(pool),
+		Organizations:          deps.Organizations,
+		Users:                  db.NewUserStore(pool),
+		SessionLogs:            deps.SessionLogs,
+		EvalTasks:              db.NewEvalTaskStore(pool),
+		EvalRuns:               db.NewEvalRunStore(pool),
+		EvalBatches:            db.NewEvalBatchStore(pool),
+		EvalBootstraps:         deps.EvalBootstraps,
+		EvalReleaseGates:       db.NewEvalReleaseGateStore(pool),
+		Repositories:           deps.Repositories,
+		GitHubInstallations:    db.NewGitHubInstallationStore(pool),
+		SessionMessages:        deps.SessionMessages,
+		IssueSnapshots:         db.NewSessionTurnIssueSnapshotStore(pool),
+		SessionThreads:         deps.SessionThreads,
+		ThreadInbox:            db.NewThreadInboxStore(pool),
+		ThreadSendTx:           pool,
+		ThreadSendDependencies: threadSendDependencies,
+		HumanInputRequests:     db.NewSessionHumanInputRequestStore(pool),
+		ThreadFileEvents:       db.NewSessionThreadFileEventStore(pool),
+		SandboxHolders:         db.NewSessionSandboxHolderStore(pool),
+		Automations:            db.NewAutomationStore(pool),
+		AutomationRuns:         deps.AutomationRuns,
+		ReviewLoops:            db.NewSessionReviewLoopStore(pool),
+		CodeReviews:            deps.CodeReviews,
+		CodeReviewAssessments:  db.NewCodeReviewAssessmentStore(pool),
+		CodeReviewRechecks:     codeReviewRecheckStore,
+		SessionIssueLinks:      db.NewSessionIssueLinkStore(pool),
+		Previews:               db.NewPreviewStore(pool),
+		PullRequests:           deps.PullRequests,
+		PullRequestFeedback:    db.NewPullRequestFeedbackStore(pool),
+		SlackInstallations:     db.NewSlackInstallationStore(pool),
+		SlackOrgSelections:     db.NewSlackOrgSelectionStore(pool),
+		SlackBotSettings:       db.NewSlackBotSettingsStore(pool),
+		SlackUserLinks:         db.NewSlackUserLinkStore(pool),
+		LinearUserLinks:        db.NewLinearUserLinkStore(pool),
+		ExternalUserLinks:      db.NewExternalUserLinkStore(pool),
+		ExternalSuggestions:    db.NewExternalUserLinkSuggestionStore(pool),
+		SlackChannels:          db.NewSlackChannelSettingsStore(pool),
+		SlackSessionLinks:      db.NewSlackSessionLinkStore(pool),
+		SlackInboundEvents:     db.NewSlackInboundEventStore(pool),
+		SlackOutbound:          db.NewSlackOutboundMessageStore(pool),
+		SessionAttributions:    db.NewSessionAttributionStore(pool),
+	}, nil
 }

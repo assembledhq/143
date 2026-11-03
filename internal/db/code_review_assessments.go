@@ -516,7 +516,7 @@ func (s *CodeReviewAssessmentStore) Complete(ctx context.Context, orgID, id uuid
 	if err := validateAssessmentCompletion(result); err != nil {
 		return err
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE code_review_revision_assessments SET status='completed',completed_at=now() WHERE org_id=$1 AND id=$2 AND generation=$3 AND input_digest=$4 AND status IN ('running','publishing') AND publication_state IN ('confirmed','not_required') AND result_origin=$5 AND coverage_complete=$6 AND decision=$7 AND acceptable=$8 AND risk_reason_details IS NOT DISTINCT FROM $9::jsonb AND structured_outcome=$10::jsonb AND rendered_body=$11`, orgID, id, generation, inputDigest, result.ResultOrigin, result.CoverageComplete, result.Decision, result.Acceptable, result.RiskReasonDetails, result.StructuredOutcome, result.RenderedBody)
+	tag, err := s.db.Exec(ctx, `UPDATE code_review_revision_assessments SET status='completed',completed_at=now(),failure_detail=CASE WHEN failure_detail=$12 THEN NULL ELSE failure_detail END WHERE org_id=$1 AND id=$2 AND generation=$3 AND input_digest=$4 AND status IN ('running','publishing') AND publication_state IN ('confirmed','not_required') AND result_origin=$5 AND coverage_complete=$6 AND decision=$7 AND acceptable=$8 AND risk_reason_details IS NOT DISTINCT FROM $9::jsonb AND structured_outcome=$10::jsonb AND rendered_body=$11`, orgID, id, generation, inputDigest, result.ResultOrigin, result.CoverageComplete, result.Decision, result.Acceptable, result.RiskReasonDetails, result.StructuredOutcome, result.RenderedBody, CodeReviewConfirmedCompletionRecoveryPending)
 	if err != nil {
 		return err
 	}

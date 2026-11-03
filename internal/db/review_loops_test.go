@@ -48,7 +48,7 @@ func TestSessionReviewLoopStore_CreateLoopFiltersOrgOnRead(t *testing.T) {
 
 	rows := pgxmock.NewRows(reviewLoopColumnsForTest()).AddRow(
 		loop.ID, orgID, sessionID, nil, &threadID, "running", "manual", nil, nil, nil, "claude_code", 2, "minimal", 0,
-		false, nil, nil, nil, nil, nil, &startedBy, startedAt, nil,
+		false, nil, nil, nil, nil, nil, &startedBy, startedAt, nil, nil,
 	)
 	mock.ExpectQuery("SELECT .+ FROM session_review_loops WHERE id = @id AND org_id = @org_id").
 		WithArgs(anyArgs(2)...).
@@ -117,7 +117,7 @@ func TestSessionReviewLoopStore_GetFreshCleanPublicationLoopUsesExactEvidence(t 
 		WithArgs(anyArgs(5)...).
 		WillReturnRows(pgxmock.NewRows(reviewLoopColumnsForTest()).AddRow(
 			loopID, orgID, sessionID, nil, nil, "clean", "publication", &changesetID, &revision, &headSHA,
-			"claude_code", 2, "minimal", 2, true, nil, nil, nil, nil, nil, nil, now, &now,
+			"claude_code", 2, "minimal", 2, true, nil, nil, nil, nil, nil, nil, now, &now, nil,
 		))
 
 	loop, err := NewSessionReviewLoopStore(mock).GetFreshCleanPublicationLoop(
@@ -144,6 +144,7 @@ func TestSessionReviewLoopStore_RefreshPublicationEvidenceAdvancesPublishedCheck
 		"desired_head_sha": headSHA,
 	}
 	mock.ExpectBegin()
+	expectLegacyReviewLoopWriterLocks(mock, orgID, loopID, models.ReviewLoopSourcePublication)
 	mock.ExpectExec(`UPDATE session_review_loops[\s\S]+workspace_revision = @workspace_revision[\s\S]+desired_head_sha = @desired_head_sha`).
 		WithArgs(args).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -166,6 +167,7 @@ func TestSessionReviewLoopStore_PublicationCleanTransitionIsAtomic(t *testing.T)
 	orgID, sessionID, changesetID, loopID, passID, jobID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `"}`)
 	mock.ExpectBegin()
+	expectLegacyReviewLoopWriterLocks(mock, orgID, loopID, models.ReviewLoopSourcePublication)
 	mock.ExpectExec("UPDATE session_review_loop_passes").WithArgs(anyArgs(4)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 	mock.ExpectQuery("UPDATE session_review_loops").WithArgs(anyArgs(4)...).
@@ -218,6 +220,7 @@ func TestSessionReviewLoopStore_RestartStrandedPublicationLoopIsAtomic(t *testin
 	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","session_id":"` + sessionID.String() + `"}`)
 
 	mock.ExpectBegin()
+	expectLegacyReviewLoopWriterLocks(mock, orgID, loopID, models.ReviewLoopSourcePublication)
 	mock.ExpectQuery(`UPDATE session_review_loops AS loop[\s\S]+loop\.org_id = @org_id[\s\S]+thread\.status IN \('idle', 'completed', 'failed', 'cancelled'\)[\s\S]+jobs\.status IN \('pending', 'running'\)`).
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "loop_id": loopID, "inactive_before": inactiveBefore, "summary": summary}).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id"}).AddRow(sessionID))
@@ -348,6 +351,7 @@ func TestSessionReviewLoopStore_TerminalManualLoopResumesParkedPublication(t *te
 	orgID, sessionID, changesetID, loopID, jobID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	payload := json.RawMessage(`{"changeset_id":"` + changesetID.String() + `"}`)
 	mock.ExpectBegin()
+	expectLegacyReviewLoopWriterLocks(mock, orgID, loopID, models.ReviewLoopSourceManual)
 	mock.ExpectQuery("UPDATE session_review_loops").WithArgs(anyArgs(4)...).
 		WillReturnRows(pgxmock.NewRows([]string{"session_id", "source"}).AddRow(sessionID, models.ReviewLoopSourceManual))
 	mock.ExpectQuery("SELECT request_payload, job_queue, changeset_id").WithArgs(anyArgs(2)...).
@@ -467,6 +471,7 @@ func TestSessionReviewLoopStore_MarkPassCleanAndEnqueueOpenPRIsAtomic(t *testing
 	jobID := uuid.New()
 
 	mock.ExpectBegin()
+	expectLegacyReviewLoopWriterLocks(mock, orgID, loopID, models.ReviewLoopSourceManual)
 	mock.ExpectExec("UPDATE session_review_loop_passes").
 		WithArgs(anyArgs(4)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -495,6 +500,7 @@ func TestSessionReviewLoopStore_MarkPassCleanAndEnqueueOpenPRRollsBackOnEnqueueF
 	passID := uuid.New()
 
 	mock.ExpectBegin()
+	expectLegacyReviewLoopWriterLocks(mock, orgID, loopID, models.ReviewLoopSourceManual)
 	mock.ExpectExec("UPDATE session_review_loop_passes").
 		WithArgs(anyArgs(4)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -525,6 +531,7 @@ func TestSessionReviewLoopStore_MarkPassNeedsHumanDecisionAndEnqueueOpenPRIsAtom
 	jobID := uuid.New()
 
 	mock.ExpectBegin()
+	expectLegacyReviewLoopWriterLocks(mock, orgID, loopID, models.ReviewLoopSourceManual)
 	mock.ExpectExec("UPDATE session_review_loop_passes").
 		WithArgs(anyArgs(4)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -553,6 +560,7 @@ func TestSessionReviewLoopStore_MarkPassNeedsHumanDecisionIsAtomic(t *testing.T)
 	passID := uuid.New()
 
 	mock.ExpectBegin()
+	expectLegacyReviewLoopWriterLocks(mock, orgID, loopID, models.ReviewLoopSourceManual)
 	mock.ExpectExec("UPDATE session_review_loop_passes").
 		WithArgs(anyArgs(4)...).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -577,6 +585,7 @@ func TestSessionReviewLoopStore_MarkLoopFailedAndEnqueueOpenPRIsAtomic(t *testin
 	jobID := uuid.New()
 
 	mock.ExpectBegin()
+	expectLegacyReviewLoopWriterLocks(mock, orgID, loopID, models.ReviewLoopSourceManual)
 	expectManualReviewLoopTerminal(mock)
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(anyArgs(6)...).
@@ -594,7 +603,7 @@ func reviewLoopColumnsForTest() []string {
 		"id", "org_id", "session_id", "automation_run_id", "thread_id", "status", "source",
 		"changeset_id", "workspace_revision", "desired_head_sha", "agent_type",
 		"max_passes", "fix_mode", "completed_passes", "review_required", "bypassed_by_user_id", "bypass_reason",
-		"loop_start_checkpoint_key", "latest_checkpoint_key", "latest_summary", "started_by_user_id", "started_at", "completed_at",
+		"loop_start_checkpoint_key", "latest_checkpoint_key", "latest_summary", "started_by_user_id", "started_at", "completed_at", "startup_send_state",
 	}
 }
 
@@ -613,4 +622,22 @@ func reviewLoopPassColumnsForTest() []string {
 		"status", "agent_decision", "review_output", "fix_summary", "review_started_at", "review_completed_at",
 		"fix_started_at", "fix_completed_at", "summary",
 	}
+}
+
+// Match the transaction entry order, before any pass mutation as well as loop DML.
+func expectLegacyReviewLoopWriterLocks(mock pgxmock.PgxPoolIface, orgID, loopID uuid.UUID, source models.ReviewLoopSource) {
+	sessionID, changesetID := uuid.New(), uuid.New()
+	var changeset *uuid.UUID
+	if source == models.ReviewLoopSourcePublication {
+		changeset = &changesetID
+	}
+	mock.ExpectQuery("SELECT session_id,source,automation_run_id,changeset_id,startup_send_version IS NOT NULL").WithArgs(orgID, loopID).
+		WillReturnRows(pgxmock.NewRows([]string{"session_id", "source", "automation_run_id", "changeset_id", "retained"}).AddRow(sessionID, source, nil, changeset, false))
+	if source == models.ReviewLoopSourcePublication {
+		mock.ExpectQuery("SELECT review_start_id FROM session_publications.*FOR UPDATE").WithArgs(orgID, sessionID, changeset).
+			WillReturnRows(pgxmock.NewRows([]string{"review_start_id"}).AddRow(nil))
+	}
+	mock.ExpectQuery("SELECT id FROM review_loop_start_intents.*FOR UPDATE").WithArgs(orgID, sessionID, loopID).WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery("SELECT id FROM session_review_loops[\\s\\S]+FOR UPDATE").WithArgs(orgID, sessionID, loopID, source, (*uuid.UUID)(nil), changeset).
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(loopID))
 }

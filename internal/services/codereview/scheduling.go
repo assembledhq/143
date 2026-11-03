@@ -234,7 +234,7 @@ func (s *Service) transactionalService(tx pgx.Tx) *Service {
 	scoped.scheduling = nil
 	scoped.admissionTx = tx
 	metadata := db.NewCodeReviewStore(tx)
-	scoped.metadata = metadata
+	scoped.metadata = &scheduledMetadataStore{MetadataStore: metadata, tx: tx}
 	scoped.policies = metadata
 	scoped.sessions = &scheduledSessionStore{SessionStore: db.NewSessionStore(tx), tx: tx}
 	scoped.jobs = db.NewJobStore(tx)
@@ -293,6 +293,21 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 	result := ReviewRequestedResult{Processed: true, Deferred: true}
 	err := s.scheduling.store.WithLockedPR(ctx, input.OrgID, input.RepositoryID, input.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		scoped := s.transactionalService(tx)
+		var captureSource db.CodeReviewCaptureIdentitySource
+		if input.ChangeReason == captureIdentityChangeReason {
+			var pending bool
+			var err error
+			captureSource, pending, err = scoped.lockCaptureIdentitySource(ctx, tx, input)
+			if err != nil {
+				return err
+			}
+			if pending {
+				result = preservedCaptureIdentitySource(captureSource)
+				return errCaptureIdentitySourceCompletionPending
+			}
+			metadataID := captureSource.MetadataID
+			input.PriorMetadataID = &metadataID
+		}
 		// Legacy full-review joins have no assessment link. Settle them before
 		// replay or generation advancement can retarget their recorded session.
 		if err := db.SettleCompletedFullReviewJoins(ctx, tx, input.OrgID, input.PullRequestID); err != nil {
@@ -306,11 +321,7 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 			// Capture runs outside this lock. Another request may have retired
 			// the source in the meantime; that obsolete controller cannot force
 			// a new generation or revoke the new owner of the pull request.
-			var status models.CodeReviewSessionStatus
-			if err := tx.QueryRow(ctx, `SELECT status FROM code_review_session_metadata WHERE org_id=$1 AND pull_request_id=$2 AND session_id=$3 FOR UPDATE`, input.OrgID, input.PullRequestID, input.PriorSessionID).Scan(&status); err != nil {
-				return err
-			}
-			if status != models.CodeReviewSessionStatusQueued && status != models.CodeReviewSessionStatusRunning {
+			if captureSource.Status != models.CodeReviewSessionStatusQueued && captureSource.Status != models.CodeReviewSessionStatusRunning {
 				result = ReviewRequestedResult{Processed: true, Reused: true, IgnoredReason: "source_review_retired"}
 				if latestErr == nil {
 					result.SessionID, result.MetadataID = latest.SessionID, latest.ID
@@ -657,6 +668,9 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		}
 		return db.UpsertCodeReviewWake(ctx, tx, input.OrgID, input.PullRequestID, wake)
 	})
+	if errors.Is(err, errCaptureIdentitySourceCompletionPending) {
+		return result, nil
+	}
 	if err != nil {
 		return ReviewRequestedResult{}, err
 	}
@@ -1145,6 +1159,20 @@ func (s *Service) handleSerializedReviewChanged(ctx context.Context, input Revie
 	var result ReviewRequestedResult
 	err = s.scheduling.store.WithLockedPR(ctx, input.OrgID, input.RepositoryID, input.PullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
 		scoped := s.transactionalService(tx)
+		if input.ChangeReason == captureIdentityChangeReason {
+			// The queued-starter path already owns its PR transaction. Its positive
+			// recheck is read-only and adds no metadata or assessment lock.
+			source, pending, err := scoped.captureIdentitySource(ctx, input)
+			if err != nil {
+				return err
+			}
+			if pending {
+				result = preservedCaptureIdentitySource(source)
+				return errCaptureIdentitySourceCompletionPending
+			}
+			metadataID := source.MetadataID
+			input.PriorMetadataID = &metadataID
+		}
 		snapshot, err := readSnapshot(ctx, input.GitHubPRNumber)
 		if err != nil {
 			return err
@@ -1167,6 +1195,9 @@ func (s *Service) handleSerializedReviewChanged(ctx context.Context, input Revie
 		if err != nil {
 			return err
 		}
+		if result.IgnoredReason == CaptureIdentitySourceCompletionPendingReason {
+			return errCaptureIdentitySourceCompletionPending
+		}
 		if result.SessionID != uuid.Nil && !result.Reused {
 			observeScheduledStart(state, snapshot, s.scheduling.now())
 			if err := bindScheduledSession(ctx, tx, input.OrgID, result.SessionID, state.Generation); err != nil {
@@ -1180,6 +1211,9 @@ func (s *Service) handleSerializedReviewChanged(ctx context.Context, input Revie
 		}
 		return nil
 	})
+	if errors.Is(err, errCaptureIdentitySourceCompletionPending) {
+		return result, nil
+	}
 	return result, err
 }
 

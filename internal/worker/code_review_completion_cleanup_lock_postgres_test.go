@@ -49,7 +49,7 @@ func TestFullAssessmentCompletionWaitsForCleanupLockPostgres(t *testing.T) {
 					done <- reconcileCompletedFullAssessment(ctx, f.stores, metadata)
 					return
 				}
-				done <- completeFullAssessment(ctx, pool, staged, db.CompleteCodeReviewParams{
+				done <- completeFullAssessment(ctx, f.stores.ThreadSendDependencies.Transactions, staged, db.CompleteCodeReviewParams{
 					SessionID: f.job.SessionID, Decision: *staged.Decision, Acceptable: *staged.Acceptable,
 					GitHubReviewID: staged.GitHubReviewID, GitHubReviewURL: staged.GitHubReviewURL,
 					FinalReviewBody: *staged.RenderedBody, RiskReasonDetails: []models.CodeReviewRiskReason{},

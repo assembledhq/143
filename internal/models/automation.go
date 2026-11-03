@@ -66,6 +66,7 @@ type Automation struct {
 
 // AutomationRun records a single execution of an automation (scheduled or manual).
 type AutomationRun struct {
+	ReviewStartID      *uuid.UUID                    `db:"review_start_id" json:"-"`
 	ID                 uuid.UUID                     `db:"id"                    json:"id"`
 	AutomationID       uuid.UUID                     `db:"automation_id"         json:"automation_id"`
 	OrgID              uuid.UUID                     `db:"org_id"                json:"org_id"`

@@ -51,6 +51,7 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 		{name: "phase invalid", validate: CodeReviewPhase("bogus").Validate, expectErr: true},
 		{name: "status code GitHub rate limited", validate: CodeReviewStatusCodeGitHubRateLimited.Validate},
 		{name: "status code review loop", validate: CodeReviewStatusCodeLoopDetected.Validate},
+		{name: "status code retained dispatch uncertainty", validate: CodeReviewStatusCodeDispatchUnresolved.Validate},
 		{name: "status code invalid", validate: CodeReviewStatusCode("bogus").Validate, expectErr: true},
 		{name: "decision approved", validate: CodeReviewDecisionApproved.Validate},
 		{name: "decision invalid", validate: CodeReviewDecision("bogus").Validate, expectErr: true},
@@ -106,6 +107,12 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 			require.NoError(t, err, "valid code review enum values should be accepted")
 		})
 	}
+}
+
+func TestCodeReviewDispatchUnresolvedStatusCode(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, "code_reviewer_dispatch_unresolved", string(CodeReviewStatusCodeDispatchUnresolved), "retained dispatch uncertainty must keep the adopted exact machine-readable classification")
+	require.NoError(t, CodeReviewStatusCodeDispatchUnresolved.Validate(), "the finite safe terminal classification must be accepted by model validation")
 }
 
 func TestCodeReviewEvidenceAuthorTypeIsHuman(t *testing.T) {

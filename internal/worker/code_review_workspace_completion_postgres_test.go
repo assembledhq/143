@@ -110,7 +110,7 @@ func TestFullAssessmentCompletionWithRetainedWorkspacePostgres(t *testing.T) {
 					if route == "reconcile" {
 						err = reconcileCompletedFullAssessment(ctx, f.stores, metadata)
 					} else {
-						err = completeFullAssessment(ctx, pool, staged, db.CompleteCodeReviewParams{
+						err = completeFullAssessment(ctx, f.stores.ThreadSendDependencies.Transactions, staged, db.CompleteCodeReviewParams{
 							SessionID: f.job.SessionID, Decision: *staged.Decision, Acceptable: *staged.Acceptable,
 							GitHubReviewID: staged.GitHubReviewID, GitHubReviewURL: staged.GitHubReviewURL,
 							FinalReviewBody: *staged.RenderedBody, RiskReasonDetails: []models.CodeReviewRiskReason{},

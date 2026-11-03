@@ -215,6 +215,7 @@ func (h *InternalSessionTabsHandler) SendMessage(w http.ResponseWriter, r *http.
 		return
 	}
 	body.Message = strings.TrimSpace(body.Message)
+	body.ClientMessageID = strings.TrimSpace(body.ClientMessageID)
 	if body.Message == "" {
 		writeError(w, r, http.StatusBadRequest, "EMPTY_MESSAGE", "message is required")
 		return
@@ -223,13 +224,26 @@ func (h *InternalSessionTabsHandler) SendMessage(w http.ResponseWriter, r *http.
 		SessionID:       scope.SessionID,
 		OrgID:           scope.OrgID,
 		ThreadID:        threadID,
-		ClientMessageID: strings.TrimSpace(body.ClientMessageID),
+		ClientMessageID: body.ClientMessageID,
 		Message:         body.Message,
 		MessageSource:   models.SessionMessageSourceAgentTool,
 	})
 	if err != nil {
 		switch {
-		case errors.Is(err, thread.ErrThreadNotFound):
+		// Uncertainty must dominate every wrapped or joined rejection cause.
+		case errors.Is(err, thread.ErrCommandOutcomeUnknown):
+			message := "message acceptance is pending confirmation; do not resubmit the message"
+			if body.ClientMessageID != "" {
+				message = "message acceptance is pending confirmation; retain the same command key and do not resubmit"
+			}
+			writeErrorWithDetails(w, r, http.StatusServiceUnavailable, "COMMAND_OUTCOME_UNKNOWN", message, threadMessageUnknownDetails(err, scope.OrgID, scope.SessionID, threadID, body.ClientMessageID))
+		case errors.Is(err, thread.ErrSendNormalizing):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, r, http.StatusConflict, "NORMALIZATION_PENDING", internalTabMessageRetryGuidance("this session is preparing its message protocol", body.ClientMessageID))
+		case errors.Is(err, db.ErrLifecycleContention), errors.Is(err, db.ErrThreadSendModeChanged), errors.Is(err, db.ErrMessageAdmissionReplayObservationNeeded):
+			w.Header().Set("Retry-After", "1")
+			writeError(w, r, http.StatusConflict, "LIFECYCLE_CONTENDED", internalTabMessageRetryGuidance("message admission is busy", body.ClientMessageID))
+		case errors.Is(err, thread.ErrThreadNotFound), errors.Is(err, pgx.ErrNoRows):
 			writeError(w, r, http.StatusNotFound, "TAB_NOT_FOUND", "tab not found")
 		case errors.Is(err, thread.ErrThreadInboxBackpressure):
 			writeError(w, r, http.StatusConflict, "THREAD_INBOX_BACKPRESSURE", "too many undelivered messages")
@@ -250,6 +264,13 @@ func (h *InternalSessionTabsHandler) SendMessage(w http.ResponseWriter, r *http.
 		"thread":         map[string]any{"id": threadID, "status": targetThread.Status, "pending_message_count": targetThread.PendingMessageCount},
 		"delivery_state": delivery,
 	}})
+}
+
+func internalTabMessageRetryGuidance(message, clientKey string) string {
+	if strings.TrimSpace(clientKey) != "" {
+		return message + "; retry with the same command key"
+	}
+	return message + "; retry the request"
 }
 
 func (h *InternalSessionTabsHandler) Messages(w http.ResponseWriter, r *http.Request) {

@@ -885,6 +885,316 @@ describe('SessionDetailPage overview and review loop', () => {
     expect(dialog.querySelector('.lucide-clipboard-list')).not.toBeInTheDocument();
   });
 
+  it.each([
+    { name: 'uncertain creation', initial: null, title: 'Review creation is awaiting confirmation' },
+    { name: 'pending admission', initial: 'pending', title: 'Review created; waiting to start' },
+    { name: 'unknown admission', initial: 'unknown', title: 'Review created; confirming startup' },
+    { name: 'attention admission', initial: 'attention', title: 'Review startup needs attention' },
+  ] as const)('retains the original review for $name and never repeats Start', async ({ initial, title }) => {
+    const user = userEvent.setup();
+    const sessionID = 'session-98765432-abcd-ef01';
+    const loopID = '9ea975a4-12ba-4931-9cad-98dc317ff118';
+    let starts = 0;
+    const recoveries: string[] = [];
+    const onUrlUpdate = vi.fn();
+    const loop: SessionReviewLoop = {
+      id: loopID, org_id: 'org-1', session_id: sessionID, source: 'manual', status: 'running',
+      agent_type: 'codex', max_passes: 3, fix_mode: 'minimal', completed_passes: 0,
+      review_required: false, started_at: '2026-02-17T07:12:00Z', admission_state: initial,
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: {
+        ...mockSessions[1], id: sessionID, status: 'completed', snapshot_key: 'synthetic-review', sandbox_state: 'snapshotted',
+        diff: '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new', diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      } })),
+      http.get('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: starts && initial ? [loop] : [], meta: {} })),
+      http.post('/api/v1/sessions/:id/review-loops', () => {
+        starts++;
+        return initial ? HttpResponse.json({ data: loop }, { status: 201 }) : HttpResponse.json({ error: {
+          code: 'REVIEW_LOOP_START_PENDING_CONFIRMATION', message: 'Awaiting confirmation', details: { loop_id: loopID },
+        } }, { status: 503 });
+      }),
+      http.post('/api/v1/sessions/:id/review-loops/:loopId/recover', ({ params }) => {
+        recoveries.push(params.loopId as string);
+        if (recoveries.length === 1) return HttpResponse.json({ error: {
+          code: 'REVIEW_LOOP_START_PENDING_CONFIRMATION', message: 'Awaiting confirmation', details: { loop_id: loopID },
+        } }, { status: 503 });
+        return HttpResponse.json({ data: { ...loop, admission_state: 'accepted' } });
+      }),
+    );
+    renderWithProviders(<SessionDetailContent id={sessionID} />, { nuqsHasMemory: true, nuqsOnUrlUpdate: onUrlUpdate });
+    await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
+    await user.click(screen.getByRole('button', { name: 'Start review' }));
+    const dialog = screen.getByRole('dialog');
+    expect(await within(dialog).findByText(title)).toBeInTheDocument();
+    if (initial === 'attention') {
+      expect(within(dialog).getByText('Startup remains unconfirmed. Periodic checks continue for the original review.')).toBeInTheDocument();
+      expect(within(dialog).queryByText(/Automatic observation has ended/)).not.toBeInTheDocument();
+    }
+    expect(within(dialog).queryByRole('button', { name: 'Start review' })).not.toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalledWith('Review loop started');
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalledWith(expect.objectContaining({ searchParams: expect.any(URLSearchParams) })));
+    expect(onUrlUpdate.mock.calls.at(-1)?.[0].searchParams.get('review_start')).toBe(loopID);
+    await user.click(within(dialog).getByRole('button', { name: 'Check review status' }));
+    await waitFor(() => expect(recoveries).toEqual([loopID]));
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Check review status' })).toBeEnabled());
+    await user.click(within(dialog).getByRole('button', { name: 'Check review status' }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Review startup accepted'));
+    expect(starts).toBe(1);
+    expect(recoveries).toEqual([loopID, loopID]);
+  });
+
+  it('restores an uncertain review correlation from the URL without starting another review', async () => {
+    const user = userEvent.setup();
+    const loopID = '9ea975a4-12ba-4931-9cad-98dc317ff118';
+    const starts = vi.fn();
+    const recovered = vi.fn();
+    server.use(
+      http.get('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: [], meta: {} })),
+      http.post('/api/v1/sessions/:id/review-loops', () => { starts(); return HttpResponse.json({}, { status: 500 }); }),
+      http.post('/api/v1/sessions/:id/review-loops/:loopId/recover', ({ params }) => {
+        recovered(params.loopId);
+        return HttpResponse.json({ error: { code: 'REVIEW_LOOP_START_PENDING_CONFIRMATION', message: 'Awaiting confirmation', details: { loop_id: loopID } } }, { status: 503 });
+      }),
+    );
+    renderWithProviders(<SessionDetailContent id="session-98765432-abcd-ef01" />, { searchParams: { review_start: loopID }, nuqsHasMemory: true });
+    await user.click(await screen.findByRole('button', { name: 'Check review status' }));
+    const dialog = screen.getByRole('dialog');
+    await user.click(within(dialog).getByRole('button', { name: 'Check review status' }));
+    await waitFor(() => expect(recovered).toHaveBeenCalledWith(loopID));
+    expect(starts).not.toHaveBeenCalled();
+    expect(within(dialog).queryByRole('button', { name: 'Start review' })).not.toBeInTheDocument();
+  });
+
+  it('clears a saved follow-up when the current list confirms accepted admission', async () => {
+    const sessionID = mockSessions[1].id;
+    const loopID = '9ea975a4-12ba-4931-9cad-98dc317ff118';
+    const onUrlUpdate = vi.fn();
+    server.use(http.get('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: [{
+      id: loopID, org_id: 'org-1', session_id: sessionID, status: 'clean', source: 'manual',
+      agent_type: 'codex', max_passes: 3, fix_mode: 'minimal', completed_passes: 1,
+      review_required: false, started_at: '2026-02-17T07:12:00Z', admission_state: 'accepted',
+    } satisfies SessionReviewLoop], meta: {} })));
+    renderWithProviders(<SessionDetailContent id={sessionID} />, {
+      searchParams: { review_start: loopID }, nuqsHasMemory: true, nuqsOnUrlUpdate: onUrlUpdate,
+    });
+    await screen.findAllByText('Could not reproduce the error in test environment');
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled());
+    expect(onUrlUpdate.mock.calls.at(-1)?.[0].searchParams.has('review_start')).toBe(false);
+    expect(screen.queryByText('Review creation is awaiting confirmation')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Check review status' })).not.toBeInTheDocument();
+  });
+
+  it('uses a newer list admission instead of a stale mutation response', async () => {
+    const user = userEvent.setup();
+    const sessionID = mockSessions[1].id;
+    const loopID = '9ea975a4-12ba-4931-9cad-98dc317ff118';
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const onUrlUpdate = vi.fn();
+    let accepted = false;
+    const loop: SessionReviewLoop = {
+      id: loopID, org_id: 'org-1', session_id: sessionID, status: 'running', source: 'manual',
+      agent_type: 'codex', max_passes: 3, fix_mode: 'minimal', completed_passes: 0,
+      review_required: false, started_at: '2026-02-17T07:12:00Z', admission_state: 'unknown',
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: { ...mockSessions[1], snapshot_key: 'synthetic-review', sandbox_state: 'snapshotted', diff_stats: { added: 1, removed: 1, files_changed: 1 } } })),
+      http.get('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: accepted ? [{ ...loop, admission_state: 'accepted' }] : [], meta: {} })),
+      http.post('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: loop }, { status: 201 })),
+    );
+    renderWithProviders(<SessionDetailContent id={sessionID} />, { queryClient, nuqsHasMemory: true, nuqsOnUrlUpdate: onUrlUpdate });
+    await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
+    await user.click(screen.getByRole('button', { name: 'Start review' }));
+    expect(await screen.findAllByText('Review created; confirming startup')).not.toHaveLength(0);
+    accepted = true;
+    await act(async () => { await queryClient.invalidateQueries({ queryKey: queryKeys.sessions.reviewLoops(sessionID) }); });
+    await waitFor(() => expect(onUrlUpdate.mock.calls.at(-1)?.[0].searchParams.has('review_start')).toBe(false));
+    expect(screen.queryByText('Review created; confirming startup')).not.toBeInTheDocument();
+    expect(within(screen.getByRole('dialog')).queryByRole('button', { name: 'Check review status' })).not.toBeInTheDocument();
+  });
+
+  it('ignores an uncertain Start response after navigation to another session', async () => {
+    const user = userEvent.setup();
+    const onUrlUpdate = vi.fn();
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let releaseStart = () => {};
+    const startBlocked = new Promise<void>((resolve) => { releaseStart = resolve; });
+    const startReceived = vi.fn();
+    server.use(
+      http.get('/api/v1/sessions/:id', ({ params }) => HttpResponse.json({ data: {
+        ...mockSessions[1], id: params.id, snapshot_key: 'synthetic-review', sandbox_state: 'snapshotted', diff_stats: { added: 1, removed: 1, files_changed: 1 },
+      } })),
+      http.get('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: [], meta: {} })),
+      http.post('/api/v1/sessions/:id/review-loops', async () => {
+        startReceived();
+        await startBlocked;
+        return HttpResponse.json({ error: { code: 'REVIEW_LOOP_START_PENDING_CONFIRMATION', message: 'Awaiting confirmation', details: { loop_id: '9ea975a4-12ba-4931-9cad-98dc317ff118' } } }, { status: 503 });
+      }),
+    );
+    const view = renderWithProviders(<SessionDetailContent id={mockSessions[1].id} />, { queryClient, nuqsHasMemory: true, nuqsOnUrlUpdate: onUrlUpdate });
+    await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
+    await user.click(screen.getByRole('button', { name: 'Start review' }));
+    await waitFor(() => expect(startReceived).toHaveBeenCalledOnce());
+    view.rerender(<SessionDetailContent id={mockSessions[0].id} />);
+    releaseStart();
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+    expect(onUrlUpdate.mock.calls.every(([update]) => !update.searchParams.has('review_start'))).toBe(true);
+    expect(screen.queryByRole('dialog', { name: 'Review' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Review creation is awaiting confirmation')).not.toBeInTheDocument();
+  });
+
+  it('keeps review recovery unavailable to viewers', async () => {
+    const user = userEvent.setup();
+    const recovered = vi.fn();
+    server.use(
+      http.get('/api/v1/auth/me', () => HttpResponse.json({ data: { ...mockMembers[0], role: 'viewer' } })),
+      http.get('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: [], meta: {} })),
+      http.post('/api/v1/sessions/:id/review-loops/:loopId/recover', () => { recovered(); return HttpResponse.json({}, { status: 500 }); }),
+    );
+    renderWithProviders(<SessionDetailContent id={mockSessions[1].id} />, { searchParams: { review_start: '9ea975a4-12ba-4931-9cad-98dc317ff118' }, nuqsHasMemory: true });
+    await user.click(await screen.findByRole('button', { name: 'Check review status' }));
+    const button = within(screen.getByRole('dialog')).getByRole('button', { name: 'Check review status' });
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(recovered).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { admission: 'refused', mode: 'created', title: 'Review startup was refused', reason: 'Review startup was refused; the existing review is still open' },
+    { admission: 'cancelled', mode: 'created', title: 'Review startup cancelled', reason: 'Review startup was cancelled; the existing review is still open' },
+    { admission: 'refused', mode: 'reload', title: 'Review startup was refused', reason: 'Review startup was refused; the existing review is still open' },
+    { admission: 'cancelled', mode: 'reload', title: 'Review startup cancelled', reason: 'Review startup was cancelled; the existing review is still open' },
+    { admission: 'accepted', mode: 'created', title: 'Review startup accepted', reason: 'Review startup was accepted; the existing review is still open' },
+    { admission: 'accepted', mode: 'reload', title: 'Review startup accepted', reason: 'Review startup was accepted; the existing review is still open' },
+  ] as const)('shows static $admission startup after $mode while the existing loop stays open', async ({ admission, mode, title, reason }) => {
+    const user = userEvent.setup();
+    const sessionID = mockSessions[1].id;
+    const threadID = `synthetic-review-thread-${admission}`;
+    const loop: SessionReviewLoop = {
+      id: '9ea975a4-12ba-4931-9cad-98dc317ff118', org_id: 'org-1', session_id: sessionID,
+      thread_id: threadID, status: 'running', source: 'manual', admission_state: admission,
+      agent_type: 'claude_code', max_passes: 3, fix_mode: 'minimal', completed_passes: 0,
+      review_required: false, started_at: '2026-02-17T07:12:00Z',
+    };
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let starts = 0;
+    let releaseDetail = () => {};
+    const detailRefetch = new Promise<void>((resolve) => { releaseDetail = resolve; });
+    server.use(
+      http.get('/api/v1/sessions/:id', async () => {
+        if (starts) await detailRefetch;
+        return HttpResponse.json({ data: {
+          ...mockSessions[1], status: 'completed', snapshot_key: 'synthetic-review', sandbox_state: 'snapshotted',
+          diff_stats: { added: 1, removed: 1, files_changed: 1 }, threads: [],
+        } });
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: mode === 'reload' || starts ? [loop] : [], meta: {} })),
+      http.post('/api/v1/sessions/:id/review-loops', () => {
+        starts++;
+        return HttpResponse.json({ data: loop }, { status: 201 });
+      }),
+    );
+    try {
+      renderWithProviders(<SessionDetailContent id={sessionID} />, { queryClient });
+      if (mode === 'created') {
+        await user.click(await screen.findByRole('button', { name: 'Review & fix' }));
+        await user.click(screen.getByRole('button', { name: 'Start review' }));
+      }
+      const notice = await screen.findByText(title);
+      expect(notice.closest('[data-slot="card"]')?.querySelector('[data-slot="status-indicator"]')).toHaveAttribute('data-activity', 'none');
+      expect(notice.closest('[data-slot="card"]')?.querySelector('.animate-spin')).toBeNull();
+      expect(screen.queryByRole('status', { name: 'Review in progress' })).not.toBeInTheDocument();
+      expect(screen.queryByText('Fixing with Claude Code')).not.toBeInTheDocument();
+      expect(screen.queryByText('The review loop is checking the changes and applying fixes.')).not.toBeInTheDocument();
+      const startAction = screen.getByRole('button', { name: 'Review & fix' });
+      expect(startAction).toBeDisabled();
+      expect(startAction).toHaveAttribute('title', reason);
+      expect(startAction.querySelector('.animate-spin')).toBeNull();
+      await user.click(startAction);
+      expect(starts).toBe(mode === 'created' ? 1 : 0);
+      if (mode === 'created') {
+        const cached = queryClient.getQueryData<SingleResponse<Session & { threads?: SessionThread[] }>>(queryKeys.sessions.detail(sessionID));
+        expect(cached?.data.threads?.find((thread) => thread.id === threadID)).toMatchObject({ status: 'idle', current_turn: 0 });
+      }
+    } finally {
+      releaseDetail();
+    }
+  });
+
+  it('shows accepted review activity only after the actual thread is running', async () => {
+    const sessionID = mockSessions[1].id;
+    const threadID = 'synthetic-running-review-thread';
+    const thread: SessionThread = {
+      id: threadID, org_id: 'org-1', session_id: sessionID, label: 'Claude Review', agent_type: 'claude_code',
+      status: 'running', current_turn: 1, cost_cents: 0, pending_message_count: 0, created_at: '2026-02-17T07:12:00Z',
+    };
+    const loop: SessionReviewLoop = {
+      id: '9ea975a4-12ba-4931-9cad-98dc317ff118', org_id: 'org-1', session_id: sessionID,
+      thread_id: threadID, status: 'running', source: 'manual', admission_state: 'accepted',
+      agent_type: 'claude_code', max_passes: 3, fix_mode: 'minimal', completed_passes: 0,
+      review_required: false, started_at: '2026-02-17T07:12:00Z',
+    };
+    server.use(
+      http.get('/api/v1/sessions/:id', () => HttpResponse.json({ data: {
+        ...mockSessions[1], status: 'completed', snapshot_key: 'synthetic-review', sandbox_state: 'snapshotted',
+        diff_stats: { added: 1, removed: 1, files_changed: 1 }, threads: [thread],
+      } })),
+      http.get('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: [loop], meta: {} })),
+    );
+    renderWithProviders(<SessionDetailContent id={sessionID} />);
+    expect(await screen.findByText('Fixing with Claude Code')).toBeInTheDocument();
+    expect(screen.queryByText('The review has been created. Waiting for confirmed review activity.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review & fix' })).not.toBeInTheDocument();
+  });
+
+  it('preserves the complete actual thread when an uncertain original is recovered as accepted', async () => {
+    const user = userEvent.setup();
+    const sessionID = mockSessions[1].id;
+    const threadID = 'synthetic-progressed-review-thread';
+    const actualThread: SessionThread = {
+      id: threadID, org_id: 'org-1', session_id: sessionID, label: 'Original renamed reviewer', agent_type: 'claude_code',
+      status: 'running', current_turn: 7, cost_cents: 123, pending_message_count: 2, model_override: 'synthetic-original-model',
+      created_at: '2026-02-17T07:12:00Z', last_activity_at: '2026-02-17T07:14:00Z',
+    };
+    const loop: SessionReviewLoop = {
+      id: '9ea975a4-12ba-4931-9cad-98dc317ff118', org_id: 'org-1', session_id: sessionID,
+      thread_id: threadID, status: 'running', source: 'manual', admission_state: 'unknown',
+      agent_type: 'claude_code', max_passes: 3, fix_mode: 'minimal', completed_passes: 0,
+      review_required: false, started_at: '2026-02-17T07:12:00Z',
+    };
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    let recovered = false;
+    let releaseDetail = () => {};
+    const detailRefetch = new Promise<void>((resolve) => { releaseDetail = resolve; });
+    server.use(
+      http.get('/api/v1/sessions/:id', async () => {
+        if (recovered) await detailRefetch;
+        return HttpResponse.json({ data: {
+          ...mockSessions[1], status: 'completed', snapshot_key: 'synthetic-review', sandbox_state: 'snapshotted',
+          diff_stats: { added: 1, removed: 1, files_changed: 1 }, threads: [actualThread],
+        } });
+      }),
+      http.get('/api/v1/sessions/:id/review-loops', () => HttpResponse.json({ data: [{ ...loop, admission_state: recovered ? 'accepted' : 'unknown' }], meta: {} })),
+      http.post('/api/v1/sessions/:id/review-loops/:loopId/recover', () => {
+        recovered = true;
+        return HttpResponse.json({ data: { ...loop, admission_state: 'accepted' } });
+      }),
+    );
+    try {
+      renderWithProviders(<SessionDetailContent id={sessionID} />, { queryClient, nuqsHasMemory: true });
+      await user.click(await screen.findByRole('button', { name: 'Check review status' }));
+      await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Check review status' }));
+      await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Review startup accepted'));
+      const cached = queryClient.getQueryData<SingleResponse<Session & { threads?: SessionThread[] }>>(queryKeys.sessions.detail(sessionID));
+      expect(cached?.data.threads).toEqual([actualThread]);
+      expect(await screen.findByText('Fixing with Claude Code')).toBeInTheDocument();
+      expect(screen.queryByText('The review has been created. Waiting for confirmed review activity.')).not.toBeInTheDocument();
+      expect(screen.getAllByText('Original renamed reviewer').length).toBeGreaterThan(0);
+    } finally {
+      releaseDetail();
+    }
+  });
+
   it('starts a manual review loop with three passes and minimal fixes by default', async () => {
     const user = userEvent.setup();
     let postedBody: { max_passes: number; fix_mode?: ReviewLoopFixMode } | null = null;

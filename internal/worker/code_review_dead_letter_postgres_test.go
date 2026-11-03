@@ -25,7 +25,8 @@ func TestCodeReviewDeadLetterAssessmentAtomicPostgres(t *testing.T) {
 		t.Skip("set TEST_DATABASE_URL for atomic controller failure proof")
 	}
 	ctx := context.Background()
-	pool := fullRecoveryPostgresPool(t, ctx)
+	pool := fullRecoveryPostgresPoolWithMaxConns(t, ctx, 2)
+	require.Equal(t, int32(2), pool.Config().MaxConns, "actual worker retirement and postcommit cleanup must fit the bounded two-slot pool")
 	tests := []struct {
 		name        string
 		err         func() error
@@ -55,8 +56,11 @@ func TestCodeReviewDeadLetterAssessmentAtomicPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := seedStrandedReview(t, pool, "idle")
+			terminalJobs, err := db.NewJobStoreWithCodeReviewTerminalTransactions(pool, f.stores.ThreadSendDependencies.Transactions)
+			require.NoError(t, err, "supply the existing actual bounded transaction capability to controller retirement")
+			f.stores.Jobs = terminalJobs
 			seedSavedReviewResults(t, pool, f)
-			_, err := pool.Exec(ctx, `UPDATE code_review_revision_assessments SET result_origin='executed',decision='needs_human_review',acceptable=false,risk_reason_details='[]',structured_outcome='{}',rendered_body='saved original output' WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.assessment)
+			_, err = pool.Exec(ctx, `UPDATE code_review_revision_assessments SET result_origin='executed',decision='needs_human_review',acceptable=false,risk_reason_details='[]',structured_outcome='{}',rendered_body='saved original output' WHERE org_id=$1 AND id=$2`, f.job.OrgID, f.assessment)
 			require.NoError(t, err, "retain staged model output eligible for controller recovery")
 			initialStatus := models.CodeReviewAssessmentRunning
 			if tt.publication != "" {
@@ -76,9 +80,11 @@ func TestCodeReviewDeadLetterAssessmentAtomicPostgres(t *testing.T) {
 			initialAssessment, err := f.stores.CodeReviewAssessments.GetByID(ctx, f.job.OrgID, f.assessment)
 			require.NoError(t, err, "retain the full immutable assessment before terminal persistence")
 			if tt.foreignOrg {
-				owned, retireErr := f.stores.Jobs.DeadLetterCodeReviewWithLease(ctx, uuid.New(), f.jobID, f.token, "foreign failure", "foreign failure")
+				outcome, retireErr := f.stores.Jobs.DeadLetterCodeReviewWithLease(ctx, uuid.New(), f.jobID, f.token, db.CodeReviewTerminalFailure{
+					JobError: "foreign failure", Reason: "foreign failure", Code: models.CodeReviewStatusCodeWorkerFailed, Message: "Synthetic foreign failure",
+				})
 				require.NoError(t, retireErr, "foreign tenant attempts must safely miss the fenced job")
-				require.False(t, owned, "org_id must fence the job even when its ID and token match")
+				require.False(t, outcome.Owned(), "org_id must fence the job even when its ID and token match")
 				unchanged, readErr := f.stores.CodeReviewAssessments.GetByID(ctx, f.job.OrgID, f.assessment)
 				require.NoError(t, readErr, "read the real tenant's assessment after foreign retirement")
 				require.Equal(t, initialAssessment, unchanged, "foreign retirement must preserve every assessment field")
@@ -92,7 +98,7 @@ func TestCodeReviewDeadLetterAssessmentAtomicPostgres(t *testing.T) {
 			beforeCleanup := models.CodeReviewAssessmentStatus("")
 			terminalReason := ""
 			hooks := 0
-			w := New(pool, zerolog.Nop(), node)
+			w := New(pool, zerolog.Nop(), node, WithCodeReviewTerminalStore(terminalJobs))
 			w.Register(models.JobTypeRunCodeReview, func(handlerCtx context.Context, _ string, _ json.RawMessage) error {
 				// Force the formerly racy order: observe committed dead-lettering,
 				// then sweep before the ordinary assessment cleanup hook runs.
