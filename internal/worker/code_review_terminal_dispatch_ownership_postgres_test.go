@@ -34,7 +34,8 @@ func terminalDispatchOwnershipFixture(t *testing.T, ctx context.Context, pool *p
 	var ledger int
 	var dirty bool
 	require.NoError(t, pool.QueryRow(ctx, `SELECT version,dirty FROM schema_migrations`).Scan(&ledger, &dirty), "read the actual complete migration ledger, not a raw SQL approximation of appended readiness")
-	require.Equal(t, 392, ledger, "unresolved-owner positives require the actual appended status-schema readiness migration")
+	// Migration 392 establishes readiness; later migrations may append to the full schema.
+	require.GreaterOrEqual(t, ledger, 392, "unresolved-owner positives require the actual status-schema readiness migration or later")
 	require.False(t, dirty, "the ownership proof must not enable intents on a dirty migration ledger")
 	tag, err := pool.Exec(ctx, `UPDATE caller_send_intent_control SET intents_enabled=true WHERE singleton AND schema_ready AND dispatch_status_ready`)
 	require.NoError(t, err, "opt in only this isolated synthetic database after both actual schema readiness gates")
