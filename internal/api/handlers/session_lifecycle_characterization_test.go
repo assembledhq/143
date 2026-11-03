@@ -15,6 +15,7 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
@@ -60,7 +61,7 @@ func TestSessionLifecycleCharacterization_SendMessageAcceptance(t *testing.T) {
 						claimedRow[i] = 8
 					}
 				}
-				mock.ExpectQuery("UPDATE sessions SET status").WithArgs(sessionID, orgID).
+				mock.ExpectQuery("UPDATE sessions SET status").WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 					WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(claimedRow...))
 			}
 			mock.ExpectQuery("INSERT INTO session_messages").
@@ -148,9 +149,9 @@ func TestSessionLifecycleCharacterization_AwaitingInputAnswerBinding(t *testing.
 			mock.ExpectQuery("SELECT .+ FROM sessions WHERE").WithArgs(sessionID, orgID).
 				WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusAwaitingInput, snapshot, nil, models.SandboxStateRunning, nil, now)...))
 			mock.ExpectBegin()
-			mock.ExpectQuery("UPDATE sessions SET status").WithArgs(sessionID, orgID).
+			mock.ExpectQuery("UPDATE sessions SET status").WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 				WillReturnRows(pgxmock.NewRows(sessionColumns))
-			mock.ExpectQuery("UPDATE sessions SET status").WithArgs(sessionID, orgID, pgxmock.AnyArg()).
+			mock.ExpectQuery("UPDATE sessions SET status").WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": sessionID, "org_id": orgID, "statuses": []string{"completed", "pr_created", "failed", "cancelled", "awaiting_input", "needs_human_guidance"}}).
 				WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusRunning, snapshot, nil, models.SandboxStateRunning, nil, now)...))
 			mock.ExpectQuery("INSERT INTO session_messages").
 				WithArgs(sessionID, orgID, (*uuid.UUID)(nil), &userID, 2, models.MessageRoleUser, "Follow up", pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).

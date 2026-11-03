@@ -510,9 +510,8 @@ func threadMessageReplayFixture(t *testing.T, original db.MessageAdmissionDispos
 	}
 	expectPolicy()
 	end := int64(999)
-	mock.ExpectQuery(`SELECT id, org_id, status, deleted_at, archived_at,`).WithArgs(orgID, sessionID).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "status", "deleted", "archived", "epoch", "end", "protocol"}).AddRow(sessionID, orgID, models.SessionStatusAwaitingInput, nil, nil, int64(999), &end, int16(1)))
-	mock.ExpectQuery(`SELECT id FROM session_threads`).WithArgs(orgID, sessionID, laneID, pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(laneID))
-	mock.ExpectQuery(`SELECT id, org_id, session_id, status, archived_at,`).WithArgs(orgID, sessionID, []uuid.UUID{laneID}).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "session", "status", "archived", "epoch", "end", "protocol"}).AddRow(laneID, orgID, sessionID, models.ThreadStatusAwaitingInput, nil, int64(999), &end, int16(1)))
+	mock.ExpectQuery(`SELECT id, org_id, status, deleted_at, archived_at,`).WithArgs(pgx.QueryExecModeExec, orgID, sessionID).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "status", "deleted", "archived", "epoch", "end", "protocol"}).AddRow(sessionID, orgID, models.SessionStatusAwaitingInput, nil, nil, int64(999), &end, int16(1)))
+	mock.ExpectQuery(`SELECT id, org_id, session_id, status, archived_at,`).WithArgs(pgx.QueryExecModeExec, orgID, sessionID, laneID, pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "session", "status", "archived", "epoch", "end", "protocol"}).AddRow(laneID, orgID, sessionID, models.ThreadStatusAwaitingInput, nil, int64(999), &end, int16(1)))
 	expectOwners()
 	expectDispatch()
 	mock.ExpectQuery(`SELECT role FROM organization_memberships`).WithArgs(orgID, actorID).WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow(models.RoleMember))

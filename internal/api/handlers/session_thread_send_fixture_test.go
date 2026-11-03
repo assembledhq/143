@@ -40,14 +40,10 @@ const handlerSendParentSQL = `SELECT id, org_id, status, deleted_at, archived_at
 		admission_epoch, end_epoch, lifecycle_version
 		FROM sessions WHERE org_id = $1 AND id = $2
 		FOR NO KEY UPDATE NOWAIT`
-const handlerSendLaneKeysSQL = `SELECT id FROM session_threads
-	WHERE org_id = $1 AND session_id = $2 AND (archived_at IS NULL OR id = $3)
-	ORDER BY id LIMIT $4`
 const handlerSendLanesSQL = `SELECT id, org_id, session_id, status, archived_at,
-		admission_epoch, end_epoch, lifecycle_version
-		FROM session_threads
-		WHERE org_id = $1 AND session_id = $2 AND id = ANY($3::uuid[])
-		ORDER BY id FOR NO KEY UPDATE NOWAIT`
+	admission_epoch, end_epoch, lifecycle_version FROM session_threads
+	WHERE org_id = $1 AND session_id = $2 AND (archived_at IS NULL OR id = $3)
+	ORDER BY id LIMIT $4 FOR NO KEY UPDATE NOWAIT`
 
 type handlerSendFixtureTx struct {
 	pgx.Tx
@@ -59,10 +55,15 @@ type handlerSendFixtureTx struct {
 
 func (f *handlerSendFixtureTx) guarded() {
 	f.t.Helper()
-	require.Equal(f.t, 7, f.stage, "every legacy mutation hook must follow real policy, interlock, fresh mode, parent and ordered lane guard SQL")
+	require.Equal(f.t, 6, f.stage, "every legacy mutation hook must follow real policy, interlock, fresh mode, parent and ordered lane guard SQL")
 }
 
 func (f *handlerSendFixtureTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
+	if len(args) > 0 {
+		if mode, ok := args[0].(pgx.QueryExecMode); ok && mode == pgx.QueryExecModeExec {
+			args = args[1:]
+		}
+	}
 	var rows *pgxmock.Rows
 	switch query {
 	case handlerSendPolicySQL:
@@ -91,17 +92,17 @@ func (f *handlerSendFixtureTx) QueryRow(ctx context.Context, query string, args 
 }
 
 func (f *handlerSendFixtureTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
+	if len(args) > 0 {
+		if mode, ok := args[0].(pgx.QueryExecMode); ok && mode == pgx.QueryExecModeExec {
+			args = args[1:]
+		}
+	}
 	var rows *pgxmock.Rows
 	switch query {
-	case handlerSendLaneKeysSQL:
-		require.Equal(f.t, 5, f.stage, "lane discovery must follow the parent guard")
-		require.Equal(f.t, []any{f.org, f.session}, args[:2], "lane discovery must retain exact tenant and session")
-		f.stage++
-		f.lane = args[2].(uuid.UUID)
-		rows = pgxmock.NewRows([]string{"id"}).AddRow(f.lane)
 	case handlerSendLanesSQL:
-		require.Equal(f.t, 6, f.stage, "ordered exact lane locks must precede mutation hooks")
-		require.Equal(f.t, []any{f.org, f.session, []uuid.UUID{f.lane}}, args, "lane guard must use the exact ordered discovered set")
+		require.Equal(f.t, 5, f.stage, "ordered lane discovery and acquisition must follow the parent guard")
+		require.Equal(f.t, []any{f.org, f.session}, args[:2], "lane guard must retain exact tenant and session")
+		f.lane = args[2].(uuid.UUID)
 		f.stage++
 		rows = pgxmock.NewRows([]string{"id", "org", "session", "status", "archived", "epoch", "end", "protocol"}).AddRow(f.lane, f.org, f.session, models.ThreadStatusIdle, nil, int64(0), nil, int16(0))
 	default:
@@ -136,7 +137,7 @@ func (f *handlerSendFixture) Run(ctx context.Context, work func(context.Context,
 	defer cancel()
 	f.activeTx, f.activeCtx = tx, unitCtx
 	err = work(unitCtx, tx)
-	require.Contains(f.t, []int{3, 7}, tx.stage, "completed CPU units must execute entry observation or full fixed-branch mutation guards")
+	require.Contains(f.t, []int{3, 6}, tx.stage, "completed CPU units must execute entry observation or full fixed-branch mutation guards")
 	require.NoError(f.t, guard.ExpectationsWereMet(), "real resolver/scope queries must consume all pinned responses")
 	f.settled = true
 	f.committed = err == nil
@@ -185,6 +186,10 @@ func (f *handlerSendFixture) CountPendingInboxByThreadInTx(ctx context.Context, 
 func (f *handlerSendFixture) CountPendingInboxBySessionInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (int, error) {
 	f.scope(ctx, tx)
 	return db.NewThreadInboxStore(tx).CountPendingBySession(ctx, org, session)
+}
+func (f *handlerSendFixture) CountPendingInboxInTx(ctx context.Context, tx pgx.Tx, org, session, lane uuid.UUID) (int, int, error) {
+	f.scope(ctx, tx)
+	return db.NewThreadInboxStore(tx).CountPendingBySessionAndThread(ctx, org, session, lane)
 }
 func (f *handlerSendFixture) GetActiveThreadRuntimeInTx(ctx context.Context, tx pgx.Tx, org, lane uuid.UUID) (models.ThreadRuntime, error) {
 	f.scope(ctx, tx)

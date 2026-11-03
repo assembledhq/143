@@ -665,13 +665,13 @@ type internalTabMissingLaneGuardTx struct {
 }
 
 func (f *internalTabMissingLaneGuardTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	if query != handlerSendLaneKeysSQL {
+	if query != handlerSendLanesSQL {
 		return f.handlerSendFixtureTx.Query(ctx, query, args...)
 	}
 	require.Equal(f.t, 5, f.stage, "the real guard must acquire the parent before discovering the missing lane")
-	require.Equal(f.t, []any{f.org, f.session}, args[:2], "missing-lane discovery must retain the exact authorized tenant and session")
+	require.Equal(f.t, []any{pgx.QueryExecModeExec, f.org, f.session}, args[:3], "missing-lane discovery must retain the exact authorized tenant and session")
 	f.stage++
-	f.guard.ExpectQuery("SELECT id FROM session_threads").WithArgs(args...).WillReturnRows(pgxmock.NewRows([]string{"id"}))
+	f.guard.ExpectQuery("SELECT id, org_id, session_id, status, archived_at").WithArgs(args...).WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "session_id", "status", "archived_at", "admission_epoch", "end_epoch", "lifecycle_version"}))
 	return f.guard.Query(ctx, query, args...)
 }
 

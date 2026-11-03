@@ -5786,7 +5786,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectBegin()
 				// ClaimIdle succeeds.
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
@@ -5990,13 +5990,13 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectBegin()
 				// ClaimIdle fails (no row returned).
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				// ClaimForResume also fails (no row returned). Carries an
 				// extra @statuses arg now that the resumable-status set is
 				// bound at runtime.
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				mock.ExpectRollback()
 			},
@@ -6066,10 +6066,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				mock.ExpectRollback().WillReturnError(fmt.Errorf("rollback failed"))
 			},
@@ -6176,12 +6176,12 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 				mock.ExpectBegin()
 				// ClaimIdle fails (no row returned).
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				// ClaimForResume succeeds. Carries an extra @statuses arg
 				// now that the resumable-status set is bound at runtime.
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
@@ -6250,7 +6250,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
@@ -6311,10 +6311,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+AND code_review_owner_pr_id IS NULL\s+RETURNING`).
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
@@ -6391,10 +6391,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+AND code_review_owner_pr_id IS NULL\s+RETURNING`).
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
@@ -6457,10 +6457,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+AND code_review_owner_pr_id IS NULL\s+RETURNING`).
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
@@ -6523,10 +6523,10 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionColumns))
 				mock.ExpectQuery(`UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)\s+WHERE id = @id AND org_id = @org_id AND status = ANY\(@statuses\)\s+AND sandbox_state != 'destroyed'\s+AND code_review_owner_pr_id IS NULL\s+RETURNING`).
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
@@ -6627,7 +6627,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
@@ -6690,7 +6690,7 @@ func TestSessionHandler_SendMessage(t *testing.T) {
 					)
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions SET status").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						addSessionRow(pgxmock.NewRows(sessionColumns),
 							sessionID, uuid.New(), orgID, "claude-code", "running", "semi", "low",
@@ -6902,7 +6902,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "idle"))
 		mock.ExpectBegin()
 		mock.ExpectQuery("UPDATE sessions SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
 		mock.ExpectQuery("INSERT INTO session_messages").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -6943,7 +6943,7 @@ func TestSessionHandler_SendMessage_ResolvesReviewComments(t *testing.T) {
 			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "idle"))
 		mock.ExpectBegin()
 		mock.ExpectQuery("UPDATE sessions SET status").
-			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 			WillReturnRows(idleSessionRow(pgxmock.NewRows(sessionColumns), sessionID, orgID, "running"))
 		mock.ExpectQuery("INSERT INTO session_messages").
 			WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -9899,10 +9899,10 @@ func TestSessionHandler_RetrySession_DefaultsToCheckpoint(t *testing.T) {
 		WithArgs(sessionAnyArgs(2)...).
 		WillReturnRows(pgxmock.NewRows(sessionThreadHandlerColumns).AddRow(sessionThreadHandlerRow(threadID, sessionID, orgID, models.ThreadStatusFailed, 2, now)...))
 	mock.ExpectQuery("UPDATE sessions").
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionColumns).AddRow(retrySessionRow(sessionID, orgID, models.SessionStatusRunning, &snapshotKey, nil, models.SandboxStateSnapshotted, diffStats, now)...))
 	mock.ExpectQuery("UPDATE session_threads").
-		WithArgs(sessionAnyArgs(5)...).
+		WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(sessionThreadHandlerColumns).AddRow(sessionThreadHandlerRow(threadID, sessionID, orgID, models.ThreadStatusRunning, 2, now)...))
 	mock.ExpectQuery("INSERT INTO session_messages").
 		WithArgs(sessionAnyArgs(11)...).
