@@ -260,33 +260,6 @@ func TestReviewEvidencePreparationAcrossSeparateExecutors(t *testing.T) {
 	require.Equal(t, ".\n.\n", string(count), "missing outputs should trigger exactly one new preparation")
 }
 
-func TestReviewEvidenceToolchainChangeRerunsBootstrap(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, previous, current, expected string
-	}{
-		{name: "same toolchain reuses evidence", previous: "node@22.1.0/npm@10.1.0", current: "node@22.1.0/npm@10.1.0", expected: ".\n"},
-		{name: "Node change rebuilds evidence", previous: "node@22.1.0/npm@10.1.0", current: "node@22.2.0/npm@10.1.0", expected: ".\n.\n"},
-		{name: "npm change rebuilds evidence", previous: "node@22.1.0/npm@10.1.0", current: "node@22.1.0/npm@10.2.0", expected: ".\n.\n"},
-		{name: "legacy evidence rebuilds with selected toolchain", current: "node@22.1.0/npm@10.1.0", expected: ".\n.\n"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			f := newReviewEvidenceGitFixtureWithConfig(t, `{"review":{"commands":["mkdir -p node_modules/pkg; printf types > node_modules/pkg/index.d.ts; printf '.\\n' >> executions.log"],"verify_commands":["test -f node_modules/pkg/index.d.ts"],"evidence":[{"path":"node_modules/pkg","description":"Dependency declarations","category":"javascript_dependencies"}]}}`, false)
-			first := f.sandbox()
-			first.NPMToolchainIdentity = tt.previous
-			require.NoError(t, f.orchestrator().ensureCodeReviewWorkspaceEvidence(context.Background(), f.session, first, zerolog.Nop()), "initial toolchain should prepare dependency evidence")
-			second := f.sandbox()
-			second.NPMToolchainIdentity = tt.current
-			require.NoError(t, f.orchestrator().ensureCodeReviewWorkspaceEvidence(context.Background(), f.session, second, zerolog.Nop()), "subsequent preparation should reconcile the selected toolchain")
-			count, err := os.ReadFile(filepath.Join(f.workDir, "executions.log"))
-			require.NoError(t, err, "bootstrap executions should be recorded")
-			require.Equal(t, tt.expected, string(count), "bootstrap must rerun only when the selected toolchain changes")
-		})
-	}
-}
-
 func TestReviewPullRequestCheckoutSuppressesRepositoryHooks(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

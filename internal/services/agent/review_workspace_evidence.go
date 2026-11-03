@@ -98,11 +98,10 @@ func reviewPreparationMarkerPath(sandbox *Sandbox) string {
 }
 
 type reviewWorkspaceEvidenceReceipt struct {
-	Version      int    `json:"version"`
-	BaseSHA      string `json:"base_sha"`
-	HeadSHA      string `json:"head_sha"`
-	ConfigHash   string `json:"config_hash"`
-	NPMToolchain string `json:"npm_toolchain,omitempty"`
+	Version    int    `json:"version"`
+	BaseSHA    string `json:"base_sha"`
+	HeadSHA    string `json:"head_sha"`
+	ConfigHash string `json:"config_hash"`
 }
 
 func reviewWorkspaceRevision(session *models.Session) (codeReviewCheckoutContext, error) {
@@ -619,7 +618,7 @@ func (o *Orchestrator) ensureCodeReviewWorkspaceEvidence(ctx context.Context, se
 			return fmt.Errorf("parse review repository config: %w", err)
 		}
 	}
-	receipt := reviewWorkspaceEvidenceReceipt{Version: 2, BaseSHA: revision.BaseSHA, HeadSHA: revision.HeadSHA, ConfigHash: fmt.Sprintf("%x", sha256.Sum256(raw)), NPMToolchain: sandbox.NPMToolchainIdentity}
+	receipt := reviewWorkspaceEvidenceReceipt{Version: 2, BaseSHA: revision.BaseSHA, HeadSHA: revision.HeadSHA, ConfigHash: fmt.Sprintf("%x", sha256.Sum256(raw))}
 	install, verifyTools, err := sandboxdeps.RequiredCommands(cfg.Dependencies)
 	if err != nil {
 		return err
