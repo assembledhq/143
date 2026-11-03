@@ -1956,7 +1956,7 @@ func (s *SessionStore) claimIdleRow(ctx context.Context, conn DBTX, orgID, sessi
 		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
 		RETURNING ` + sessionSelectColumns
 
-	rows, err := conn.Query(ctx, query, pgx.NamedArgs{
+	rows, err := conn.Query(ctx, query, pgx.QueryExecModeExec, pgx.NamedArgs{
 		"id":     sessionID,
 		"org_id": orgID,
 	})
@@ -1992,7 +1992,7 @@ func (s *SessionStore) claimForResumeRow(ctx context.Context, conn DBTX, orgID, 
 		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
 		RETURNING `+sessionSelectColumns, sessionResumeRuntimeResetAssignments)
 
-	rows, err := conn.Query(ctx, query, pgx.NamedArgs{
+	rows, err := conn.Query(ctx, query, pgx.QueryExecModeExec, pgx.NamedArgs{
 		"id":       sessionID,
 		"org_id":   orgID,
 		"statuses": sessionStatusStrings(models.ResumableSessionStatuses),

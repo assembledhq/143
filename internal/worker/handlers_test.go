@@ -5200,38 +5200,17 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 	// The atomic send rechecks ownership and performs every deciding read
 	// after its fresh canonical scope guards on the supplied transaction.
 	expectWorkerThreadSendSQLMutation(mock, orgID, sessionID, threadID, models.SessionStatusCompleted, models.ThreadStatusCompleted)
-	mock.ExpectQuery(`SELECT code_review_owner_pr_id FROM sessions WHERE org_id=\$1 AND id=\$2`).
-		WithArgs(orgID, sessionID).
-		WillReturnRows(pgxmock.NewRows([]string{"code_review_owner_pr_id"}).AddRow(nil))
-	mock.ExpectQuery(`(?s)SELECT.*FROM sessions s\s+JOIN automation_target_sessions g`).
-		WithArgs(pgx.NamedArgs{"session_id": sessionID, "org_id": orgID}).
-		WillReturnError(pgx.ErrNoRows)
+	mock.ExpectQuery(`SELECT s.code_review_owner_pr_id`).
+		WithArgs(pgx.QueryExecModeExec, orgID, sessionID).
+		WillReturnRows(pgxmock.NewRows([]string{"review", "generation", "automation", "target", "pending"}).AddRow(nil, nil, nil, nil, nil))
 	mock.ExpectQuery(`SELECT .* FROM thread_inbox_entries`).
 		WithArgs(orgID, threadID, "push-reconcile:"+sessionID.String()+":0").
 		WillReturnRows(pgxmock.NewRows(threadInboxColumns))
-	mock.ExpectQuery(`SELECT count\(\*\)\s+FROM thread_inbox_entries\s+WHERE org_id = \$1\s+AND thread_id = \$2`).
-		WithArgs(orgID, threadID).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`SELECT count\(\*\)\s+FROM thread_inbox_entries\s+WHERE org_id = \$1\s+AND session_id = \$2`).
-		WithArgs(orgID, sessionID).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`(?s)SELECT.*count\(\*\).*thread_inbox_entries.*WHERE org_id=\$1 AND thread_id=\$3.*count\(\*\).*WHERE org_id=\$1 AND session_id=\$2`).
+		WithArgs(pgx.QueryExecModeExec, orgID, sessionID, threadID).
+		WillReturnRows(pgxmock.NewRows([]string{"thread_count", "session_count"}).AddRow(0, 0))
 	mock.ExpectQuery(`(?s)WITH locked_threads AS.*UPDATE session_threads.*RETURNING`).
-		WithArgs(pgx.NamedArgs{
-			"id":                 threadID,
-			"org_id":             orgID,
-			"session_id":         sessionID,
-			"max_running":        models.MaxRunningThreadsPerSession,
-			"claimable_statuses": []string{string(models.ThreadStatusIdle)},
-		}).
-		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns))
-	mock.ExpectQuery("SELECT .* FROM session_threads").
-		WithArgs(workerAnyArgs(2)...).
-		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(completedThreadRow...))
-	mock.ExpectQuery(`(?s)SELECT count\(\*\).*FROM session_threads.*org_id = @org_id.*session_id = @session_id`).
-		WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
-		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
-	mock.ExpectQuery(`(?s)WITH locked_threads AS.*UPDATE session_threads.*RETURNING`).
-		WithArgs(pgx.NamedArgs{
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{
 			"id":          threadID,
 			"org_id":      orgID,
 			"session_id":  sessionID,
@@ -5244,17 +5223,8 @@ func TestPushPRChangesHandler_BranchDivergedQueuesReconciliation(t *testing.T) {
 			},
 		}).
 		WillReturnRows(pgxmock.NewRows(workerSessionThreadColumns).AddRow(runningThreadRow...))
-	mock.ExpectQuery(`(?s)UPDATE sessions.*status = 'running'.*status = 'idle'.*RETURNING`).
-		WithArgs(pgx.NamedArgs{
-			"id":     sessionID,
-			"org_id": orgID,
-		}).
-		WillReturnRows(pgxmock.NewRows(workerSessionColumns))
-	mock.ExpectQuery("SELECT .* FROM sessions").
-		WithArgs(workerAnyArgs(2)...).
-		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(completedRow...))
 	mock.ExpectQuery(`(?s)UPDATE sessions.*status = 'running'.*status = ANY\(@statuses\).*RETURNING`).
-		WithArgs(pgx.NamedArgs{
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{
 			"id":     sessionID,
 			"org_id": orgID,
 			"statuses": []string{

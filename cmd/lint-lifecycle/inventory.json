@@ -4028,8 +4028,30 @@
       "predicate": "Resolve retained provenance afresh in this supplied transaction. Only exact Legacy succeeds; valid Active or Normalizing returns ErrThreadSendModeChanged. There is no fallback or mutation."
     },
     {
+      "id": "internal/db/session_lifecycle_send_scope.go:CaptureLegacyThreadSendScopeInTx",
+      "source_sha256": "69a0684ac95424d62ebeca4a186ca9c7b61aa00750f89127c9dc75a29c06a3ea",
+      "operation": "Fresh fixed legacy scope acquisition plus transaction-local status and sibling-count observation; the snapshot only selects a legacy branch and does not replace any SQL claim predicate. Every attempt captures anew.",
+      "owner": "Whole-command compatible legacy SendMessage owner; DB acquires scope but does not authorize canonical admission.",
+      "predicate": "Fresh fixed legacy scope acquisition plus transaction-local status and sibling-count observation; the snapshot only selects a legacy branch and does not replace any SQL claim predicate. Every attempt captures anew. Validate exact nonzero tenant/session/lane and context/tx, freshly require Legacy, then acquire parent and all visible lanes plus the explicit target. Hidden target rows remain raw, not eligible.",
+      "lock": "Existing shared cutover interlock, parent NO KEY UPDATE NOWAIT, bounded visible-plus-target discovery, one UUID-ordered lane NO KEY UPDATE NOWAIT batch. No settings, settlement, effects or retry.",
+      "stale_result": "Any mode/provenance, context, discovery or membership error rejects the unit. Returned success establishes only fresh mode and scope locks, not current admission authority.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "A1 guard composed once per complete legacy command attempt. The owner guards the entire DB graph plus enqueue in one supplied transaction, reacquires on confirmed-rollback replay and never reuses entry-mode observation.",
+      "canonical_target": "Compatible-legacy Service.runLegacySendUnit before the entire atomic send graph",
+      "authority": "No actor, owner, epoch, consumer or execution authority. The unchanged legacy persistence predicates still apply inside the guarded unit.",
+      "fence_outcome": "Wrong mode never falls through or changes branches. Every failure rejects the complete command attempt and discards its staged result/effects.",
+      "prerequisite_0a": "Before shipping the bounded pre-floor atomic legacy exception, require full-schema actual caller proof of whole-graph late-failure rollback, committed/aborted ambiguous settlements, bounded whole-command contention replay/exhaustion, same-tx replay/capacity reads, one-connection composition and postcommit visibility. Prove adjacent-build coexistence while the send holds parent/lane locks using running-sibling inserts and status writers, plus FK-free log inserts as a negative control; record bounded progress, lock waits, retries/refusals and deadlocks. Idle-only tests or this syntax scanner do not satisfy that required gate. This exception establishes neither a compatibility floor nor v1 authority. A3 exact answers, A5 specialist authority, A6 waiting-input progression, B/E runtime start and settlement, and G/H assembled full-writer and activation gates remain separate; the canonical branch remains dark pending activation.",
+      "evidence": [
+        "internal/db/session_lifecycle_send_scope.go",
+        "internal/db/session_lifecycle_send_scope_test.go",
+        "internal/services/thread/send_legacy_atomic.go",
+        "internal/services/thread/send_postgres_legacy_contention_test.go:TestThreadSendLegacyLateContentionRetriesWholeCommandPostgres",
+        "internal/services/thread/send_postgres_latency_test.go"
+      ]
+    },
+    {
       "id": "internal/db/session_lifecycle_send_scope.go:RequireLegacyThreadSendScopeInTx",
-      "source_sha256": "6c7418fada2e6d16ba01f881f9b44c95255891c10e10802dcd9e39ceb277880f",
+      "source_sha256": "46af61a66ccfa596162c6bf0cfba63d4f4e21fe30349d725e2511ce7c35d1c3a",
       "operation": "fresh fixed-Legacy mode and ordered-scope guard for the whole send",
       "owner": "Whole-command compatible legacy SendMessage owner; DB acquires scope but does not authorize canonical admission.",
       "predicate": "Validate exact nonzero tenant/session/lane and context/tx, freshly require Legacy, then acquire parent and all visible lanes plus the explicit target. Hidden target rows remain raw, not eligible.",
@@ -4045,16 +4067,17 @@
         "internal/db/session_lifecycle_send_scope.go",
         "internal/db/session_lifecycle_send_scope_test.go",
         "internal/services/thread/send_legacy_atomic.go",
-        "internal/services/thread/send_postgres_legacy_contention_test.go:TestThreadSendLegacyLateContentionRetriesWholeCommandPostgres"
+        "internal/services/thread/send_postgres_legacy_contention_test.go:TestThreadSendLegacyLateContentionRetriesWholeCommandPostgres",
+        "internal/services/thread/send_postgres_latency_test.go"
       ]
     },
     {
       "id": "internal/db/session_lifecycle_send_scope.go:lockThreadSendScopeInTx",
-      "source_sha256": "5fe9308b0f8d2bfb4e47a891ff4d8b2513bb4e5759c8263638b6697114039540",
+      "source_sha256": "7917101679bc54c335076b1f1addf2e82d3d18386e521e769faaa2e92240bbbd",
       "operation": "bounded visible-plus-explicit lane acquisition",
       "owner": "Private DB observation; caller already resolved mode and higher-ranked domain/job rows",
       "predicate": "Exact tenant/parent discovery includes every visible lane and the explicit requested lane even if hidden. Require a nonzero strictly increasing complete UUID set containing the target; overflow never clears an unqueried tail.",
-      "lock": "Verify existing policy and acquire parent first, then discover at most the shared lane budget plus one and lock one sorted exact lane batch. Parent serialization applies to cooperating topology writers only.",
+      "lock": "Validate policy and acquire parent first, then one UUID-ordered visible-plus-explicit lane SELECT with LIMIT budget+1 and FOR NO KEY UPDATE NOWAIT. Overflow or missing target discards the entire unit including already acquired locks. Parent serialization applies to cooperating topology writers only.",
       "stale_result": "Query, scan, iteration, cancellation, overflow, missing target or changed membership returns a zero snapshot; no partially locked observation survives failure.",
       "classification": "unfenced-needs-conversion",
       "migration": "Raw acquisition prerequisite for A.1, not eligibility or a new admission engine. No status, owner, epoch, primary-lane or workspace availability inference.",
@@ -4064,7 +4087,8 @@
       "prerequisite_0a": "Before shipping the bounded pre-floor atomic legacy exception, require full-schema actual caller proof of whole-graph late-failure rollback, committed/aborted ambiguous settlements, bounded whole-command contention replay/exhaustion, same-tx replay/capacity reads, one-connection composition and postcommit visibility. Prove adjacent-build coexistence while the send holds parent/lane locks using running-sibling inserts and status writers, plus FK-free log inserts as a negative control; record bounded progress, lock waits, retries/refusals and deadlocks. Idle-only tests or this syntax scanner do not satisfy that required gate. This exception establishes neither a compatibility floor nor v1 authority. A3 exact answers, A5 specialist authority, A6 waiting-input progression, B/E runtime start and settlement, and G/H assembled full-writer and activation gates remain separate; the canonical branch remains dark pending activation.",
       "evidence": [
         "internal/db/session_lifecycle_send_scope.go",
-        "internal/db/session_lifecycle_send_scope_test.go"
+        "internal/db/session_lifecycle_send_scope_test.go",
+        "internal/services/thread/send_postgres_latency_test.go"
       ]
     },
     {
@@ -11350,10 +11374,10 @@
     },
     {
       "id": "internal/services/thread/send_legacy.go:Service.runLegacySendUnit",
-      "source_sha256": "4b0ecd6155fada363daa09bfd516c80e971d858b01b539a0d4e04b352d7f7480",
+      "source_sha256": "1fb4e7cb20d1827a1ca5a4bd9c92ffaec3dbce637651c3881ca928f5579216ed",
       "operation": "fresh fixed-legacy guard and staged result boundary for the entire atomic send",
       "owner": "thread.Service owns the complete version-zero send graph; mandatory send.Transactions owns the bounded top-level transaction and settlement, send.Legacy supplies transaction-bound persistence, and send.Effects owns postcommit publication.",
-      "predicate": "Delegate one complete DB-only legacy send to runSendUnit. Clear every staged result/effect field before each concrete runner attempt, freshly RequireLegacyThreadSendScopeInTx, and invoke the complete supplied-tx graph only after that guard. Wrap guard failure distinctly, return a zero attempt on every error, and expose staged values only after known completion. Entry-mode observation never substitutes for the fresh fixed guard.",
+      "predicate": "Delegate one complete DB-only legacy send to runSendUnit. Clear every staged result/effect field before each concrete runner attempt, freshly CaptureLegacyThreadSendScopeInTx, and invoke the complete supplied-tx graph only after that guard. Wrap guard failure distinctly, return a zero attempt on every error, and expose staged values only after known completion. Entry-mode observation never substitutes for the fresh fixed guard. Pass only this attempt's newly captured locked snapshot to the DB-only callback and discard it on any failure.",
       "lock": "One supplied bounded READ COMMITTED transaction for the entire legacy command. RequireLegacyThreadSendScopeInTx freshly acquires the shared cutover interlock, fixed Legacy provenance, parent and bounded UUID-ordered visible-plus-explicit lanes before the complete DB graph. All deciding reads and writes use this same tx; no nested transaction, receiver-pool mutation or external effect occurs inside it.",
       "stale_result": "Any known failure rolls back the entire provisional graph and discards result/effect values. Only the concrete transaction owner's confirmed whole rollback permits its existing bounded contention replay, with all attempt-local values reset and fresh fixed-mode/scope guards. Typed unknown settlement dominates wrapped errors: return no result, publish nothing, perform no compensation, branch fallback or further service write attempt. A negative legacy lookup never proves abort. Handler-facing legacy domain sentinels use legacySendDomainError.Is with exactly one original cause through Unwrap. A plain retryable SQLSTATE remains visible to the unchanged transaction kernel; genuine joined, network, cancellation and other nonretryable causes keep their original shape and do not gain replay permission.",
       "migration": "A1 atomic compatible-version-zero composition; legacy status, message/source, answers, inbox, capacity and job-option behavior remain explicit compatibility rules. This supplies no canonical version-one receipt, claim or current execution authority. Active ordinary admission remains the separate fixed branch.",
@@ -11372,16 +11396,17 @@
         "internal/services/thread/send_postgres_legacy_failure_test.go",
         "internal/services/thread/send_postgres_legacy_contention_test.go",
         "internal/services/thread/send_postgres_effects_test.go",
-        "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorSettlementProof"
+        "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorSettlementProof",
+        "internal/services/thread/send_postgres_latency_test.go"
       ],
       "classification": "unfenced-needs-conversion"
     },
     {
       "id": "internal/services/thread/send_legacy_atomic.go:Service.claimLegacySessionInTx",
-      "source_sha256": "051d0b93bac0c7090995c5ab8875f573b16fb7e8bb0ee47dfc353009beb15c54",
+      "source_sha256": "1d67f10cef633686e8cbce4514fc46623ddab5dadcc1abb60c90b2aacc35631f",
       "operation": "same-transaction compatible legacy parent idle/resume claim and diagnostic",
       "owner": "thread.Service owns the complete version-zero send graph; mandatory send.Transactions owns the bounded top-level transaction and settlement, send.Legacy supplies transaction-bound persistence, and send.Effects owns postcommit publication.",
-      "predicate": "Try the original idle parent claim, then classify only an exact pgx.ErrNoRows using GetSessionInTx on the supplied tx. A running parent is the established no-parent-claim case; destroyed sandbox refuses; otherwise delegate the original resume claim and retain the preclaim status for legacy question handling. Other errors propagate without status fallback. Parent claims remain eventless.",
+      "predicate": "Use this attempt's locked parent status to select idle/resume claim or the same-transaction running-parent read. Reject a deleted parent; actual claim SQL retains sandbox and owner predicates. A claim miss still reads the current parent to preserve destroyed-snapshot and non-resumable errors; the idle miss retains the old resume fallback.",
       "lock": "One supplied bounded READ COMMITTED transaction for the entire legacy command. RequireLegacyThreadSendScopeInTx freshly acquires the shared cutover interlock, fixed Legacy provenance, parent and bounded UUID-ordered visible-plus-explicit lanes before the complete DB graph. All deciding reads and writes use this same tx; no nested transaction, receiver-pool mutation or external effect occurs inside it.",
       "stale_result": "Any known failure rolls back the entire provisional graph and discards result/effect values. Only the concrete transaction owner's confirmed whole rollback permits its existing bounded contention replay, with all attempt-local values reset and fresh fixed-mode/scope guards. Typed unknown settlement dominates wrapped errors: return no result, publish nothing, perform no compensation, branch fallback or further service write attempt. A negative legacy lookup never proves abort. Handler-facing legacy domain sentinels use legacySendDomainError.Is with exactly one original cause through Unwrap. A plain retryable SQLSTATE remains visible to the unchanged transaction kernel; genuine joined, network, cancellation and other nonretryable causes keep their original shape and do not gain replay permission.",
       "migration": "A1 atomic compatible-version-zero composition; legacy status, message/source, answers, inbox, capacity and job-option behavior remain explicit compatibility rules. This supplies no canonical version-one receipt, claim or current execution authority. Active ordinary admission remains the separate fixed branch.",
@@ -11403,16 +11428,17 @@
         "internal/services/thread/send_legacy.go:legacySendDomainError",
         "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorPreservesCauseShape",
         "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorSettlementProof",
-        "internal/db/session_lifecycle_transaction.go:retryableLifecycleTransaction"
+        "internal/db/session_lifecycle_transaction.go:retryableLifecycleTransaction",
+        "internal/services/thread/send_postgres_latency_test.go"
       ],
       "classification": "unfenced-needs-conversion"
     },
     {
       "id": "internal/services/thread/send_legacy_atomic.go:Service.claimLegacyThreadInTx",
-      "source_sha256": "90ffee1bf161b03d33713708d63453e689c37541a454defd27d6a0fc14cb7122",
+      "source_sha256": "b74d468eab9635bab7bf97849b59e8655267386c6a24e012033dc8840eb7cebc",
       "operation": "same-transaction compatible legacy lane claim and capacity classification",
       "owner": "thread.Service owns the complete version-zero send graph; mandatory send.Transactions owns the bounded top-level transaction and settlement, send.Legacy supplies transaction-bound persistence, and send.Effects owns postcommit publication.",
-      "predicate": "Try idle claim with the unchanged three-active-lane cap, then classify only an exact pgx.ErrNoRows using explicit GetThreadInTx and CountActiveThreadsInTx on the same tx. Require visible exact session/lane membership, preserve midturn queue/comment refusal, capacity-wait eligibility and resumable statuses; exclude an already-active target from the cap as before. Retry the original resume claim only when eligible and reread a no-rows race through that same tx. Return provisional opaque claim effects without publishing.",
+      "predicate": "Use this attempt's locked target status, archive marker and visible active-sibling count to select queue, idle claim or resume claim. Queue reads the exact visible thread; successful claims still enforce the original SQL status, visibility, tenant and capacity predicates. A collection miss uses the defensive same-transaction classifier. No statement decides eligibility from an earlier attempt.",
       "lock": "One supplied bounded READ COMMITTED transaction for the entire legacy command. RequireLegacyThreadSendScopeInTx freshly acquires the shared cutover interlock, fixed Legacy provenance, parent and bounded UUID-ordered visible-plus-explicit lanes before the complete DB graph. All deciding reads and writes use this same tx; no nested transaction, receiver-pool mutation or external effect occurs inside it.",
       "stale_result": "Any known failure rolls back the entire provisional graph and discards result/effect values. Only the concrete transaction owner's confirmed whole rollback permits its existing bounded contention replay, with all attempt-local values reset and fresh fixed-mode/scope guards. Typed unknown settlement dominates wrapped errors: return no result, publish nothing, perform no compensation, branch fallback or further service write attempt. A negative legacy lookup never proves abort. Handler-facing legacy domain sentinels use legacySendDomainError.Is with exactly one original cause through Unwrap. A plain retryable SQLSTATE remains visible to the unchanged transaction kernel; genuine joined, network, cancellation and other nonretryable causes keep their original shape and do not gain replay permission.",
       "migration": "A1 atomic compatible-version-zero composition; legacy status, message/source, answers, inbox, capacity and job-option behavior remain explicit compatibility rules. This supplies no canonical version-one receipt, claim or current execution authority. Active ordinary admission remains the separate fixed branch.",
@@ -11434,7 +11460,40 @@
         "internal/services/thread/send_legacy.go:legacySendDomainError",
         "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorPreservesCauseShape",
         "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorSettlementProof",
-        "internal/db/session_lifecycle_transaction.go:retryableLifecycleTransaction"
+        "internal/db/session_lifecycle_transaction.go:retryableLifecycleTransaction",
+        "internal/services/thread/send_postgres_latency_test.go"
+      ],
+      "classification": "unfenced-needs-conversion"
+    },
+    {
+      "id": "internal/services/thread/send_legacy_atomic.go:Service.classifyLegacyThreadClaimMissInTx",
+      "source_sha256": "c82e232ebb8e8c69b5a5f9bf8d394b78661c4dd93f35e615e7794adb054c325b",
+      "operation": "Defensive claim-miss classification retains same-transaction visibility reads, capacity checks excluding the active target, resume predicate and final race read. Ordinary successful sends select directly from the locked snapshot and do not enter this fallback.",
+      "owner": "thread.Service owns the complete version-zero send graph; mandatory send.Transactions owns the bounded top-level transaction and settlement, send.Legacy supplies transaction-bound persistence, and send.Effects owns postcommit publication.",
+      "predicate": "Defensive claim-miss classification retains same-transaction visibility reads, capacity checks excluding the active target, resume predicate and final race read. Ordinary successful sends select directly from the locked snapshot and do not enter this fallback.",
+      "lock": "One supplied bounded READ COMMITTED transaction for the entire legacy command. RequireLegacyThreadSendScopeInTx freshly acquires the shared cutover interlock, fixed Legacy provenance, parent and bounded UUID-ordered visible-plus-explicit lanes before the complete DB graph. All deciding reads and writes use this same tx; no nested transaction, receiver-pool mutation or external effect occurs inside it.",
+      "stale_result": "Any known failure rolls back the entire provisional graph and discards result/effect values. Only the concrete transaction owner's confirmed whole rollback permits its existing bounded contention replay, with all attempt-local values reset and fresh fixed-mode/scope guards. Typed unknown settlement dominates wrapped errors: return no result, publish nothing, perform no compensation, branch fallback or further service write attempt. A negative legacy lookup never proves abort. Handler-facing legacy domain sentinels use legacySendDomainError.Is with exactly one original cause through Unwrap. A plain retryable SQLSTATE remains visible to the unchanged transaction kernel; genuine joined, network, cancellation and other nonretryable causes keep their original shape and do not gain replay permission.",
+      "migration": "A1 atomic compatible-version-zero composition; legacy status, message/source, answers, inbox, capacity and job-option behavior remain explicit compatibility rules. This supplies no canonical version-one receipt, claim or current execution authority. Active ordinary admission remains the separate fixed branch.",
+      "canonical_target": "Whole-command compatible-legacy Service.SendMessage; AdmitMessageInTx owns the separate active ordinary non-answer branch",
+      "authority": "Fresh fixed Legacy provenance and ordered row locks only. Preserve exact delegated legacy eligibility predicates; no immutable v1 input receipt, epoch acceptance, specialist grant, physical readiness or provider-start authority is created.",
+      "fence_outcome": "Known success exposes only the final committed attempt's legacy result and deferred effects. Known failure leaves no accepted DB graph from that command; unknown settlement exposes neither result nor effects and cannot authorize compensation or retry. No canonical accepted/stale receipt is manufactured.",
+      "prerequisite_0a": "Before shipping the bounded pre-floor atomic legacy exception, require full-schema actual caller proof of whole-graph late-failure rollback, committed/aborted ambiguous settlements, bounded whole-command contention replay/exhaustion, same-tx replay/capacity reads, one-connection composition and postcommit visibility. Prove adjacent-build coexistence while the send holds parent/lane locks using running-sibling inserts and status writers, plus FK-free log inserts as a negative control; record bounded progress, lock waits, retries/refusals and deadlocks. Idle-only tests or this syntax scanner do not satisfy that required gate. This exception establishes neither a compatibility floor nor v1 authority. A3 exact answers, A5 specialist authority, A6 waiting-input progression, B/E runtime start and settlement, and G/H assembled full-writer and activation gates remain separate; the canonical branch remains dark pending activation.",
+      "evidence": [
+        "internal/services/thread/send_routing.go",
+        "internal/services/thread/send_legacy.go",
+        "internal/services/thread/send_legacy_atomic.go",
+        "internal/services/thread/send_persistence.go",
+        "internal/services/thread/send_legacy_test.go",
+        "internal/services/thread/send_outcome_test.go",
+        "internal/services/thread/send_postgres_legacy_atomic_test.go",
+        "internal/services/thread/send_postgres_legacy_failure_test.go",
+        "internal/services/thread/send_postgres_legacy_contention_test.go",
+        "internal/services/thread/send_postgres_effects_test.go",
+        "internal/services/thread/send_legacy.go:legacySendDomainError",
+        "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorPreservesCauseShape",
+        "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorSettlementProof",
+        "internal/db/session_lifecycle_transaction.go:retryableLifecycleTransaction",
+        "internal/services/thread/send_postgres_latency_test.go"
       ],
       "classification": "unfenced-needs-conversion"
     },
@@ -11497,7 +11556,7 @@
     },
     {
       "id": "internal/services/thread/send_legacy_atomic.go:Service.sendLegacyMessage",
-      "source_sha256": "f292705b03c4532b158cd77d88bc3501e9cc6ca1751a8c4c4576a3555f9b191a",
+      "source_sha256": "73e0b0318bb28092126bab4a3e46bb84c993702d28a3d5d5bcec978ec3b23a22",
       "operation": "whole-command atomic legacy send and deferred postcommit effects",
       "owner": "thread.Service owns the complete version-zero send graph; mandatory send.Transactions owns the bounded top-level transaction and settlement, send.Legacy supplies transaction-bound persistence, and send.Effects owns postcommit publication.",
       "predicate": "After unchanged code-review/automation policy prechecks and optional review-comment dependency validation, invoke exactly one runLegacySendUnit around writeLegacySendInTx. On known completion publish only the final attempt's claim/pending effects, job wake and missing-answer warnings; queued owner-loss recovery remains after that commit. Any error returns immediately before all effects, recovery or compensation.",
@@ -11518,13 +11577,14 @@
         "internal/services/thread/send_postgres_legacy_atomic_test.go",
         "internal/services/thread/send_postgres_legacy_failure_test.go",
         "internal/services/thread/send_postgres_legacy_contention_test.go",
-        "internal/services/thread/send_postgres_effects_test.go"
+        "internal/services/thread/send_postgres_effects_test.go",
+        "internal/services/thread/send_postgres_latency_test.go"
       ],
       "classification": "unfenced-needs-conversion"
     },
     {
       "id": "internal/services/thread/send_legacy_atomic.go:Service.writeLegacySendInTx",
-      "source_sha256": "76ab5616cf5ef7a7dd28746342a0d9e2238f3039b2a5cf8b806e7da1fe4c2f67",
+      "source_sha256": "d2158e7d58801dd4031d43edc9322e38679b52fa7921fe128ef8c2dec040214c",
       "operation": "complete compatible legacy DB graph and job enqueue in one supplied transaction",
       "owner": "thread.Service owns the complete version-zero send graph; mandatory send.Transactions owns the bounded top-level transaction and settlement, send.Legacy supplies transaction-bound persistence, and send.Effects owns postcommit publication.",
       "predicate": "Repeat code-review/automation ownership rejection in tx. Exact legacy client-key lookup uses supplied-tx inbox and message readers before new admission; enforce unchanged message-byte, per-lane and per-session pending limits through same-tx counters. Compose lane/cap classification, optional parent claim, source/content/turn construction, comments and legacy answers, optional inbox/pending projection, then continuation or live-inbox enqueue on that tx. Capacity-wait returns without a new job and omits comments/durable free-text answers. Preserve legacy dedupe collision success with nil job ID and its notification behavior; return only staged result/effect data. Preserve the capacity branch's create queued message error prefix and ordinary branch's create message prefix. Ownership, missing lane/parent, non-resumable parent and enqueue domain sentinels retain their exact original single cause rather than constructing a synthetic two-error unwrap.",
@@ -11552,7 +11612,8 @@
         "internal/services/thread/send_legacy.go:legacySendDomainError",
         "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorPreservesCauseShape",
         "internal/services/thread/send_legacy_test.go:TestSendMessageLegacyDomainErrorSettlementProof",
-        "internal/db/session_lifecycle_transaction.go:retryableLifecycleTransaction"
+        "internal/db/session_lifecycle_transaction.go:retryableLifecycleTransaction",
+        "internal/services/thread/send_postgres_latency_test.go"
       ],
       "classification": "unfenced-needs-conversion"
     },

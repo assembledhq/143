@@ -59,7 +59,7 @@ func expectedSessionClaimStatement(f sessionPersistenceFixture, kind string) thr
 			RETURNING `+sessionSelectColumns, sessionResumeRuntimeResetAssignments)
 		args["statuses"] = []string{"completed", "pr_created", "failed", "cancelled", "awaiting_input", "needs_human_guidance"}
 	}
-	return threadPersistenceWrite{SQL: strings.Join(strings.Fields(query), " "), Args: []any{args}}
+	return threadPersistenceWrite{SQL: strings.Join(strings.Fields(query), " "), Args: []any{pgx.QueryExecModeExec, args}}
 }
 
 func TestSessionClaimPersistence(t *testing.T) {

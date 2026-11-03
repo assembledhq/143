@@ -230,7 +230,7 @@ func TestLifecycleLaneClaimErrorsDiscardAllObservations(t *testing.T) {
 				{sql: lifecycleTransactionPolicyQuery, rows: lifecycleScopePolicyRows().AddRow("read committed", "1", "250ms", "1500ms")},
 				{sql: cutoverSharedSQL, args: []any{"session_lifecycle_cutover:" + f.orgID.String() + ":" + expected.sessionID.String()}, rows: cutoverLockRows().AddRow(true)},
 				{sql: lifecycleTransactionPolicyQuery, rows: lifecycleScopePolicyRows().AddRow("read committed", "1", "250ms", "1500ms")},
-				{sql: lifecycleSessionScopeLockQuery, args: []any{f.orgID, expected.sessionID}, rows: lifecycleScopeSessionRows(observation.scope.session)},
+				{sql: lifecycleSessionScopeLockQuery, args: []any{pgx.QueryExecModeExec, f.orgID, expected.sessionID}, rows: lifecycleScopeSessionRows(observation.scope.session)},
 				{sql: lifecycleThreadScopeLockQuery, args: []any{f.orgID, expected.sessionID, []uuid.UUID{expected.threadID}}, rows: lifecycleScopeThreadRows(observation.scope.threads...)},
 				{sql: laneClaimSQL, args: []any{f.orgID, expected.sessionID, expected.threadID}, rows: laneClaimUnitRows(expected, f.orgID, observation)},
 				{sql: laneClaimReceiptSQL, args: []any{f.orgID, expected.sessionID, expected.threadID, expected.dispatchID}, rows: laneClaimReceiptUnitRows(observation.receipt)},
@@ -334,7 +334,7 @@ func expectLaneClaimLocks(mock pgxmock.PgxPoolIface, orgID uuid.UUID, e lifecycl
 	expectLifecycleScopePolicy(mock)
 	mock.ExpectQuery(cutoverSharedSQL).WithArgs("session_lifecycle_cutover:" + orgID.String() + ":" + e.sessionID.String()).WillReturnRows(cutoverLockRows().AddRow(true))
 	expectLifecycleScopePolicy(mock)
-	mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(orgID, e.sessionID).WillReturnRows(lifecycleScopeSessionRows(scope.session))
+	mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(pgx.QueryExecModeExec, orgID, e.sessionID).WillReturnRows(lifecycleScopeSessionRows(scope.session))
 	mock.ExpectQuery(lifecycleThreadScopeLockQuery).WithArgs(orgID, e.sessionID, []uuid.UUID{e.threadID}).WillReturnRows(lifecycleScopeThreadRows(scope.threads...))
 }
 

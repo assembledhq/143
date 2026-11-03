@@ -71,7 +71,7 @@ func (t sendPostgresGuardObservedTx) QueryRow(ctx context.Context, query string,
 
 func (t sendPostgresGuardObservedTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
 	rows, err := t.Tx.Query(ctx, query, args...)
-	if err != nil || !strings.HasPrefix(strings.TrimSpace(query), "SELECT id, org_id, session_id, status, archived_at,") || !strings.Contains(query, "ORDER BY id FOR NO KEY UPDATE NOWAIT") {
+	if err != nil || !strings.HasPrefix(strings.TrimSpace(query), "SELECT id, org_id, session_id, status, archived_at,") || !strings.Contains(query, "ORDER BY id LIMIT $4 FOR NO KEY UPDATE NOWAIT") {
 		return rows, err
 	}
 	return &sendPostgresAfterCloseRows{Rows: rows, after: func() { t.counts.lanes++ }}, nil

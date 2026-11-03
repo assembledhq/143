@@ -36,8 +36,6 @@ func TestRunLifecycleTransactionRequiresOwnedPool(t *testing.T) {
 }
 
 func expectLifecycleSetup(mock pgxmock.PgxPoolIface) {
-	mock.ExpectQuery("^SHOW transaction_isolation$").
-		WillReturnRows(pgxmock.NewRows([]string{"transaction_isolation"}).AddRow("read committed"))
 	mock.ExpectExec(regexp.QuoteMeta(expectedLifecycleSettings)).WillReturnResult(pgxmock.NewResult("SELECT", 1))
 }
 
@@ -118,9 +116,8 @@ func TestRunLifecycleTransactionRetriesOnlyAbortedSetupOrWorkContention(t *testi
 		code  string
 		phase string
 	}{
-		{name: "setup lock unavailable", code: "55P03", phase: "setup"},
-		{name: "setup deadlock", code: "40P01", phase: "setup"},
 		{name: "settings lock unavailable", code: "55P03", phase: "settings"},
+		{name: "settings deadlock", code: "40P01", phase: "settings"},
 		{name: "work lock unavailable", code: "55P03", phase: "work"},
 		{name: "work deadlock", code: "40P01", phase: "work"},
 	}
@@ -132,11 +129,7 @@ func TestRunLifecycleTransactionRetriesOnlyAbortedSetupOrWorkContention(t *testi
 			defer mock.Close()
 			contention := &pgconn.PgError{Code: tt.code}
 			mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-			if tt.phase == "setup" {
-				mock.ExpectQuery("^SHOW transaction_isolation$").WillReturnError(contention)
-			} else if tt.phase == "settings" {
-				mock.ExpectQuery("^SHOW transaction_isolation$").
-					WillReturnRows(pgxmock.NewRows([]string{"transaction_isolation"}).AddRow("read committed"))
+			if tt.phase == "settings" {
 				mock.ExpectExec(regexp.QuoteMeta(expectedLifecycleSettings)).WillReturnError(contention)
 			} else {
 				expectLifecycleSetup(mock)
@@ -405,7 +398,7 @@ func TestRunLifecycleTransactionOneBudgetAcrossFreshTransactions(t *testing.T) {
 	})
 	require.NoError(t, err, "a second fresh transaction should commit after confirmed abort")
 	require.NotSame(t, transactions[0], transactions[1], "retry must not reuse the aborted transaction")
-	require.Equal(t, []string{"begin", "isolation", "settings", "work", "rollback", "begin", "isolation", "settings", "work", "commit"}, events, "fresh acquisition and revalidation must follow successful rollback")
+	require.Equal(t, []string{"begin", "settings", "work", "rollback", "begin", "settings", "work", "commit"}, events, "fresh acquisition and revalidation must follow successful rollback")
 }
 
 func TestLifecycleRetryDelayBounds(t *testing.T) {
@@ -717,6 +710,55 @@ func TestLifecycleTransactionNilDependencies(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			require.ErrorContains(t, tt.run(), tt.want, "invalid dependencies should return a clear error without invoking work")
+		})
+	}
+}
+
+func TestLifecyclePrecommitAbortProof(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		commit  bool
+		cleanup error
+		aborted bool
+	}{
+		{name: "closed connection before commit", cleanup: pgconn.ErrConnClosed, aborted: true},
+		{name: "arbitrary cleanup failure", cleanup: io.EOF},
+		{name: "already settled transaction", cleanup: pgx.ErrTxClosed},
+		{name: "closed connection after commit", commit: true, cleanup: pgconn.ErrConnClosed},
+		{name: "failed commit then successful cleanup", commit: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create isolated settlement mock")
+			t.Cleanup(mock.Close)
+			mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			expectLifecycleSetup(mock)
+			if tt.commit {
+				mock.ExpectCommit().WillReturnError(context.DeadlineExceeded)
+			}
+			cleanup := mock.ExpectRollback()
+			if tt.cleanup != nil {
+				cleanup.WillReturnError(tt.cleanup)
+			}
+			calls := 0
+			err = runLifecycleTransaction(context.Background(), mock, func(context.Context, pgx.Tx) error {
+				calls++
+				if tt.commit {
+					return nil
+				}
+				return context.DeadlineExceeded
+			})
+			require.ErrorIs(t, err, context.DeadlineExceeded, "deadline cause must remain inspectable")
+			_, aborted := err.(*LifecycleTransactionAbortedError)
+			require.Equal(t, tt.aborted, aborted, "only a precommit closed connection can provide typed abort proof after failed cleanup")
+			if tt.aborted {
+				require.ErrorIs(t, err, tt.cleanup, "typed proof must retain the cleanup cause")
+			}
+			require.Equal(t, 1, calls, "failed cleanup or commit never automatically replays")
+			require.NoError(t, mock.ExpectationsWereMet(), "settlement must use exactly one attempt")
 		})
 	}
 }

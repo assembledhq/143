@@ -92,7 +92,7 @@ func lockLifecycleScopeInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, sco
 	}
 
 	var session lifecycleLockedSession
-	err := tx.QueryRow(ctx, lifecycleSessionScopeLockQuery, orgID, scope.sessionID).
+	err := tx.QueryRow(ctx, lifecycleSessionScopeLockQuery, pgx.QueryExecModeExec, orgID, scope.sessionID).
 		Scan(&session.id, &session.orgID, &session.status, &session.deletedAt, &session.archivedAt,
 			&session.epochs.AdmissionEpoch, &session.epochs.EndEpoch, &session.epochs.LifecycleVersion)
 	if err != nil {

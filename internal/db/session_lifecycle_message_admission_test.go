@@ -387,7 +387,7 @@ func TestMessageAdmissionReplayInterlockPrecedesHigherLocks(t *testing.T) {
 			mock.ExpectQuery(`SELECT id FROM jobs WHERE org_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR NO KEY UPDATE NOWAIT`).WithArgs(a.orgID, []uuid.UUID{a.jobID}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(a.jobID)).RowsWillBeClosed()
 			expectLifecycleScopePolicy(mock)
 			parentErr := errors.New("synthetic parent refusal after verified lock ordering")
-			mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(a.orgID, a.fence.sessionID).WillReturnError(parentErr)
+			mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(pgx.QueryExecModeExec, a.orgID, a.fence.sessionID).WillReturnError(parentErr)
 			actual, found, err := FindMessageAdmissionReplayInTx(ctx, mock, a.orgID, a.fence.sessionID, a.fence.threadID, a.ingress)
 			require.ErrorIs(t, err, parentErr, "both finite current modes must reach the same resource-access lock without a new eligibility route")
 			require.False(t, found, "failed resource access must not expose retained acceptance")
@@ -482,7 +482,6 @@ func TestMessageAdmissionCapturePrelocksBeforeParent(t *testing.T) {
 			expectLifecycleModeRead(mock, snapshot)
 			expectThreadSendScopeParent(mock, f)
 			expectThreadSendScopeKeys(mock, f, f.first.id, f.second.id)
-			mock.ExpectQuery(lifecycleThreadScopeLockQuery).WithArgs(f.orgID, f.sessionID, []uuid.UUID{f.first.id, f.second.id}).WillReturnRows(lifecycleScopeThreadRows(f.first, f.second)).RowsWillBeClosed()
 			after := owners
 			if tt.changed {
 				other := uuid.New()

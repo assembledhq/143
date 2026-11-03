@@ -41,14 +41,10 @@ const sendFixtureParentSQL = `SELECT id, org_id, status, deleted_at, archived_at
 		admission_epoch, end_epoch, lifecycle_version
 		FROM sessions WHERE org_id = $1 AND id = $2
 		FOR NO KEY UPDATE NOWAIT`
-const sendFixtureKeysSQL = `SELECT id FROM session_threads
-	WHERE org_id = $1 AND session_id = $2 AND (archived_at IS NULL OR id = $3)
-	ORDER BY id LIMIT $4`
 const sendFixtureLanesSQL = `SELECT id, org_id, session_id, status, archived_at,
-		admission_epoch, end_epoch, lifecycle_version
-		FROM session_threads
-		WHERE org_id = $1 AND session_id = $2 AND id = ANY($3::uuid[])
-		ORDER BY id FOR NO KEY UPDATE NOWAIT`
+	admission_epoch, end_epoch, lifecycle_version FROM session_threads
+	WHERE org_id = $1 AND session_id = $2 AND (archived_at IS NULL OR id = $3)
+	ORDER BY id LIMIT $4 FOR NO KEY UPDATE NOWAIT`
 
 type legacyGuardFixtureTx struct {
 	pgx.Tx
@@ -63,7 +59,7 @@ type legacyGuardFixtureTx struct {
 
 func (f *legacyGuardFixtureTx) requireScope() {
 	f.t.Helper()
-	require.Equal(f.t, 7, f.stage, "every atomic mutation and classification read must follow fresh policy, mode and canonical scope acquisition")
+	require.Equal(f.t, 6, f.stage, "every atomic mutation and classification read must follow fresh policy, mode and canonical scope acquisition")
 }
 func (f *legacyGuardFixtureTx) businessReader() db.DBTX {
 	f.requireScope()
@@ -72,6 +68,11 @@ func (f *legacyGuardFixtureTx) businessReader() db.DBTX {
 }
 
 func (f *legacyGuardFixtureTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
+	if len(args) > 0 {
+		if mode, ok := args[0].(pgx.QueryExecMode); ok && mode == pgx.QueryExecModeExec {
+			args = args[1:]
+		}
+	}
 	var rows *pgxmock.Rows
 	switch query {
 	case sendFixturePolicySQL:
@@ -104,17 +105,17 @@ func (f *legacyGuardFixtureTx) QueryRow(ctx context.Context, query string, args 
 }
 
 func (f *legacyGuardFixtureTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
+	if len(args) > 0 {
+		if mode, ok := args[0].(pgx.QueryExecMode); ok && mode == pgx.QueryExecModeExec {
+			args = args[1:]
+		}
+	}
 	var rows *pgxmock.Rows
 	switch query {
-	case sendFixtureKeysSQL:
-		require.Equal(f.t, 5, f.stage, "lane discovery must occur after parent lock in every unit")
-		require.Equal(f.t, []any{f.org, f.session}, args[:2], "discovery must retain tenant/parent")
-		f.stage++
-		f.lane = args[2].(uuid.UUID)
-		rows = pgxmock.NewRows([]string{"id"}).AddRow(f.lane)
 	case sendFixtureLanesSQL:
-		require.Equal(f.t, 6, f.stage, "ordered lane acquisition must finish before business writes")
-		require.Equal(f.t, []any{f.org, f.session, []uuid.UUID{f.lane}}, args, "lane locks must use the exact discovered ordered set")
+		require.Equal(f.t, 5, f.stage, "ordered lane discovery and acquisition must follow the parent lock")
+		require.Equal(f.t, []any{f.org, f.session}, args[:2], "lane locks must retain the exact tenant and parent")
+		f.lane = args[2].(uuid.UUID)
 		f.stage++
 		rows = pgxmock.NewRows([]string{"id", "org", "session", "status", "archived", "epoch", "end", "protocol"}).AddRow(f.lane, f.org, f.session, models.ThreadStatusIdle, nil, int64(0), nil, int16(0))
 	default:
@@ -162,7 +163,7 @@ func (r *legacyGuardFixtureRunner) Run(ctx context.Context, work func(context.Co
 		}
 		r.activeTx, r.activeCtx = tx, unitCtx
 		err = work(unitCtx, tx)
-		require.Contains(r.t, []int{3, 7}, tx.stage, "a completed fixture attempt must execute entry observation or full atomic scope guards")
+		require.Contains(r.t, []int{3, 6}, tx.stage, "a completed fixture attempt must execute entry observation or full atomic scope guards")
 		require.NoError(r.t, guard.ExpectationsWereMet(), "every real guard query must consume its pinned response")
 		if business != nil {
 			if err != nil {
@@ -269,6 +270,15 @@ func (p *legacyHookPersistence) GetMessageByIDInTx(ctx context.Context, tx pgx.T
 func (p *legacyHookPersistence) CountPendingInboxByThreadInTx(ctx context.Context, tx pgx.Tx, org, thread uuid.UUID) (int, error) {
 	p.scope(ctx, tx)
 	return p.service.inboxStore.CountPendingByThread(ctx, org, thread)
+}
+
+func (p *legacyHookPersistence) CountPendingInboxInTx(ctx context.Context, tx pgx.Tx, org, session, thread uuid.UUID) (int, int, error) {
+	threadCount, err := p.CountPendingInboxByThreadInTx(ctx, tx, org, thread)
+	if err != nil || threadCount >= maxThreadInboxPending {
+		return threadCount, 0, err
+	}
+	sessionCount, err := p.CountPendingInboxBySessionInTx(ctx, tx, org, session)
+	return threadCount, sessionCount, err
 }
 
 func (p *legacyHookPersistence) CountPendingInboxBySessionInTx(ctx context.Context, tx pgx.Tx, org, session uuid.UUID) (int, error) {

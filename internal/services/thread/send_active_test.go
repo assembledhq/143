@@ -44,9 +44,8 @@ func expectActiveSendMode(mock pgxmock.PgxPoolIface, input SendMessageInput) {
 
 func expectActiveSendScope(mock pgxmock.PgxPoolIface, input SendMessageInput, epoch int64, parentStatus models.SessionStatus, laneStatus models.ThreadStatus, end *int64) {
 	expectSendPolicy(mock)
-	mock.ExpectQuery(regexp.QuoteMeta(sendFixtureParentSQL)).WithArgs(input.OrgID, input.SessionID).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "status", "deleted", "archived", "epoch", "end", "protocol"}).AddRow(input.SessionID, input.OrgID, parentStatus, nil, nil, epoch, end, int16(1)))
-	mock.ExpectQuery(regexp.QuoteMeta(sendFixtureKeysSQL)).WithArgs(input.OrgID, input.SessionID, input.ThreadID, pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(input.ThreadID))
-	mock.ExpectQuery(regexp.QuoteMeta(sendFixtureLanesSQL)).WithArgs(input.OrgID, input.SessionID, []uuid.UUID{input.ThreadID}).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "session", "status", "archived", "epoch", "end", "protocol"}).AddRow(input.ThreadID, input.OrgID, input.SessionID, laneStatus, nil, int64(7), end, int16(1)))
+	mock.ExpectQuery(regexp.QuoteMeta(sendFixtureParentSQL)).WithArgs(pgx.QueryExecModeExec, input.OrgID, input.SessionID).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "status", "deleted", "archived", "epoch", "end", "protocol"}).AddRow(input.SessionID, input.OrgID, parentStatus, nil, nil, epoch, end, int16(1)))
+	mock.ExpectQuery(regexp.QuoteMeta(sendFixtureLanesSQL)).WithArgs(pgx.QueryExecModeExec, input.OrgID, input.SessionID, input.ThreadID, pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "session", "status", "archived", "epoch", "end", "protocol"}).AddRow(input.ThreadID, input.OrgID, input.SessionID, laneStatus, nil, int64(7), end, int16(1)))
 }
 
 func sendDispatchRows() *pgxmock.Rows {

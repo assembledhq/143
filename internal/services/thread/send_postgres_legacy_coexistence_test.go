@@ -36,19 +36,36 @@ type legacyCoexistencePersistence struct {
 	release <-chan struct{}
 }
 
-func (p *legacyCoexistencePersistence) ClaimIdleThreadInTx(ctx context.Context, tx pgx.Tx, org, session, lane uuid.UUID, max int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
-	row, effect, err := p.LegacySendPersistence.ClaimIdleThreadInTx(ctx, tx, org, session, lane, max)
-	// Include actual collection misses: the original claim CTE has completed
-	// on resume, mid-turn and capacity paths before this barrier is exposed.
+func (p *legacyCoexistencePersistence) pause(ctx context.Context, tx pgx.Tx) error {
 	select {
 	case p.ready <- legacyCoexistencePause{ctx: ctx, tx: tx, pid: tx.Conn().PgConn().PID()}:
 	case <-ctx.Done():
-		return row, effect, ctx.Err()
+		return ctx.Err()
 	}
-	if waitErr := waitSendPostgresBarrier(ctx, p.release); waitErr != nil {
-		return row, effect, waitErr
+	return waitSendPostgresBarrier(ctx, p.release)
+}
+func (p *legacyCoexistencePersistence) ClaimIdleThreadInTx(ctx context.Context, tx pgx.Tx, org, session, lane uuid.UUID, max int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
+	row, effect, err := p.LegacySendPersistence.ClaimIdleThreadInTx(ctx, tx, org, session, lane, max)
+	if err == nil {
+		err = p.pause(ctx, tx)
 	}
 	return row, effect, err
+}
+func (p *legacyCoexistencePersistence) ClaimResumeThreadInTx(ctx context.Context, tx pgx.Tx, org, session, lane uuid.UUID, max int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error) {
+	row, effect, err := p.LegacySendPersistence.ClaimResumeThreadInTx(ctx, tx, org, session, lane, max)
+	if err == nil {
+		err = p.pause(ctx, tx)
+	}
+	return row, effect, err
+}
+func (p *legacyCoexistencePersistence) GetThreadInTx(ctx context.Context, tx pgx.Tx, org, lane uuid.UUID) (models.SessionThread, error) {
+	row, err := p.LegacySendPersistence.GetThreadInTx(ctx, tx, org, lane)
+	// Queued branches do not issue a speculative claim. Pause after their
+	// deciding read, with the canonical NO KEY UPDATE locks still held.
+	if err == nil {
+		err = p.pause(ctx, tx)
+	}
+	return row, err
 }
 
 func legacyCoexistenceFixture(t *testing.T, branch string) sendPostgresFixture {
@@ -189,6 +206,10 @@ func TestThreadSendLegacyCommonStoreSiblingProgressPostgres(t *testing.T) {
 			t.Run(branch+"/"+writer.kind, func(t *testing.T) {
 				t.Parallel()
 				f := legacyCoexistenceFixture(t, branch)
+				wait := writer.wait
+				if (branch == "midturn" || branch == "capacity") && (writer.kind == "message" || writer.kind == "runtime") {
+					wait = false
+				}
 				service, _ := f.service(t, true)
 				ctx, cancel := context.WithTimeout(context.Background(), 3*db.LifecycleTransactionTimeout)
 				defer cancel()
@@ -237,14 +258,14 @@ func TestThreadSendLegacyCommonStoreSiblingProgressPostgres(t *testing.T) {
 				go func() { defer workers.Done(); peerDone <- runLegacyCoexistencePeer(peerCtx, peer, f, writer.kind) }()
 				var peerResult legacyCoexistencePeerResult
 				waitEvent := "none"
-				if writer.wait {
+				if wait {
 					waitEvent = requireLegacyCoexistenceWait(t, owner, peer.Conn().PgConn().PID())
 				} else {
 					select {
 					case peerResult = <-peerDone:
-						require.NoError(t, peerResult.err, "FK-free logging must make actual progress while the send remains paused holding its locks")
+						require.NoError(t, peerResult.err, "compatible peer insertion must make actual progress while the send retains its locks")
 					case <-owner.ctx.Done():
-						t.Fatal("FK-free logging failed to complete before releasing the whole-send barrier")
+						t.Fatal("compatible peer insertion failed to complete before releasing the whole-send barrier")
 					}
 				}
 				close(release)
@@ -254,7 +275,7 @@ func TestThreadSendLegacyCommonStoreSiblingProgressPostgres(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("whole send failed bounded progress after the observed sibling wait was released")
 				}
-				if writer.wait {
+				if wait {
 					select {
 					case peerResult = <-peerDone:
 					case <-ctx.Done():
@@ -265,7 +286,11 @@ func TestThreadSendLegacyCommonStoreSiblingProgressPostgres(t *testing.T) {
 				require.NotNil(t, sent.result.Message, "the real sender must expose its durable whole-command input")
 				require.NoError(t, peerResult.err, "the actual sibling store must complete after any observed lock wait")
 				requireSendPostgresLegacyUnitGuards(t, runner.units)
-				require.Equal(t, legacyCoexistenceSendGraph(branch), runner.units[1].provisional, "the supplied command must contain the entire correct send graph before any waiting peer can proceed")
+				expectedGraph := legacyCoexistenceSendGraph(branch)
+				if !wait && writer.kind == "message" {
+					expectedGraph.messages++
+				}
+				require.Equal(t, expectedGraph, runner.units[1].provisional, "the supplied command must contain the entire correct send graph before any waiting peer can proceed")
 				actual, err := readLegacyCoexistencePeer(ctx, f.pool, f, peerResult.table, peerResult.id)
 				require.NoError(t, err, "independently read the exact row committed by the common store")
 				require.JSONEq(t, string(peerResult.snapshot), string(actual), "common-store progress must retain every committed peer row field")

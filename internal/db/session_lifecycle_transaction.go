@@ -65,6 +65,37 @@ func (e *LifecycleContentionError) Unwrap() error { return e.Cause }
 
 func (e *LifecycleContentionError) Is(target error) bool { return target == ErrLifecycleContention }
 
+// LifecycleTransactionAbortedError records an owner-proven failure before any
+// COMMIT was sent. Cleanup can fail after pgx closes a canceled connection, but
+// that cannot commit the DB-only callback. This does not authorize an automatic
+// retry: failed cleanup still stops the runner, and external effects are never
+// permitted inside its callback. The private cause prevents callers from
+// constructing settlement proof from an arbitrary error.
+type LifecycleTransactionAbortedError struct{ cause error }
+
+func (e *LifecycleTransactionAbortedError) Error() string {
+	if !e.KnownAborted() {
+		return "invalid lifecycle abort proof"
+	}
+	return e.cause.Error()
+}
+
+// KnownAborted excludes an externally constructed zero value from settlement proof.
+func (e *LifecycleTransactionAbortedError) KnownAborted() bool { return e != nil && e.cause != nil }
+func (e *LifecycleTransactionAbortedError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func lifecycleAttemptFailure(err error, commitAttempted bool) error {
+	if commitAttempted {
+		return err
+	}
+	return &LifecycleTransactionAbortedError{cause: err}
+}
+
 // ConfigureLifecycleTransactionInTx validates a supplied READ COMMITTED
 // transaction and installs transaction-local protocol settings before work.
 // It never begins, commits, rolls back or retries. The owner must roll back if
@@ -105,6 +136,11 @@ func requireLifecycleScopeTransactionInTx(ctx context.Context, tx pgx.Tx) error 
 	deadline, ok := ctx.Deadline()
 	if !ok || time.Until(deadline) > LifecycleTransactionTimeout {
 		return errors.New("lifecycle scope requires an existing deadline within the lifecycle transaction budget")
+	}
+	// Supplied transactions still read effective settings every time. A send
+	// owner may reuse only its own just-installed policy during this callback.
+	if policy, ok := ctx.Value(threadSendTransactionPolicyKey{}).(*threadSendTransactionPolicy); ok && policy.live.Load() && reflect.TypeOf(tx).Comparable() && policy.tx == tx {
+		return nil
 	}
 	var actual [4]string
 	if err := tx.QueryRow(ctx, lifecycleTransactionPolicyQuery).Scan(&actual[0], &actual[1], &actual[2], &actual[3]); err != nil {
@@ -167,11 +203,11 @@ func runLifecycleTransaction(ctx context.Context, starter lifecycleTxStarter, wo
 
 	for attempt := 1; attempt <= lifecycleTransactionAttempts; attempt++ {
 		if err := unitCtx.Err(); err != nil {
-			return fmt.Errorf("lifecycle transaction budget: %w", err)
+			return lifecycleAttemptFailure(fmt.Errorf("lifecycle transaction budget: %w", err), false)
 		}
 		tx, err := starter.BeginTx(unitCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 		if err != nil {
-			return fmt.Errorf("begin lifecycle transaction: %w", err)
+			return lifecycleAttemptFailure(fmt.Errorf("begin lifecycle transaction: %w", err), false)
 		}
 		if nilLifecycleDependency(tx) {
 			return errors.New("begin lifecycle transaction: nil transaction")
@@ -182,10 +218,19 @@ func runLifecycleTransaction(ctx context.Context, starter lifecycleTxStarter, wo
 			return nil
 		}
 		if rollbackErr := rollbackLifecycleTransaction(unitCtx, tx); rollbackErr != nil {
-			return errors.Join(workErr, fmt.Errorf("rollback lifecycle transaction: %w", rollbackErr))
+			combined := errors.Join(workErr, fmt.Errorf("rollback lifecycle transaction: %w", rollbackErr))
+			// ErrTxClosed could mean a callback violated ownership and settled
+			// the unit itself. Do not manufacture abort proof from that case
+			// or from an arbitrary cleanup failure. A canceled/deadline-bound
+			// callback on pgx can close its connection before cleanup runs.
+			if !commitAttempted && !errors.Is(rollbackErr, pgx.ErrTxClosed) &&
+				errors.Is(rollbackErr, pgconn.ErrConnClosed) {
+				return lifecycleAttemptFailure(combined, false)
+			}
+			return combined
 		}
 		if unitErr := unitCtx.Err(); unitErr != nil {
-			return errors.Join(workErr, fmt.Errorf("lifecycle transaction budget: %w", unitErr))
+			return lifecycleAttemptFailure(errors.Join(workErr, fmt.Errorf("lifecycle transaction budget: %w", unitErr)), commitAttempted)
 		}
 		if commitAttempted || !retryableLifecycleTransaction(workErr) {
 			return workErr
@@ -197,7 +242,7 @@ func runLifecycleTransaction(ctx context.Context, starter lifecycleTxStarter, wo
 		select {
 		case <-unitCtx.Done():
 			timer.Stop()
-			return errors.Join(fmt.Errorf("lifecycle transaction retry budget: %w", unitCtx.Err()), workErr)
+			return lifecycleAttemptFailure(errors.Join(fmt.Errorf("lifecycle transaction retry budget: %w", unitCtx.Err()), workErr), false)
 		case <-timer.C:
 		}
 	}
@@ -225,8 +270,11 @@ func runLifecycleAttempt(ctx context.Context, tx pgx.Tx, work func(context.Conte
 }
 
 func invokeLifecycleAttempt(ctx context.Context, tx pgx.Tx, work func(context.Context, pgx.Tx) error) (error, bool) {
-	if err := ConfigureLifecycleTransactionInTx(ctx, tx); err != nil {
-		return err, false
+	// This owner just began the transaction with an explicit READ COMMITTED
+	// option. Unlike the supplied-transaction configurator, it need not query
+	// that same isolation level back before installing the local settings.
+	if _, err := tx.Exec(ctx, lifecycleTransactionSettings); err != nil {
+		return fmt.Errorf("configure lifecycle transaction settings: %w", err), false
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("lifecycle transaction budget before work: %w", err), false

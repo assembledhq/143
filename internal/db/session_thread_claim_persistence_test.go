@@ -100,7 +100,7 @@ func expectedThreadClaimWrite(f threadPersistenceFixture, kind string, maxRunnin
 	RETURNING ` + sessionThreadSelectColumns
 	return threadPersistenceWrite{
 		SQL: strings.Join(strings.Fields(query), " "),
-		Args: []any{pgx.NamedArgs{
+		Args: []any{pgx.QueryExecModeExec, pgx.NamedArgs{
 			"id": f.threadID, "org_id": f.orgID, "session_id": f.sessionID,
 			"max_running": maxRunning, "claimable_statuses": statuses,
 		}},
@@ -168,7 +168,7 @@ func TestThreadClaimPersistenceInTx(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			failure := errors.New("synthetic claim failure")
-			query := mock.ExpectQuery("WITH locked_threads").WithArgs(anyArgs(5)...)
+			query := mock.ExpectQuery("WITH locked_threads").WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg())
 			row, expected := threadClaimReturnedFixture(fixture)
 			expectedQueries := []threadPersistenceWrite{expectedThreadClaimWrite(fixture, tt.kind, tt.maxRunning)}
 			switch tt.outcome {
@@ -333,7 +333,7 @@ func TestThreadClaimLegacyMissingRowDiagnostics(t *testing.T) {
 			t.Cleanup(mock.Close)
 			conn := &threadClaimPersistenceTx{reader: mock}
 			store, redis := threadPersistenceStoreWithStreams(t, conn)
-			mock.ExpectQuery("WITH locked_threads").WithArgs(anyArgs(5)...).WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
+			mock.ExpectQuery("WITH locked_threads").WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
 			lookup := mock.ExpectQuery(`SELECT\s+COALESCE`).WithArgs(anyArgs(3)...)
 			status, siblings := "idle", 3
 			if tt.kind == "resume" {
@@ -382,7 +382,7 @@ func TestThreadClaimQueryErrorDoesNotDiagnose(t *testing.T) {
 			t.Cleanup(mock.Close)
 			conn := &threadClaimPersistenceTx{reader: mock}
 			store, redis := threadPersistenceStoreWithStreams(t, conn)
-			mock.ExpectQuery("WITH locked_threads").WithArgs(anyArgs(5)...).WillReturnError(pgx.ErrNoRows)
+			mock.ExpectQuery("WITH locked_threads").WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).WillReturnError(pgx.ErrNoRows)
 			var actual models.SessionThread
 			if tt.adapter == "legacy" {
 				actual, err = callThreadClaimLegacy(context.Background(), store, fixture, tt.kind, 3)
@@ -427,7 +427,7 @@ func TestThreadClaimWrappedNoRowOrigin(t *testing.T) {
 			conn := &threadClaimPersistenceTx{reader: mock}
 			store, redis := threadPersistenceStoreWithStreams(t, conn)
 			wrapped := fmt.Errorf("synthetic wrapped no-row: %w", pgx.ErrNoRows)
-			mutation := mock.ExpectQuery("WITH locked_threads").WithArgs(anyArgs(5)...)
+			mutation := mock.ExpectQuery("WITH locked_threads").WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg())
 			expectedQueries := []threadPersistenceWrite{expectedThreadClaimWrite(fixture, tt.kind, 3)}
 			expectedErr := error(wrapped)
 			if tt.stage == "query" {
@@ -492,7 +492,7 @@ func TestThreadClaimPersistenceEffectsKeepReturnedSnapshot(t *testing.T) {
 			t.Cleanup(mock.Close)
 			row, _ := threadClaimReturnedFixture(fixture)
 			_, expected := threadClaimReturnedFixture(fixture)
-			mock.ExpectQuery("WITH locked_threads").WithArgs(anyArgs(5)...).WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
+			mock.ExpectQuery("WITH locked_threads").WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
 			unused := &threadPersistenceTx{}
 			store, redis := threadPersistenceStoreWithStreams(t, unused)
 			actual, effects, err := callThreadClaimInTx(context.Background(), store, &threadClaimPersistenceTx{reader: mock}, fixture, kind, 2)
@@ -519,7 +519,7 @@ func TestThreadClaimPersistenceLegacyPublication(t *testing.T) {
 			require.NoError(t, err, "create this legacy implicit-commit connection")
 			t.Cleanup(mock.Close)
 			row, expected := threadClaimReturnedFixture(fixture)
-			mock.ExpectQuery("WITH locked_threads").WithArgs(anyArgs(5)...).WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
+			mock.ExpectQuery("WITH locked_threads").WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
 			conn := &threadClaimPersistenceTx{reader: mock}
 			store, redis := threadPersistenceStoreWithStreams(t, conn)
 			actual, err := callThreadClaimLegacy(context.Background(), store, fixture, kind, 0)
@@ -552,7 +552,7 @@ func TestThreadClaimPersistenceOwnerSettlement(t *testing.T) {
 			owner, err := mock.Begin(context.Background())
 			require.NoError(t, err, "only the outer owner begins this test's composed unit")
 			row, expected := threadClaimReturnedFixture(fixture)
-			mock.ExpectQuery("WITH locked_threads").WithArgs(anyArgs(5)...).WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
+			mock.ExpectQuery("WITH locked_threads").WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
 			unused := &threadPersistenceTx{}
 			store, redis := threadPersistenceStoreWithStreams(t, unused)
 			_, effects, err := callThreadClaimInTx(context.Background(), store, owner, fixture, tt.kind, 2)

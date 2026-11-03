@@ -173,7 +173,7 @@ func sendPersistenceOperations() []sendPersistenceOperation {
 			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
 				return p.RejectIfOwnedInTx(ctx, tx, f.org, f.session)
 			}, func(ctx context.Context, _ *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
-				return db.NewSessionStore(tx).RejectIfCodeReviewOwned(ctx, f.org, f.session)
+				return db.NewSessionStore(tx).RejectIfSendOwned(ctx, f.org, f.session)
 			}},
 		{"session read", "SELECT", false,
 			func(ctx context.Context, p *sqlLegacySendPersistence, tx pgx.Tx, f sendPersistenceFixture) error {
@@ -334,7 +334,7 @@ func TestLegacySendPersistenceDelegatesExactSuppliedTransaction(t *testing.T) {
 			t.Cleanup(mock.Close)
 			p := newSQLSendPersistence(nil)
 			actualTx, expectedTx := &sendPersistenceTx{reader: mock}, &sendPersistenceTx{reader: mock}
-			argCount := map[string]int{"ownership read": 2, "session read": 2, "thread read": 2, "active thread count": 2, "inbox key read": 3, "message read": 2, "pending thread count": 2, "pending session count": 2, "runtime read": 2, "idle thread": 5, "resume thread": 5, "idle session": 2, "resume session": 3, "pending": 2, "message": 11, "sourced message": 12, "inbox": 7, "enqueue": 7}[tt.name]
+			argCount := map[string]int{"ownership read": 3, "session read": 2, "thread read": 2, "active thread count": 2, "inbox key read": 3, "message read": 2, "pending thread count": 2, "pending session count": 2, "runtime read": 2, "idle thread": 2, "resume thread": 2, "idle session": 2, "resume session": 2, "pending": 2, "message": 11, "sourced message": 12, "inbox": 7, "enqueue": 7}[tt.name]
 			for range 2 {
 				if tt.exec {
 					mock.ExpectExec(tt.query).WithArgs(sendPersistenceAnyArgs(argCount)...).WillReturnError(failure)
@@ -401,21 +401,15 @@ func TestLegacySendPersistenceOwnershipReadsShareSuppliedTransaction(t *testing.
 	t.Cleanup(mock.Close)
 	fixture := newSendPersistenceFixture()
 	failure := errors.New("synthetic automation ownership read failure")
-	mock.ExpectQuery("SELECT code_review_owner_pr_id").
-		WithArgs(fixture.org, fixture.session).
-		WillReturnRows(pgxmock.NewRows([]string{"code_review_owner_pr_id"}).AddRow((*uuid.UUID)(nil)))
-	mock.ExpectQuery("SELECT").
-		WithArgs(sendPersistenceAnyArgs(2)...).
-		WillReturnError(failure)
+	mock.ExpectQuery("SELECT s.code_review_owner_pr_id").WithArgs(pgx.QueryExecModeExec, fixture.org, fixture.session).WillReturnError(failure)
 	tx := &sendPersistenceTx{reader: mock}
 	ctx := context.Background()
 	err = newSQLSendPersistence(nil).RejectIfOwnedInTx(ctx, tx, fixture.org, fixture.session)
-	require.ErrorIs(t, err, failure, "the second ownership read must preserve its original database error")
-	require.Equal(t, []context.Context{ctx, ctx}, tx.contexts, "both ownership checks must use the same callback context and supplied transaction")
-	require.Equal(t, []any{fixture.org, fixture.session}, tx.statements[0].Args, "code-review ownership must retain exact tenant and parent scope")
-	require.Equal(t, []any{pgx.NamedArgs{"org_id": fixture.org, "session_id": fixture.session}}, tx.statements[1].Args, "automation ownership must retain the same tenant and parent scope")
-	require.Empty(t, tx.settled, "ownership classification must not acquire or settle another transaction")
-	require.NoError(t, mock.ExpectationsWereMet(), "ownership classification must not fall back to a pool-backed reader")
+	require.ErrorIs(t, err, failure, "the combined ownership read must preserve its original database error")
+	require.Equal(t, []context.Context{ctx}, tx.contexts, "one ownership read must use the callback context and supplied transaction")
+	require.Equal(t, []any{pgx.QueryExecModeExec, fixture.org, fixture.session}, tx.statements[0].Args, "combined ownership must retain exact tenant and parent scope")
+	require.Empty(t, tx.settled, "ownership read cannot settle its caller transaction")
+	require.NoError(t, mock.ExpectationsWereMet(), "both ownership checks must share one statement")
 }
 
 func TestLegacySendPersistenceRejectsMalformedMessage(t *testing.T) {
@@ -491,7 +485,7 @@ func TestLegacySendPersistenceOpaqueEffectsAndOwnerPublication(t *testing.T) {
 			effects := &sqlSendEffects{sessions: p.sessions, threads: p.threads, jobs: p.jobs}
 			fixture, at := newSendPersistenceFixture(), time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 			tx := &sendPersistenceTx{reader: mock}
-			mock.ExpectQuery("WITH locked_threads").WithArgs(sendPersistenceAnyArgs(5)...).WillReturnRows(sendPersistenceThreadRows(fixture, at, 0))
+			mock.ExpectQuery("WITH locked_threads").WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).WillReturnRows(sendPersistenceThreadRows(fixture, at, 0))
 			claimed, claimEffects, err := p.ClaimIdleThreadInTx(context.Background(), tx, fixture.org, fixture.session, fixture.thread, 3)
 			require.NoError(t, err, "claim must return the original row and opaque notification token")
 			require.NotEqual(t, db.ThreadClaimPersistenceEffects{}, claimEffects, "real persistence must produce a nonzero opaque claim token")

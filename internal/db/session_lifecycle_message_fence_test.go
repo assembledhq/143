@@ -58,9 +58,6 @@ func TestCaptureThreadMessageFenceInTx(t *testing.T) {
 			}
 			expectThreadSendScopeParent(mock, f)
 			expectThreadSendScopeKeys(mock, f, f.first.id, f.second.id)
-			mock.ExpectQuery(lifecycleThreadScopeLockQuery).
-				WithArgs(f.orgID, f.sessionID, []uuid.UUID{f.first.id, f.second.id}).
-				WillReturnRows(lifecycleScopeThreadRows(f.first, f.second)).RowsWillBeClosed()
 			actual, err := CaptureThreadMessageFenceInTx(ctx, mock, f.orgID, f.sessionID, f.first.id)
 			if tt.cause != nil {
 				require.ErrorIs(t, err, tt.cause, "hidden or inconsistent current scope must not become a newly captured admission expectation")

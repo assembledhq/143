@@ -68,8 +68,9 @@ func legacyInboxParams(input SendMessageInput, msg *models.SessionMessage) (db.A
 }
 
 // runSendUnit relies on the concrete runner's exact callback-error return after
-// confirmed rollback. A join, wrapper, or failure after callback success is not
-// that proof, including ErrTxCommitRollback. Keep Unwrap for SQLSTATE retries.
+// confirmed rollback, or its typed proof that no COMMIT was attempted. An
+// arbitrary join, wrapper, or commit failure is not that proof, including
+// ErrTxCommitRollback. Keep Unwrap for SQLSTATE retries.
 func (s *Service) runSendUnit(ctx context.Context, work func(context.Context, pgx.Tx) error) error {
 	var lastFailure *sendWorkError
 	entered := false
@@ -87,6 +88,9 @@ func (s *Service) runSendUnit(ctx context.Context, work func(context.Context, pg
 	if lastFailure != nil && err == lastFailure {
 		return lastFailure.cause
 	}
+	if proof, aborted := err.(*db.LifecycleTransactionAbortedError); aborted && proof.KnownAborted() {
+		return err
+	}
 	if _, confirmed := err.(*db.LifecycleContentionError); confirmed || !entered {
 		return err
 	}
@@ -101,14 +105,15 @@ func (s *Service) runSendUnit(ctx context.Context, work func(context.Context, pg
 
 // runLegacySendUnit owns the entire legacy send. Every retry clears all staged
 // values before acquiring fresh mode, parent and ordered-lane guards.
-func (s *Service) runLegacySendUnit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, work func(context.Context, pgx.Tx) (legacySendAttempt, error)) (legacySendAttempt, error) {
+func (s *Service) runLegacySendUnit(ctx context.Context, orgID, sessionID, threadID uuid.UUID, work func(context.Context, pgx.Tx, db.LegacyThreadSendSnapshot) (legacySendAttempt, error)) (legacySendAttempt, error) {
 	var staged legacySendAttempt
 	err := s.runSendUnit(ctx, func(unitCtx context.Context, tx pgx.Tx) error {
 		staged = legacySendAttempt{}
-		if err := db.RequireLegacyThreadSendScopeInTx(unitCtx, tx, orgID, sessionID, threadID); err != nil {
+		snapshot, err := db.CaptureLegacyThreadSendScopeInTx(unitCtx, tx, orgID, sessionID, threadID)
+		if err != nil {
 			return &sendGuardError{cause: err}
 		}
-		attempt, err := work(unitCtx, tx)
+		attempt, err := work(unitCtx, tx, snapshot)
 		if err != nil {
 			return err
 		}

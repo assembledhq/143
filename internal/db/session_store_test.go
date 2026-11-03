@@ -1939,7 +1939,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				now := time.Now()
 				mock.ExpectQuery(claimForResumeQueryPattern()).
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(
 							newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)...,
@@ -1952,7 +1952,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 			name: "returns error when no matching row",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectQuery(claimForResumeQueryPattern()).
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(sessionTestColumns))
 			},
 			wantErr: true,
@@ -1964,7 +1964,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
 				row[4] = models.SessionStatusRunning
 				mock.ExpectQuery(claimForResumeQueryPattern()).
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(row...),
 					)
@@ -1978,7 +1978,7 @@ func TestSessionStore_ClaimForResume(t *testing.T) {
 				row := newAgentSessionRow(uuid.New(), uuid.New(), uuid.New(), now)
 				row[4] = models.SessionStatusRunning
 				mock.ExpectQuery(claimForResumeQueryPattern()).
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(
 						pgxmock.NewRows(sessionTestColumns).AddRow(row...),
 					)

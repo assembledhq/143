@@ -235,7 +235,6 @@ func (tx *cutoverRetryTrackingTx) Rollback(ctx context.Context) error {
 }
 
 func expectCutoverRetrySetup(mock pgxmock.PgxPoolIface) {
-	mock.ExpectQuery("SHOW transaction_isolation").WillReturnRows(pgxmock.NewRows([]string{"transaction_isolation"}).AddRow("read committed"))
 	mock.ExpectExec(expectedLifecycleSettings).WillReturnResult(pgxmock.NewResult("SELECT", 1))
 }
 

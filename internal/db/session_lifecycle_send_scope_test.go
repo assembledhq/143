@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,10 +17,9 @@ import (
 
 func TestThreadSendScopeDiscoveryQuery(t *testing.T) {
 	t.Parallel()
-	require.Equal(t, strings.Join(strings.Fields(`SELECT id FROM session_threads
-		WHERE org_id = $1 AND session_id = $2 AND (archived_at IS NULL OR id = $3)
-		ORDER BY id LIMIT $4`), " "), strings.Join(strings.Fields(threadSendVisibleLaneKeysQuery), " "),
-		"discovery must retain exact tenant/parent, visible siblings and the explicit target without inferring a primary lane")
+	require.Contains(t, threadSendVisibleLaneLockQuery, "org_id = $1 AND session_id = $2", "scope must retain exact tenant and parent")
+	require.Contains(t, threadSendVisibleLaneLockQuery, "(archived_at IS NULL OR id = $3)", "hidden explicit target is retained without admitting hidden siblings")
+	require.Contains(t, threadSendVisibleLaneLockQuery, "ORDER BY id LIMIT $4 FOR NO KEY UPDATE NOWAIT", "bounded discovery must acquire ordered nonwaiting lane locks")
 }
 
 func TestLockThreadSendScopePreservesRawRows(t *testing.T) {
@@ -29,10 +27,7 @@ func TestLockThreadSendScopePreservesRawRows(t *testing.T) {
 	tests := []struct {
 		name string
 		hide bool
-	}{
-		{name: "visible lanes retain terminal and awaiting statuses"},
-		{name: "hidden target and parent are locked without admitting them", hide: true},
-	}
+	}{{name: "visible"}, {name: "hidden target", hide: true}}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -40,18 +35,16 @@ func TestLockThreadSendScopePreservesRawRows(t *testing.T) {
 			f := newLifecycleScopeMockFixture()
 			if tt.hide {
 				at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-				f.session.deletedAt, f.session.archivedAt, f.first.archivedAt = &at, &at, &at
+				f.session.deletedAt = &at
+				f.session.archivedAt = &at
+				f.first.archivedAt = &at
 			}
 			expectThreadSendScopeParent(mock, f)
 			expectThreadSendScopeKeys(mock, f, f.first.id, f.second.id)
-			mock.ExpectQuery(lifecycleThreadScopeLockQuery).
-				WithArgs(f.orgID, f.sessionID, []uuid.UUID{f.first.id, f.second.id}).
-				WillReturnRows(lifecycleScopeThreadRows(f.first, f.second)).RowsWillBeClosed()
 			actual, err := lockThreadSendScopeInTx(ctx, mock, f.orgID, f.sessionID, f.first.id)
-			require.NoError(t, err, "raw scope acquisition must preserve the exact requested target and siblings")
-			require.Equal(t, lockedLifecycleScope{session: f.session, threads: []lifecycleLockedThread{f.first, f.second}}, actual,
-				"scope acquisition must not substitute eligibility, epochs, visibility or terminal-state policy")
-			require.NoError(t, mock.ExpectationsWereMet(), "scope work must acquire parent before discovery and one ordered lane batch without mutation or settlement")
+			require.NoError(t, err, "ordered acquisition must preserve the raw scope")
+			require.Equal(t, lockedLifecycleScope{session: f.session, threads: []lifecycleLockedThread{f.first, f.second}}, actual, "locking must not infer eligibility or change retained rows")
+			require.NoError(t, mock.ExpectationsWereMet(), "parent lock must precede the single bounded lane-lock statement")
 		})
 	}
 }
@@ -62,24 +55,9 @@ func TestLockThreadSendScopeDiscardsFailures(t *testing.T) {
 		name  string
 		cause error
 	}{
-		{name: "parent query", cause: io.ErrUnexpectedEOF},
-		{name: "discovery query", cause: io.ErrUnexpectedEOF},
-		{name: "discovery scan"},
-		{name: "discovery iteration", cause: io.ErrUnexpectedEOF},
-		{name: "empty discovery", cause: pgx.ErrNoRows},
-		{name: "missing exact target", cause: pgx.ErrNoRows},
-		{name: "zero discovered lane"},
-		{name: "duplicate discovered lane"},
-		{name: "unordered discovery"},
-		{name: "discovery overflow", cause: ErrLifecycleConsumerDiscoveryIncomplete},
-		{name: "lane query", cause: io.ErrUnexpectedEOF},
-		{name: "lane missing", cause: pgx.ErrNoRows},
-		{name: "lane scan"},
-		{name: "lane iteration", cause: io.ErrUnexpectedEOF},
-		{name: "lane tenant mismatch", cause: pgx.ErrNoRows},
-		{name: "lane parent mismatch", cause: pgx.ErrNoRows},
-		{name: "lane identity mismatch", cause: pgx.ErrNoRows},
-		{name: "lane ordering mismatch", cause: pgx.ErrNoRows},
+		{"parent query", io.ErrUnexpectedEOF}, {"lane query", io.ErrUnexpectedEOF}, {"lane scan", nil}, {"lane iteration", io.ErrUnexpectedEOF},
+		{"empty", pgx.ErrNoRows}, {"missing target", pgx.ErrNoRows}, {"zero lane", pgx.ErrNoRows}, {"duplicate", pgx.ErrNoRows}, {"unordered", pgx.ErrNoRows},
+		{"overflow", ErrLifecycleConsumerDiscoveryIncomplete}, {"tenant mismatch", pgx.ErrNoRows}, {"parent mismatch", pgx.ErrNoRows},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -88,70 +66,48 @@ func TestLockThreadSendScopeDiscardsFailures(t *testing.T) {
 			f := newLifecycleScopeMockFixture()
 			if tt.name == "parent query" {
 				expectLifecycleScopePolicy(mock)
-				mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(f.orgID, f.sessionID).WillReturnError(io.ErrUnexpectedEOF)
+				mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(pgx.QueryExecModeExec, f.orgID, f.sessionID).WillReturnError(io.ErrUnexpectedEOF)
 			} else {
 				expectThreadSendScopeParent(mock, f)
-				keys := pgxmock.NewRows([]string{"id"})
-				discovery := mock.ExpectQuery(threadSendVisibleLaneKeysQuery).
-					WithArgs(f.orgID, f.sessionID, f.first.id, defaultLifecycleConsumerLimits().laneAnchors+1)
+				query := mock.ExpectQuery(threadSendVisibleLaneLockQuery).WithArgs(pgx.QueryExecModeExec, f.orgID, f.sessionID, f.first.id, defaultLifecycleConsumerLimits().laneAnchors+1)
+				lanes := []lifecycleLockedThread{f.first, f.second}
 				switch tt.name {
-				case "discovery query":
-					discovery.WillReturnError(io.ErrUnexpectedEOF)
-				case "discovery scan":
-					discovery.WillReturnRows(keys.AddRow("synthetic invalid UUID")).RowsWillBeClosed()
-				case "discovery iteration":
-					discovery.WillReturnRows(keys.AddRow(f.first.id).RowError(0, io.ErrUnexpectedEOF)).RowsWillBeClosed()
-				case "empty discovery":
-					discovery.WillReturnRows(keys).RowsWillBeClosed()
-				case "missing exact target":
-					discovery.WillReturnRows(keys.AddRow(f.second.id)).RowsWillBeClosed()
-				case "zero discovered lane":
-					discovery.WillReturnRows(keys.AddRow(uuid.Nil).AddRow(f.first.id)).RowsWillBeClosed()
-				case "duplicate discovered lane":
-					discovery.WillReturnRows(keys.AddRow(f.first.id).AddRow(f.first.id)).RowsWillBeClosed()
-				case "unordered discovery":
-					discovery.WillReturnRows(keys.AddRow(f.second.id).AddRow(f.first.id)).RowsWillBeClosed()
-				case "discovery overflow":
-					for i := 0; i <= defaultLifecycleConsumerLimits().laneAnchors; i++ {
-						keys.AddRow(f.first.id)
-					}
-					discovery.WillReturnRows(keys).RowsWillBeClosed()
+				case "empty":
+					lanes = nil
+				case "missing target":
+					lanes = []lifecycleLockedThread{f.second}
+				case "zero lane":
+					lanes[0].id = uuid.Nil
+				case "duplicate":
+					lanes[1] = lanes[0]
+				case "unordered":
+					lanes[0], lanes[1] = lanes[1], lanes[0]
+				case "overflow":
+					lanes = make([]lifecycleLockedThread, defaultLifecycleConsumerLimits().laneAnchors+1)
+				case "tenant mismatch":
+					lanes[0].orgID = uuid.New()
+				case "parent mismatch":
+					lanes[0].sessionID = uuid.New()
+				}
+				rows := lifecycleScopeThreadRows(lanes...)
+				switch tt.name {
+				case "lane query":
+					query.WillReturnError(io.ErrUnexpectedEOF)
+				case "lane scan":
+					query.WillReturnRows(pgxmock.NewRows([]string{"bad"}).AddRow("invalid")).RowsWillBeClosed()
+				case "lane iteration":
+					query.WillReturnRows(rows.RowError(0, io.ErrUnexpectedEOF)).RowsWillBeClosed()
 				default:
-					discovery.WillReturnRows(keys.AddRow(f.first.id).AddRow(f.second.id)).RowsWillBeClosed()
-					lane := mock.ExpectQuery(lifecycleThreadScopeLockQuery).
-						WithArgs(f.orgID, f.sessionID, []uuid.UUID{f.first.id, f.second.id})
-					lanes := lifecycleScopeThreadRows(f.first, f.second)
-					switch tt.name {
-					case "lane query":
-						lane.WillReturnError(io.ErrUnexpectedEOF)
-					case "lane missing":
-						lane.WillReturnRows(lifecycleScopeThreadRows(f.first)).RowsWillBeClosed()
-					case "lane scan":
-						lane.WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "session_id", "status", "archived_at", "admission_epoch", "end_epoch", "lifecycle_version"}).AddRow(f.first.id, f.orgID, f.sessionID, "idle", nil, "synthetic invalid epoch", nil, 0)).RowsWillBeClosed()
-					case "lane iteration":
-						lane.WillReturnRows(lanes.RowError(1, io.ErrUnexpectedEOF)).RowsWillBeClosed()
-					default:
-						switch tt.name {
-						case "lane tenant mismatch":
-							f.first.orgID = uuid.New()
-						case "lane parent mismatch":
-							f.first.sessionID = uuid.New()
-						case "lane identity mismatch":
-							f.first.id = uuid.New()
-						case "lane ordering mismatch":
-							f.first, f.second = f.second, f.first
-						}
-						lane.WillReturnRows(lifecycleScopeThreadRows(f.first, f.second)).RowsWillBeClosed()
-					}
+					query.WillReturnRows(rows).RowsWillBeClosed()
 				}
 			}
-			actual, err := lockThreadSendScopeInTx(ctx, mock, f.orgID, f.sessionID, uuid.UUID{15: 1})
-			require.Error(t, err, "incomplete scope acquisition must abort the whole unit without exposing earlier locks as a usable snapshot")
+			actual, err := lockThreadSendScopeInTx(ctx, mock, f.orgID, f.sessionID, f.first.id)
+			require.Error(t, err, "incomplete or contradictory scope must fail closed")
 			if tt.cause != nil {
-				require.ErrorIs(t, err, tt.cause, "scope acquisition must preserve diagnostic and retry classification causes")
+				require.ErrorIs(t, err, tt.cause, "scope refusal must retain its cause")
 			}
-			require.Equal(t, lockedLifecycleScope{}, actual, "failed discovery or lane acquisition must discard all partially observed rows")
-			require.NoError(t, mock.ExpectationsWereMet(), "scope failure must stop before any later SQL or transaction settlement")
+			require.Equal(t, lockedLifecycleScope{}, actual, "failed scope must not expose partial observations")
+			require.NoError(t, mock.ExpectationsWereMet(), "scope failure must not mutate or settle the owner's transaction")
 		})
 	}
 }
@@ -225,9 +181,6 @@ func TestRequireLegacyThreadSendScopeRechecksMode(t *testing.T) {
 			if tt.mode == ThreadSendModeLegacy {
 				expectThreadSendScopeParent(mock, f)
 				expectThreadSendScopeKeys(mock, f, f.first.id, f.second.id)
-				mock.ExpectQuery(lifecycleThreadScopeLockQuery).
-					WithArgs(f.orgID, f.sessionID, []uuid.UUID{f.first.id, f.second.id}).
-					WillReturnRows(lifecycleScopeThreadRows(f.first, f.second)).RowsWillBeClosed()
 			}
 			err := RequireLegacyThreadSendScopeInTx(ctx, mock, snapshot.orgID, snapshot.sessionID, f.first.id)
 			if tt.mode == ThreadSendModeLegacy {
@@ -243,16 +196,18 @@ func TestRequireLegacyThreadSendScopeRechecksMode(t *testing.T) {
 
 func expectThreadSendScopeParent(mock pgxmock.PgxPoolIface, f lifecycleScopeMockFixture) {
 	expectLifecycleScopePolicy(mock)
-	mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(f.orgID, f.sessionID).
+	mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(pgx.QueryExecModeExec, f.orgID, f.sessionID).
 		WillReturnRows(lifecycleScopeSessionRows(f.session))
 }
 
 func expectThreadSendScopeKeys(mock pgxmock.PgxPoolIface, f lifecycleScopeMockFixture, ids ...uuid.UUID) {
-	rows := pgxmock.NewRows([]string{"id"})
+	lanes := make([]lifecycleLockedThread, 0, len(ids))
 	for _, id := range ids {
-		rows.AddRow(id)
+		if id == f.first.id {
+			lanes = append(lanes, f.first)
+		} else {
+			lanes = append(lanes, f.second)
+		}
 	}
-	mock.ExpectQuery(threadSendVisibleLaneKeysQuery).
-		WithArgs(f.orgID, f.sessionID, f.first.id, defaultLifecycleConsumerLimits().laneAnchors+1).
-		WillReturnRows(rows).RowsWillBeClosed()
+	mock.ExpectQuery(threadSendVisibleLaneLockQuery).WithArgs(pgx.QueryExecModeExec, f.orgID, f.sessionID, f.first.id, defaultLifecycleConsumerLimits().laneAnchors+1).WillReturnRows(lifecycleScopeThreadRows(lanes...)).RowsWillBeClosed()
 }
