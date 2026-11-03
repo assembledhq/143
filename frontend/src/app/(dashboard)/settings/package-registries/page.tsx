@@ -7,6 +7,7 @@ import { Package } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
+import { ResponsiveResourceList, type ResponsiveResourceListColumn } from "@/components/responsive-resource-list";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -14,7 +15,6 @@ import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useAuth } from "@/hooks/use-auth";
 import { usePageTitle } from "@/hooks/use-page-title";
 import { api, ApiError } from "@/lib/api";
@@ -93,6 +93,31 @@ function RepositoryCredentials({ repositoryId }: { repositoryId: string }) {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
   const refresh = () => queryClient.invalidateQueries({ queryKey: queryKeys.repositories.packageRegistryCredentials(repositoryId) });
+  const columns: ResponsiveResourceListColumn<PackageRegistryCredentialSummary>[] = [
+    {
+      id: "registry",
+      header: "Registry",
+      render: (credential) => <span className="font-mono text-xs">{credential.registry_url}</span>,
+    },
+    {
+      id: "scope",
+      header: "Package scope",
+      render: (credential) => <span className="font-mono text-xs">{credential.package_scope}</span>,
+    },
+    {
+      id: "updated",
+      header: "Updated",
+      className: "text-right",
+      cellClassName: "text-right tabular-nums",
+      render: (credential) => new Date(credential.updated_at).toLocaleDateString(),
+    },
+    {
+      id: "actions",
+      header: <span className="sr-only">Actions</span>,
+      cellClassName: "text-right",
+      render: (credential) => <CredentialActions credential={credential} onRotate={() => setDialog({ credential })} onDelete={() => { setDeleteError(""); setDeleteTarget(credential); }} />,
+    },
+  ];
 
   async function removeCredential(event: React.MouseEvent) {
     event.preventDefault();
@@ -121,22 +146,25 @@ function RepositoryCredentials({ repositoryId }: { repositoryId: string }) {
       {credentials.isPending ? <p role="status">Loading credentials…</p> : credentials.isError ? <p role="alert">Unable to load package credentials. Refresh the page to try again.</p> : !credentials.data?.data.length ? (
         <EmptyState icon={Package} title="No package credentials" description="Add a read-only token for an HTTPS npm registry and an explicit package scope." />
       ) : (
-        <div className="overflow-x-auto rounded-lg border bg-card shadow-sm">
-          <Table>
-            <TableHeader><TableRow><TableHead>Registry</TableHead><TableHead>Package scope</TableHead><TableHead className="text-right">Updated</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
-            <TableBody>{credentials.data.data.map((credential) => (
-              <TableRow key={credential.id}>
-                <TableCell className="font-mono text-xs">{credential.registry_url}</TableCell>
-                <TableCell className="font-mono text-xs">{credential.package_scope}</TableCell>
-                <TableCell className="text-right tabular-nums">{new Date(credential.updated_at).toLocaleDateString()}</TableCell>
-                <TableCell><div className="flex justify-end gap-3">
-                  <Button variant="outline" size="sm" aria-label={`Rotate ${credential.package_scope} credential`} onClick={() => setDialog({ credential })}>Rotate</Button>
-                  <Button variant="ghost" size="sm" className="text-destructive" aria-label={`Delete ${credential.package_scope} credential`} onClick={() => { setDeleteError(""); setDeleteTarget(credential); }}>Delete</Button>
-                </div></TableCell>
-              </TableRow>
-            ))}</TableBody>
-          </Table>
-        </div>
+        <ResponsiveResourceList
+          ariaLabel="Package credentials"
+          items={credentials.data.data}
+          getItemKey={(credential) => credential.id}
+          columns={columns}
+          emptyState={null}
+          renderMobileItem={(credential) => (
+            <div className="space-y-3 px-4 py-3.5">
+              <div className="space-y-1">
+                <p className="break-all font-mono text-xs text-foreground">{credential.registry_url}</p>
+                <p className="font-mono text-xs text-muted-foreground">{credential.package_scope}</p>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs tabular-nums text-muted-foreground">Updated {new Date(credential.updated_at).toLocaleDateString()}</p>
+                <CredentialActions credential={credential} onRotate={() => setDialog({ credential })} onDelete={() => { setDeleteError(""); setDeleteTarget(credential); }} />
+              </div>
+            </div>
+          )}
+        />
       )}
       {dialog && <CredentialDialog repositoryId={repositoryId} credential={dialog.credential} onClose={() => setDialog((current) => current === dialog ? null : current)} onSaved={refresh} />}
       <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open && !deleting) setDeleteTarget(null); }}>
@@ -149,6 +177,15 @@ function RepositoryCredentials({ repositoryId }: { repositoryId: string }) {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
+  );
+}
+
+function CredentialActions({ credential, onRotate, onDelete }: { credential: PackageRegistryCredentialSummary; onRotate: () => void; onDelete: () => void }) {
+  return (
+    <div className="flex justify-end gap-3">
+      <Button variant="outline" size="sm" aria-label={`Rotate ${credential.package_scope} credential`} onClick={onRotate}>Rotate</Button>
+      <Button variant="ghost" size="sm" className="text-destructive" aria-label={`Delete ${credential.package_scope} credential`} onClick={onDelete}>Delete</Button>
     </div>
   );
 }

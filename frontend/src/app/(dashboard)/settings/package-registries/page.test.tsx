@@ -33,8 +33,10 @@ describe("PackageRegistriesPage", () => {
     const requests: string[] = [];
     server.use(http.get("*/api/v1/repositories/:id/package-registry-credentials", ({ params }) => { requests.push(String(params.id)); return HttpResponse.json({ data: params.id === "repo-1" ? [credential] : [], meta: {} }); }));
     renderWithProviders(<PackageRegistriesPage />);
-    expect(await screen.findByText(credential.registry_url)).toBeInTheDocument();
-    expect(screen.getByText("@example")).toBeInTheDocument();
+    expect(await screen.findAllByText(credential.registry_url)).toHaveLength(2);
+    expect(screen.getAllByText("@example")).toHaveLength(2);
+    expect(screen.getByRole("table", { name: "Package credentials" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Package credentials mobile list" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /reveal/i })).not.toBeInTheDocument();
     expect(screen.queryByText(secret)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("combobox", { name: "Repository" }));
@@ -113,13 +115,13 @@ describe("PackageRegistriesPage", () => {
       http.delete("*/api/v1/repositories/repo-1/package-registry-credentials/credential-1", ({ request }) => { deleted.push(new URL(request.url).searchParams.get("expected_revision") ?? ""); return new HttpResponse(null, { status: 204 }); }),
     );
     renderWithProviders(<PackageRegistriesPage />);
-    await userEvent.click(await screen.findByRole("button", { name: "Rotate @example credential" }));
+    await userEvent.click((await screen.findAllByRole("button", { name: "Rotate @example credential" }))[0]);
     const dialog = screen.getByRole("dialog"); expect(within(dialog).queryByLabelText("Registry URL")).not.toBeInTheDocument();
     fireEvent.change(within(dialog).getByLabelText("Token"), { target: { value: secret } });
     await userEvent.click(within(dialog).getByRole("button", { name: "Rotate credential" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(updates).toEqual([{ expected_revision: credential.revision, token: secret }]);
-    await userEvent.click(screen.getByRole("button", { name: "Delete @example credential" })); expect(deleted).toEqual([]);
+    await userEvent.click(screen.getAllByRole("button", { name: "Delete @example credential" })[0]); expect(deleted).toEqual([]);
     await userEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete credential" }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument()); expect(deleted).toEqual([credential.revision]);
   });
