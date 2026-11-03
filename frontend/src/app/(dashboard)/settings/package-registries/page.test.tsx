@@ -34,6 +34,7 @@ describe("PackageRegistriesPage", () => {
     server.use(http.get("*/api/v1/repositories/:id/package-registry-credentials", ({ params }) => { requests.push(String(params.id)); return HttpResponse.json({ data: params.id === "repo-1" ? [credential] : [], meta: {} }); }));
     renderWithProviders(<PackageRegistriesPage />);
     expect(await screen.findByText(credential.registry_url)).toBeInTheDocument();
+    expect(screen.getByRole("table").closest('[data-slot="card"]')).toBeInTheDocument();
     expect(screen.getByText("@example")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /reveal/i })).not.toBeInTheDocument();
     expect(screen.queryByText(secret)).not.toBeInTheDocument();
