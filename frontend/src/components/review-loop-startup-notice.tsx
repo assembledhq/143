@@ -2,7 +2,15 @@
 
 import { StatusLabel } from "@/components/status-label";
 import { Card, CardContent } from "@/components/ui/card";
+import type { OperationalTone } from "@/lib/operational-state";
 import type { ReviewLoopAdmissionState } from "@/lib/types";
+
+function startupTone(state?: ReviewLoopAdmissionState | null): OperationalTone {
+  if (state === "accepted") return "success";
+  if (state === "attention" || state === "refused") return "attention";
+  if (state === "cancelled") return "neutral";
+  return "info";
+}
 
 export function ReviewLoopStartupNotice({ state }: { state?: ReviewLoopAdmissionState | null }) {
   const title = state === "accepted"
@@ -28,7 +36,7 @@ export function ReviewLoopStartupNotice({ state }: { state?: ReviewLoopAdmission
   return (
     <Card>
       <CardContent className="space-y-2 py-3">
-        <StatusLabel label={title} tone={state === "attention" || state === "refused" ? "attention" : "info"} announcement="polite" />
+        <StatusLabel label={title} tone={startupTone(state)} announcement="polite" />
         <p className="text-xs text-muted-foreground">{detail}</p>
       </CardContent>
     </Card>
