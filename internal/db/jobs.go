@@ -370,6 +370,21 @@ func (s *JobStore) LatestJobStatusByDedupeKey(ctx context.Context, orgID uuid.UU
 	return status, nil
 }
 
+// LatestJobOutcomeByDedupeKey reads status and failure from the same generation-
+// scoped job. Callers must validate any machine-readable failure before using it.
+func (s *JobStore) LatestJobOutcomeByDedupeKey(ctx context.Context, orgID uuid.UUID, queue, dedupeKey string) (models.JobStatus, *string, error) {
+	var status models.JobStatus
+	var failure *string
+	err := s.db.QueryRow(ctx, `
+		SELECT status, last_error FROM jobs
+		WHERE org_id = $1 AND queue = $2 AND dedupe_key = $3
+		ORDER BY created_at DESC, id DESC LIMIT 1`, orgID, queue, dedupeKey).Scan(&status, &failure)
+	if err != nil {
+		return "", nil, fmt.Errorf("latest job outcome by dedupe key: %w", err)
+	}
+	return status, failure, nil
+}
+
 // CancelActiveCodeReviewPreparation fences a timed-out initializer before the
 // controller falls back to the ordinary reviewer workspace path. A running
 // worker may still finish an in-flight Docker operation, but it cannot renew

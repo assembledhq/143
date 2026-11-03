@@ -27,7 +27,7 @@ const (
 	codeReviewDisputesDirtyMigrationVersion = 281
 	// Bump only after reviewing compatibility with the inactive runtime.
 	// TestRuntimeRevertSchemaPinMatchesMigrations catches a newer source schema.
-	inactiveRuntimeSchemaVersion = 393
+	inactiveRuntimeSchemaVersion = 394
 )
 
 type dirtyMigrationRepairer interface {
@@ -181,7 +181,9 @@ func verifyInactiveBinaryRollback(ctx context.Context, rawURL string, schema uin
 
 // verifyInactiveRuntimeSchema shares the retained-history proof with the pinned
 // binary rollback check. The source revert additionally supports schema 393,
-// whose only added table stores unrelated package-registry credentials.
+// with an unrelated package-credential table, and schema 394, which only widens
+// the review operational-phase constraint. Neither changes inactive caller or
+// lifecycle state inspected here. Binary rollback remains explicitly pinned.
 func verifyInactiveRuntimeSchema(ctx context.Context, rawURL string, expectedSchema uint) (result error) {
 	// Worker DATABASE_URL values include pool options. Parse them as a pool
 	// configuration so they are not sent to PostgreSQL as runtime parameters;

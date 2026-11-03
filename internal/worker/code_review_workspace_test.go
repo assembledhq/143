@@ -11,6 +11,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -92,21 +93,27 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 	t.Parallel()
 	snapshot := "checkpoint-before-first-completed-turn"
 	tests := []struct {
-		name                string
-		snapshot            *string
-		workspaceGen        int64
-		wrongRepository     bool
-		terminalPreparation bool
-		timedOutPreparation bool
-		cancelError         bool
-		afterPreflight      bool
+		name                 string
+		snapshot             *string
+		workspaceGen         int64
+		wrongRepository      bool
+		terminalPreparation  bool
+		timedOutPreparation  bool
+		cancelError          bool
+		afterPreflight       bool
+		deterministicFailure bool
+		failureDuringCancel  bool
 	}{
 		{name: "snapshot with generation zero", snapshot: &snapshot},
 		{name: "repository mismatch", wrongRepository: true},
 		{name: "dead-lettered preparation falls back without re-enqueue", terminalPreparation: true},
 		{name: "slow live preparation is cancelled and falls back", timedOutPreparation: true},
-		{name: "uncertain cancellation still falls back safely", timedOutPreparation: true, cancelError: true},
+		{name: "uncertain cancellation cannot launch reviewers", timedOutPreparation: true, cancelError: true},
 		{name: "holder lost during preflight falls back without re-enqueue", afterPreflight: true},
+		{name: "invalid lockfile stops before fallback", terminalPreparation: true, deterministicFailure: true},
+		{name: "invalid lockfile stops even after deadline", timedOutPreparation: true, deterministicFailure: true},
+		{name: "invalid lockfile stops even after preflight", afterPreflight: true, deterministicFailure: true},
+		{name: "failure commits during timeout cancellation", timedOutPreparation: true, failureDuringCancel: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -138,24 +145,45 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 			setWorkerSessionColumn(sessionRow, "workspace_generation", tt.workspaceGen)
 			mock.ExpectQuery("FROM sessions").WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
-			if tt.terminalPreparation || tt.timedOutPreparation {
+			key := codeReviewWorkspacePreparationKey(reviewID, sessionID, tt.workspaceGen)
+			failure := codeReviewSetupFailurePrefix + "EUSAGE"
+			if tt.terminalPreparation || tt.timedOutPreparation || tt.afterPreflight {
+				outcomeRows := pgxmock.NewRows([]string{"status", "last_error"})
+				status := models.JobStatusRunning
+				if tt.afterPreflight {
+					status = models.JobStatusSucceeded
+				}
+				if tt.terminalPreparation || tt.deterministicFailure {
+					status = models.JobStatusDeadLetter
+				}
+				var lastError *string
+				if tt.deterministicFailure {
+					lastError = &failure
+				}
+				outcomeRows.AddRow(status, lastError)
+				mock.ExpectQuery("SELECT status, last_error FROM jobs").WithArgs(orgID, "agent", key).WillReturnRows(outcomeRows)
+			}
+			if !tt.deterministicFailure && (tt.terminalPreparation || tt.timedOutPreparation) {
 				createdAt := time.Now().UTC()
 				if tt.timedOutPreparation {
 					createdAt = createdAt.Add(-codeReviewWorkspaceWaitLimit - time.Minute)
 				}
-				key := codeReviewWorkspacePreparationKey(reviewID, sessionID, tt.workspaceGen)
 				mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).
 					WillReturnRows(pgxmock.NewRows([]string{"created_at"}).AddRow(createdAt))
-				if tt.terminalPreparation {
-					mock.ExpectQuery("SELECT status FROM jobs").WithArgs(orgID, "agent", key).
-						WillReturnRows(pgxmock.NewRows([]string{"status"}).AddRow(models.JobStatusDeadLetter))
-				} else {
+				if tt.timedOutPreparation {
 					cancel := mock.ExpectExec("UPDATE jobs").WithArgs(orgID, "agent", key)
 					if tt.cancelError {
 						cancel.WillReturnError(errors.New("connection lost after cancellation attempt"))
 					} else {
 						cancel.WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 					}
+					afterRows := pgxmock.NewRows([]string{"status", "last_error"})
+					if tt.failureDuringCancel {
+						afterRows.AddRow(models.JobStatusDeadLetter, &failure)
+					} else {
+						afterRows.AddRow(models.JobStatusCancelled, nil)
+					}
+					mock.ExpectQuery("SELECT status, last_error FROM jobs").WithArgs(orgID, "agent", key).WillReturnRows(afterRows)
 				}
 			}
 			stores := &Stores{
@@ -169,7 +197,15 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 			err = gate(context.Background(), stores,
 				&Services{CodeReviewWorkspacePreparationEnabled: true},
 				zerolog.Nop(), job)
-			require.NoError(t, err, "ineligible review should use ordinary reviewer workspace recovery without waiting for preparation")
+			if tt.deterministicFailure || tt.failureDuringCancel {
+				var fatal *FatalError
+				require.ErrorAs(t, err, &fatal, "deterministic setup failure must stop controller before reviewer fan-out")
+				require.True(t, agent.IsTerminalNPMSetupError(err), "safe cause must survive durable job handoff")
+			} else if tt.cancelError {
+				require.ErrorIs(t, err, errCodeReviewWorkspaceCancellationUnconfirmed, "uncertain cancellation must not fan out while preparation could still fail")
+			} else {
+				require.NoError(t, err, "ineligible or transiently failed review retains ordinary recovery")
+			}
 			require.NoError(t, mock.ExpectationsWereMet(), "workspace gate should stop before enqueuing an impossible preparation")
 		})
 	}
@@ -178,13 +214,15 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		correlated bool
-		existing   bool
+		name           string
+		correlated     bool
+		existing       bool
+		afterPreflight bool
 	}{
 		{name: "controller identity is captured", correlated: true},
 		{name: "legacy caller keeps polling"},
 		{name: "existing preparation avoids duplicate enqueue", correlated: true, existing: true},
+		{name: "active preparation after preflight still gates reviewer launch", correlated: true, existing: true, afterPreflight: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -220,13 +258,13 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 			mock.ExpectQuery("FROM sessions").WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 				WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
 			startedRows := pgxmock.NewRows([]string{"created_at"})
-			statusRows := pgxmock.NewRows([]string{"status"})
+			statusRows := pgxmock.NewRows([]string{"status", "last_error"})
 			if tt.existing {
 				startedRows.AddRow(now)
-				statusRows.AddRow(models.JobStatusPending)
+				statusRows.AddRow(models.JobStatusPending, nil)
 			}
+			mock.ExpectQuery("SELECT status, last_error FROM jobs").WithArgs(orgID, "agent", key).WillReturnRows(statusRows)
 			mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).WillReturnRows(startedRows)
-			mock.ExpectQuery("SELECT status FROM jobs").WithArgs(orgID, "agent", key).WillReturnRows(statusRows)
 			if !tt.existing {
 				mock.ExpectQuery("WITH candidates AS").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-1"))
@@ -237,11 +275,23 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 				mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).
 					WillReturnRows(pgxmock.NewRows([]string{"created_at"}).AddRow(now))
 			}
+			mock.ExpectQuery("UPDATE code_review_session_metadata").WithArgs(pgx.NamedArgs{
+				"org_id": orgID, "session_id": sessionID, "phase": models.CodeReviewPhasePreparingWorkspace,
+			}).WillReturnRows(newCodeReviewMetadataRows().AddRow(
+				reviewID, orgID, sessionID, repositoryID, uuid.New(), uuid.New(),
+				"base-1", "head-1", false, models.CodeReviewTriggerSourceAppReviewer,
+				models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false,
+				nil, nil, false, nil, "output-key", nil, nil, nil, nil, nil, nil, now))
+
 			stores := &Stores{
 				CodeReviewWorkspaces: db.NewCodeReviewWorkspaceStore(mock),
 				CodeReviews:          db.NewCodeReviewStore(mock), Sessions: db.NewSessionStore(mock), Jobs: db.NewJobStore(mock),
 			}
-			err = ensureCodeReviewWorkspaceReady(ctx, stores,
+			gate := ensureCodeReviewWorkspaceReady
+			if tt.afterPreflight {
+				gate = ensureCodeReviewWorkspaceReadyAfterPreflight
+			}
+			err = gate(ctx, stores,
 				&Services{CodeReviewWorkspacePreparationEnabled: true},
 				zerolog.Nop(), job)
 			var retry *RetryableError

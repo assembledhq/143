@@ -59,6 +59,7 @@ Authenticated setup requires a trusted repository configuration. Reviews from fo
 
 ## Troubleshooting
 
+- **The review stops during workspace preparation:** npm rejected the package manifests, lockfile, or runtime requirements. Validate the committed lockfile with the sandbox image's npm version, fix the inputs, and request a new review. Recognized deterministic failures during shared workspace preparation stop the review before launching reviewers. Transient failures retain bounded retries. Instance administrators can inspect the sanitized error code, Node/npm versions, and installation duration; raw npm output is not retained.
 - **Authentication fails:** check that the registry origin and package scope match the locked packages, and rotate an expired or insufficiently scoped token.
 - **A package needs an install script:** add the required script to bootstrap or review commands after controlled installation. Do not put the token in those commands.
 - **Credential storage is unavailable:** ask your instance administrator to configure package credential encryption, then try again. 143 does not save plaintext tokens as a fallback.

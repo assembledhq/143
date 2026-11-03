@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -193,10 +194,20 @@ func (d *DockerProvider) runIsolatedNPMSetup(ctx context.Context, sb *agent.Sand
 	}
 	isolated := &agent.Sandbox{ID: created.ID, WorkDir: "/", Env: map[string]string{"PATH": "/usr/bin:/bin", "HOME": "/private/home", "TMPDIR": "/private/tmp"}}
 	command := "/usr/bin/python3 -I -S -c '" + shellEscape(npmSetupInstallPython) + "'"
-	code, err := d.ExecWithStdinForReviewPreparation(ctx, isolated, command, bytes.NewReader(raw), io.Discard, io.Discard)
+	var diagnostics bytes.Buffer
+	diagnosticWriter := &npmSetupBoundedWriter{writer: &diagnostics, remaining: 4096}
+	code, err := d.ExecWithStdinForReviewPreparation(ctx, isolated, command, bytes.NewReader(raw), diagnosticWriter, io.Discard)
 	clear(raw)
-	if err != nil || code != 0 {
+	if err != nil {
 		return nil, errors.New("isolated npm dependency installation failed")
+	}
+	if code != 0 {
+		failure := parseNPMSetupFailure(diagnostics.Bytes())
+		var diagnostic *agent.NPMSetupError
+		if errors.As(failure, &diagnostic) {
+			d.logger.Warn().Str("code", diagnostic.Code).Str("node_version", diagnostic.NodeVersion).Str("npm_version", diagnostic.NPMVersion).Int64("install_duration_ms", diagnostic.PhaseDurationsMS["install"]).Msg("npm dependency setup rejected project inputs")
+		}
+		return nil, failure
 	}
 	output, err := os.CreateTemp("", "143-npm-output-*.tar")
 	if err != nil {
@@ -212,6 +223,28 @@ func (d *DockerProvider) runIsolatedNPMSetup(ctx context.Context, sb *agent.Sand
 		return result, err
 	}
 	return result, nil
+}
+
+// parseNPMSetupFailure validates every exported field independently of the installer.
+func parseNPMSetupFailure(raw []byte) error {
+	generic := errors.New("isolated npm dependency installation failed")
+	if len(raw) > 4096 {
+		return generic
+	}
+	var diagnostic agent.NPMSetupError
+	if json.Unmarshal(raw, &diagnostic) != nil || !agent.IsTerminalNPMSetupError(&diagnostic) {
+		return generic
+	}
+	version := regexp.MustCompile(`^v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
+	if (diagnostic.NodeVersion != "" && !version.MatchString(diagnostic.NodeVersion)) || (diagnostic.NPMVersion != "" && !version.MatchString(diagnostic.NPMVersion)) {
+		return generic
+	}
+	for phase, duration := range diagnostic.PhaseDurationsMS {
+		if phase != "install" || duration < 0 || duration > 600000 {
+			return generic
+		}
+	}
+	return &diagnostic
 }
 
 type npmSetupBoundedWriter struct {
@@ -401,7 +434,7 @@ print(json.dumps({'files':files,'fingerprint':key,'ready':previous.get('fingerpr
 `
 
 const npmSetupInstallPython = `
-import json,os,pathlib,re,shutil,subprocess,sys
+import json,os,pathlib,re,shutil,subprocess,sys,time
 from urllib.parse import urlparse
 p=json.load(sys.stdin);root=pathlib.Path('/setup/project');root.mkdir()
 for relative,content in p['files'].items():
@@ -410,7 +443,7 @@ for relative,content in p['files'].items():
  target=root/path;target.parent.mkdir(parents=True,exist_ok=True);target.write_text(content)
 private=pathlib.Path('/private');(private/'home').mkdir();(private/'tmp').mkdir()
 config=private/'npmrc';lines=[];registries=set();scopes=set()
-for credential in p.pop('credentials'):
+for credential in p.pop('credentials') or []:
  registry=credential['registry'];scope=credential['scope'];token=credential['token'];url=urlparse(registry)
  if url.scheme!='https' or not url.hostname or url.username or url.password or url.path!='/' or url.query or url.fragment or url.port not in (None,443) or not re.fullmatch(r'@[a-z0-9][a-z0-9._-]*',scope) or not token or any(c.isspace() or ord(c)<32 for c in token): raise RuntimeError('invalid credential')
  if registry in registries or scope in scopes: raise RuntimeError('duplicate credential binding')
@@ -419,12 +452,35 @@ for credential in p.pop('credentials'):
 fd=os.open(config,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 with os.fdopen(fd,'w') as stream: stream.write('\n'.join(lines)+'\n')
 del lines
+def version(command):
+ try:
+  value=subprocess.check_output(command,stderr=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin'},timeout=10).decode().strip()
+  return value if re.fullmatch(r'v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}',value) else ''
+ except Exception: return ''
+started=time.monotonic();failure=None
 try:
  for target in p['targets']:
   args=['/usr/bin/npm','ci','--ignore-scripts','--no-audit','--no-fund','--registry=https://registry.npmjs.org/','--userconfig='+str(config),'--globalconfig=/dev/null','--cache=/private/cache','--logs-dir=/private/logs','--global=false','--package-lock=true','--install-links=false','--legacy-peer-deps='+str(target.get('legacy_peer_deps',False)).lower()]
-  result=subprocess.run(args,cwd=root/target['directory'],env={'PATH':'/usr/bin:/bin','HOME':'/private/home','TMPDIR':'/private/tmp'},stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-  if result.returncode: raise RuntimeError('npm installation failed')
+  with open(private/'output','w+b') as output:
+   result=subprocess.Popen(args,cwd=root/target['directory'],env={'PATH':'/usr/bin:/bin','HOME':'/private/home','TMPDIR':'/private/tmp'},stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+   remaining=1048576
+   while True:
+    chunk=result.stdout.read(65536)
+    if not chunk: break
+    if remaining:
+     bounded=chunk[:remaining];output.write(bounded);remaining-=len(bounded)
+   result.stdout.close();result.wait()
+   if result.returncode:
+    output.seek(0);text=output.read(1048576).decode('utf-8','replace')
+    codes=re.findall(r'(?im)^npm (?:ERR!|error) code (E[A-Z]+)\s*$',text)
+    code=codes[-1] if codes else ''
+    if code in {'EUSAGE','EBADENGINE','ELOCKVERIFY'}:
+     failure={'code':code,'category':'permanent','node_version':version(['/usr/bin/node','--version']),'npm_version':version(['/usr/bin/npm','--version']),'phase_durations_ms':{'install':min(600000,int((time.monotonic()-started)*1000))}}
+    raise RuntimeError('npm installation failed')
   (root/target['directory']/'node_modules').mkdir(exist_ok=True)
+except Exception:
+ if failure: print(json.dumps(failure),flush=True)
+ sys.exit(1)
 finally:
  for target in private.iterdir():
   if target.is_dir(): shutil.rmtree(target)

@@ -50,14 +50,14 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 		tc.name = "source revert " + tc.name
 		tc.source = true
 		if tc.name == "source revert different schema" {
-			tc.mutation = "UPDATE schema_migrations SET version=394"
+			tc.mutation = "UPDATE schema_migrations SET version=395"
 		}
 		tc.refusal = strings.ReplaceAll(tc.refusal, "392", "393")
 		if strings.Contains(tc.name, "dirty ledger") {
 			tc.refusal = "dirty migration ledger"
 		}
 		if tc.name == "source revert different schema" {
-			tc.refusal = "schema through 393 only"
+			tc.refusal = "schema through 394 only"
 		}
 		tests = append(tests, tc)
 	}
@@ -73,12 +73,12 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 				schema = tt.schema
 			}
 			if tt.source {
-				schema = 393
+				schema = inactiveRuntimeSchemaVersion
 			}
 			require.NoError(t, m.Migrate(schema), "install the historical inactive schema supported by binary rollback")
 			f := seedCallerIntentMigrationLegacy(t, ctx, conn)
 			seedCallerDispatchStatusMigrationMetadata(t, ctx, conn, f)
-			if schema == 393 {
+			if schema >= 393 {
 				seedInactiveRollbackCredential(t, ctx, conn, f.org)
 			}
 			if tt.mutation != "" {
@@ -88,7 +88,7 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 			snapshot := func() string {
 				var value string
 				query := `SELECT jsonb_build_object('ledger',(SELECT jsonb_agg(to_jsonb(x)) FROM schema_migrations x),'control',(SELECT jsonb_agg(to_jsonb(x)) FROM caller_send_intent_control x),'sessions',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM sessions x),'metadata',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM code_review_session_metadata x))`
-				if schema == 393 {
+				if schema >= 393 {
 					query += ` || jsonb_build_object('credentials',(SELECT jsonb_agg(to_jsonb(x) ORDER BY id) FROM package_registry_credentials x))`
 				}
 				err := conn.QueryRow(ctx, "SELECT ("+query+")::text").Scan(&value)
@@ -109,7 +109,7 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 			if tt.source {
 				err = verifyRuntimeRevertBeforeUp(ctx, m, rawURL)
 				if err == nil {
-					err = verifyInactiveRuntimeSchema(ctx, rawURL, 393)
+					err = verifyInactiveRuntimeSchema(ctx, rawURL, inactiveRuntimeSchemaVersion)
 				}
 			} else {
 				err = verifyInactiveBinaryRollback(ctx, rawURL, schema)
