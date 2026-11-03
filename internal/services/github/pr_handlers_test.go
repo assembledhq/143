@@ -587,13 +587,14 @@ func githubRepositoryTestCols() []string {
 }
 
 type recordingAutomationEventTriggerer struct {
+	err                error
 	calls              []automationevents.GitHubEventTriggerRequest
 	rememberedLabelReq []automationevents.GitHubEventTriggerRequest
 }
 
 func (r *recordingAutomationEventTriggerer) TriggerGitHubEvent(_ context.Context, req automationevents.GitHubEventTriggerRequest) error {
 	r.calls = append(r.calls, req)
-	return nil
+	return r.err
 }
 
 func (r *recordingAutomationEventTriggerer) RememberKnownLabels(req automationevents.GitHubEventTriggerRequest) {
@@ -619,24 +620,28 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name             string
-		events           []models.AutomationGitHubEvent
-		withPR           bool
-		run              func(*testing.T, *PRService, uuid.UUID, int64, string)
-		wantActor        string
-		wantLabels       []string
-		wantBody         string
-		wantEventID      string
-		wantGroupID      string
-		wantBaseBranch   string
-		wantURL          string
-		wantTitle        string
-		wantHeadSHA      string
-		wantActorType    string
-		wantPRAction     string
-		wantLabelOnly    bool
-		wantChangedLabel string
-		wantLabelRefresh bool
+		name                string
+		events              []models.AutomationGitHubEvent
+		withPR              bool
+		run                 func(*testing.T, *PRService, uuid.UUID, int64, string)
+		wantActor           string
+		wantLabels          []string
+		wantBody            string
+		wantEventID         string
+		wantGroupID         string
+		wantBaseBranch      string
+		wantURL             string
+		wantTitle           string
+		wantHeadSHA         string
+		wantActorType       string
+		wantPRAction        string
+		wantLabelOnly       bool
+		wantChangedLabel    string
+		wantLabelRefresh    bool
+		wantCheckName       string
+		wantCheckAppID      int64
+		wantCheckRunID      int64
+		wantCheckConclusion string
 	}{
 		{
 			name: "pull request opened",
@@ -849,6 +854,8 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				event.Repository.ID = githubRepoID
 				event.Repository.FullName = fullName
 				event.CheckRun.ID = 777
+				event.CheckRun.Name = "review-policy"
+				event.CheckRun.App.ID = 123
 				event.CheckRun.Conclusion = &conclusion
 				event.CheckRun.HeadSHA = "head-123"
 				event.CheckRun.PullRequests = append(event.CheckRun.PullRequests, struct {
@@ -861,9 +868,10 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				}{Ref: "release"}})
 				require.NoError(t, svc.HandleCheckRunEvent(context.Background(), event), "check run webhook should not fail")
 			},
-			wantActor:      "github",
-			wantBody:       "Check run completed: failure",
-			wantEventID:    "check_run:777",
+			wantActor:     "github",
+			wantBody:      "Check run completed: failure",
+			wantEventID:   "check_run:777",
+			wantCheckName: "review-policy", wantCheckAppID: 123, wantCheckRunID: 777, wantCheckConclusion: "failure",
 			wantBaseBranch: "release",
 			wantHeadSHA:    "head-123", wantActorType: "System",
 		},
@@ -1002,6 +1010,10 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				recordedReq = triggerer.calls[0]
 			}
 			require.Equal(t, tt.wantLabels, recordedReq.Labels, "automation request should carry the PR labels from the webhook payload")
+			require.Equal(t, tt.wantCheckName, recordedReq.CheckName, "automation check filters need the exact check name")
+			require.Equal(t, tt.wantCheckAppID, recordedReq.CheckAppID, "automation check filters need the verified webhook publisher ID")
+			require.Equal(t, tt.wantCheckRunID, recordedReq.CheckRunID, "snapshot provenance should retain the completed check ID")
+			require.Equal(t, tt.wantCheckConclusion, recordedReq.CheckConclusion, "snapshot provenance should retain the completed conclusion")
 			require.Equal(t, orgID, recordedReq.OrgID, "automation request should use the resolved repository org")
 			require.Equal(t, repoID, recordedReq.RepositoryID, "automation request should use the resolved repository id")
 			require.Equal(t, fullName, recordedReq.Repository, "automation request should include repository name")
@@ -4745,6 +4757,71 @@ func TestHandlePullRequestEvent_NotifiesAutomationTargetLifecycle(t *testing.T) 
 
 			require.Equal(t, tt.wantClosed, lifecycle.closed, "close notifications")
 			require.Equal(t, tt.wantReopened, lifecycle.reopened, "reopen notifications")
+		})
+	}
+}
+
+func TestHandleCheckRunEventRoutingFailurePreservesProjection(t *testing.T) {
+	t.Parallel()
+	for _, projectionFails := range []bool{false, true} {
+		t.Run(fmt.Sprint(projectionFails), func(t *testing.T) {
+			t.Parallel()
+			args := func(count int) []any {
+				values := make([]any, count)
+				for i := range values {
+					values[i] = pgxmock.AnyArg()
+				}
+				return values
+			}
+			org, repo := uuid.New(), uuid.New()
+			prMock, jobMock, repoMock := newMockPool(t), newMockPool(t), newMockPool(t)
+			trigger := &recordingAutomationEventTriggerer{err: automationevents.ErrCheckRunTrigger}
+			service := &PRService{pullRequests: db.NewPullRequestStore(prMock), jobs: db.NewJobStore(jobMock), repos: db.NewRepositoryStore(repoMock), automationEventTriggers: trigger, logger: zerolog.Nop()}
+			event := CheckRunEvent{Action: "completed", OwnerOrgID: &org, DeliveryID: "delivery"}
+			event.Repository.FullName = "example/project"
+			event.CheckRun.ID, event.CheckRun.Name, event.CheckRun.HeadSHA = 123, "review-policy", "head"
+			conclusion := "neutral"
+			event.CheckRun.Conclusion = &conclusion
+			projectionErr := errors.New("projection unavailable")
+			for _, number := range []int{42, 43} {
+				ref := struct {
+					Number int `json:"number"`
+					Base   struct {
+						Ref string `json:"ref"`
+					} `json:"base"`
+				}{Number: number}
+				event.CheckRun.PullRequests = append(event.CheckRun.PullRequests, ref)
+				if projectionFails && number == 43 {
+					continue
+				}
+				expectGitHubAutomationRepositoryLookup(repoMock, org, repo, 123, event.Repository.FullName)
+				id, session, now := uuid.New(), uuid.New(), time.Now()
+				row := handlerPRRow(id, &session, org, event.Repository.FullName, now)
+				row[3], row[12], row[19], row[20] = number, &event.CheckRun.HeadSHA, nil, int64(0)
+				prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE org_id").WithArgs(pgx.NamedArgs{"org_id": org, "github_repo": event.Repository.FullName, "github_pr_number": number}).WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(row...))
+				prMock.ExpectBegin()
+				prMock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").WithArgs(pgx.NamedArgs{"org_id": org, "pull_request_id": id}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(id))
+				if projectionFails {
+					prMock.ExpectQuery("WITH applied AS").WithArgs(args(14)...).WillReturnError(projectionErr)
+					prMock.ExpectRollback()
+				} else {
+					prMock.ExpectQuery("WITH applied AS").WithArgs(args(14)...).WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
+					prMock.ExpectCommit()
+					for _, count := range []int{7, 6} {
+						jobMock.ExpectQuery("INSERT INTO jobs").WithArgs(args(count)...).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+					}
+				}
+			}
+			err := service.HandleCheckRunEvent(context.Background(), event)
+			require.ErrorIs(t, err, automationevents.ErrCheckRunTrigger, "routing failure must remain retryable after projection")
+			if projectionFails {
+				require.ErrorIs(t, err, projectionErr, "projection errors must retain their original identity")
+			} else {
+				require.Len(t, trigger.calls, 2, "later PR references must still route and project")
+			}
+			require.NoError(t, prMock.ExpectationsWereMet(), "managed current-head state must project despite routing failure")
+			require.NoError(t, jobMock.ExpectationsWereMet(), "ordinary projection must enqueue its rebuild and sync")
+			require.NoError(t, repoMock.ExpectationsWereMet(), "every processed reference must retain repository routing")
 		})
 	}
 }

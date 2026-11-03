@@ -1400,6 +1400,9 @@ func validateAutomationGitHubEventFilters(raw json.RawMessage) (json.RawMessage,
 	filters.ExcludedLabels = normalize(filters.ExcludedLabels)
 	filters.FeedbackTypes = normalize(filters.FeedbackTypes)
 	filters.ReviewStates = normalize(filters.ReviewStates)
+	if err := filters.Validate(); err != nil {
+		return nil, err
+	}
 	out, err := json.Marshal(filters)
 	if err != nil {
 		return nil, fmt.Errorf("encode github_event_filters: %w", err)

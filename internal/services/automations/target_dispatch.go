@@ -79,6 +79,9 @@ type AutomationTurnJobPayload struct {
 
 // PullRequestHeadInfo is what the dispatch-time lookup returns.
 type PullRequestHeadInfo struct {
+	Number     int
+	Draft      bool
+	Labels     []string
 	SHA        string
 	UpdatedAt  *time.Time
 	State      string
