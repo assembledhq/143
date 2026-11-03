@@ -123,7 +123,7 @@ function RepositoryCredentials({ repositoryId }: { repositoryId: string }) {
       ) : (
         <div className="overflow-x-auto rounded-lg border bg-card shadow-sm">
           <Table>
-            <TableHeader><TableRow><TableHead>Registry</TableHead><TableHead>Package scope</TableHead><TableHead className="text-right">Updated</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>Registry</TableHead><TableHead>Package scope</TableHead><TableHead className="text-right">Updated</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
             <TableBody>{credentials.data.data.map((credential) => (
               <TableRow key={credential.id}>
                 <TableCell className="font-mono text-xs">{credential.registry_url}</TableCell>

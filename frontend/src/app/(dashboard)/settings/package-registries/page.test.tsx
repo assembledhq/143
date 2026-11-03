@@ -35,6 +35,7 @@ describe("PackageRegistriesPage", () => {
     renderWithProviders(<PackageRegistriesPage />);
     expect(await screen.findByText(credential.registry_url)).toBeInTheDocument();
     expect(screen.getByText("@example")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Actions" })).toHaveClass("text-right");
     expect(screen.queryByRole("button", { name: /reveal/i })).not.toBeInTheDocument();
     expect(screen.queryByText(secret)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("combobox", { name: "Repository" }));
