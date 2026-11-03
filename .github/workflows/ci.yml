@@ -756,23 +756,18 @@ jobs:
             tags: 143-frontend:latest
     steps:
       - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
+      - name: Set up Blacksmith Docker builder
+        uses: useblacksmith/setup-docker-builder@v2
         with:
-          # Bootstrap must use the cache before BuildKit's mirror config is active.
-          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
-          # Cache Docker Hub images through Google's public mirror for CI builds.
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["mirror.gcr.io"]
+          # Keep each image's layers and build cache mounts on its own disk.
+          cache-key: ${{ matrix.file }}
       - name: Build ${{ matrix.name }} Docker image
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           push: false
           tags: ${{ matrix.tags }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
   security:
     name: Security Scan
