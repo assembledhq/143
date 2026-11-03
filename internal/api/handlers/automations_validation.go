@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -320,4 +321,102 @@ func codingCredentialAgentType(provider models.ProviderName) models.AgentType {
 	default:
 		return ""
 	}
+}
+
+func (h *AutomationHandler) validateAutomationLabelModels(ctx context.Context, automation models.Automation) error {
+	if len(automation.GitHubEventFilters) == 0 {
+		return nil
+	}
+	if err := automation.ValidateLabelModelOverrides(); err != nil {
+		return err
+	}
+	var filters models.AutomationGitHubEventFilters
+	if err := json.Unmarshal(automation.GitHubEventFilters, &filters); err != nil {
+		return err
+	}
+	routes := filters.ResolvedLabelModelRoutes(automation.AgentType)
+	if len(routes) == 0 {
+		return nil
+	}
+	available := map[models.AgentType]bool{}
+	for _, route := range routes {
+		available[route.AgentType] = false
+	}
+	checked := h.orgStore != nil || h.codingCredentialStore != nil
+	if h.orgStore != nil {
+		org, err := h.orgStore.GetByID(ctx, automation.OrgID)
+		if err != nil {
+			return fmt.Errorf("load organization settings: %w", err)
+		}
+		settings, err := models.ParseOrgSettings(org.Settings)
+		if err != nil {
+			return err
+		}
+		for agent := range available {
+			available[agent] = hasAutomationAgentConfigKey(settings.AgentConfig, agent)
+		}
+	}
+	missing := false
+	for _, usable := range available {
+		missing = missing || !usable
+	}
+	if missing && h.codingCredentialStore != nil {
+		credentials, err := h.codingCredentialStore.ListByScope(ctx, models.Scope{OrgID: automation.OrgID})
+		if err != nil {
+			return fmt.Errorf("list org coding credentials: %w", err)
+		}
+		for _, credential := range credentials {
+			if credential.Status == models.CodingCredentialStatusActive {
+				available[codingCredentialAgentType(credential.Provider)] = true
+			}
+		}
+	}
+	for _, route := range routes {
+		if checked && !available[route.AgentType] {
+			return fmt.Errorf("model %q is not available for agent %q; configure a team-usable credential first", route.Model, route.AgentType)
+		}
+	}
+	return nil
+}
+
+func automationExecutionAgents(fallback models.AgentType, raw json.RawMessage) []models.AgentType {
+	var filters models.AutomationGitHubEventFilters
+	if len(raw) == 0 || json.Unmarshal(raw, &filters) != nil || len(filters.LabelModelRoutes) == 0 {
+		return []models.AgentType{fallback}
+	}
+	agents := make([]models.AgentType, 0, len(filters.LabelModelRoutes))
+	for _, route := range filters.LabelModelRoutes {
+		agents = append(agents, route.AgentType)
+	}
+	return agents
+}
+
+func parseAutomationReasoningEffort(fallback models.AgentType, raw string, filters json.RawMessage) (*models.ReasoningEffort, error) {
+	effort := models.ReasoningEffort(raw)
+	if err := effort.Validate(); err != nil {
+		return nil, err
+	}
+	if effort == "" {
+		return nil, nil
+	}
+	for _, agent := range automationExecutionAgents(fallback, filters) {
+		if !agent.SupportsReasoningEffortLevel(effort) {
+			return nil, fmt.Errorf("reasoning_effort is not supported for agent_type %q", agent)
+		}
+	}
+	return &effort, nil
+}
+
+func validateAutomationReviewLoops(loops int, fallback models.AgentType, filters json.RawMessage) error {
+	for _, agent := range automationExecutionAgents(fallback, filters) {
+		if err := validatePrePRReviewLoopsForAgent(loops, agent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasExplicitAutomationLabelRoutes(raw json.RawMessage) bool {
+	var filters models.AutomationGitHubEventFilters
+	return json.Unmarshal(raw, &filters) == nil && len(filters.LabelModelRoutes) > 0
 }
