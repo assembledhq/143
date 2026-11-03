@@ -1,189 +1,22 @@
 # Give shared session lifecycle decisions one owner
 
-Status: Milestone 0 design and characterization accepted by independent
-adversarial review on 2026-10-18, with no critical or major findings remaining.
-Approval covers the plan, contract, inventories and synthetic probes only; real
-caller, full-schema, concurrency, storage, provider and image proof remains in 0a.
-No compatibility-floor enforcement or canonical lifecycle mutation behavior has
-been enabled.
-Milestone 0a has started with passive transaction and grant-persistence
-foundations, independently approved on 2026-10-18 after follow-up review.
-A subsequent passive slice adds `nodes.lifecycle_writer_version` to existing
-registration and heartbeats, advertising version 0 only. Shared/reused node IDs
-are last-writer-wins; legacy writes may retain stale metadata. This is not
-process-instance provenance or proof of a compatible floor. The next passive
-slice adds the same version-0 observation to executor allocation, mark-running
-and heartbeat writes. Allocation is dispatcher-owned, not executor process/build
-attestation; legacy executor writes can also retain stale metadata. Neither field
-changes placement or authorization. A following passive slice registers each
-standalone session-executor invocation in `lifecycle_writer_instances` using a
-fresh process UUID, actual binary build and version 0. Its asynchronous observer
-uses the ordinary pool, with a 30-second interval, two-minute observational TTL
-and cooperative five-second attempt budget. It remains alive through runtime
-cleanup and joins before pool closure; fatal exits leave rows to expire. Failed
-observations are logged and retried, never awaited for startup or admission.
-They may still contend for ordinary-pool capacity. Existing daily maintenance
-jobs, scheduled for organizations with active integrations, each attempt at most
-ten 1,000-row batches within one shared cooperative five-second budget. Cleanup
-stops on a short batch, the batch cap or budget exhaustion; normal budget exits
-log partial progress, while other database errors and parent cancellation remain
-errors. The SQL still removes only observations expired for more than seven
-days and protects concurrent renewals. Daily capacity is at most 10,000 times
-the number of executed scheduled organization jobs, and can be lower under the
-time budget or failures. No active organizations means no scheduled cleanup.
-Seven days is eligibility, not a deletion deadline or a bounded history size;
-inserts above actual cleanup throughput can grow the backlog indefinitely.
-No row establishes continuous liveness, drained transactions or a deployment
-compatibility floor. The next passive slice extends the same observer to normal
-`api`, `worker` and `all` server modes. Each invocation has one fresh UUID and
-its configured role; combined `all` mode has one row, not separate API and
-worker rows. Role describes configuration, not successful capability startup.
-Unsupported modes log and skip observation without changing startup admission.
-Normal server observation begins after the existing credentials migration gate
-on the ordinary pool, with the same interval, TTL, version and attempt budget.
-The normal HTTP serving path now joins its existing coordinated shutdown routine
-before returning: listener closure alone precedes HTTP/gateway/socket finalization.
-Observation continues through that routine, then is canceled and joined before
-ordinary-pool closure. Genuine serving failures keep their abrupt fatal exit.
-Existing shutdown policies and timeouts are unchanged. Workers and credential
-socket handlers are not all joined by that routine, and some cleanup has no hard
-global bound; neither routine completion nor row expiry proves every writer has
-drained. Connection census, business callers, schema guards and activation remain
-unchanged; this expanded but partial inventory does not complete 0a.
-A following passive slice labels normal API, worker and combined-server
-connections, their existing worker control-plane reserve, and standalone executor
-connections with `application_name`. One formatter retains the configured role
-and exact 40-hex binary build (or `dev`); empty build metadata is `unknown`, and
-other values use an explicitly marked 128-bit SHA-256 fingerprint rather than
-raw metadata or implicit server truncation. Labels are printable ASCII and fit
-PostgreSQL's 63-byte limit. Supported runtime roles intentionally override a
-DSN-supplied name; unsupported normal-server modes and callers without attribution
-retain their previous naming. Existing pool budgets, timeout/cancellation policy,
-observer version and transaction semantics do not change. These labels do not
-identify process instances, prove drained transactions or establish a writer
-floor, and transaction-pooling proxies need not preserve backend attribution.
-Connection census, command/operator pool coverage and every activation gate
-remain separate work; no production inventory or rollout is established here.
-A subsequent passive slice adds `cmd/lifecycle-census`, a standalone read-only
-command requiring a single explicit `DATABASE_URL` URI host and database name.
-It rejects empty/comma-separated hosts and ambiguous database aliases or target
-keys, then normalizes the selected target before pgx parsing. The port is explicit
-or pinned to PostgreSQL's default 5432, never inherited from `PGPORT` or a service.
-It opens one direct connection and one READ COMMITTED, READ ONLY transaction,
-then separately samples unexpired writer leases and current-database client
-activity, excluding its own backend. Masked backend types are retained as unknown;
-effective statistics privileges, null fields and disabled tracking remain explicit.
-Each source transfers at most 1,001 rows, retains 1,000 and uses the extra row
-only to detect overflow before aggregation. Truncated counts describe the
-retained sample, never source totals.
-The database statement clocks are separate; this is not an atomic snapshot or a
-process-instance/backend join. Allowlisted role/build/version aggregates omit raw
-identifiers, query text, addresses and arbitrary metadata. Labels remain spoofable.
-Connection, setup and reads share a cooperative five-second context budget;
-rollback and connection closure each have a separate cooperative 250ms budget.
-Closure also awaits pgx's asynchronous cleanup within that same close budget.
-Fixed server-side `statement_timeout` and `lock_timeout` values of five seconds
-bound each statement/wait independently of client survival. They are not a
-five-second total server wall-time guarantee across setup and both reads. If
-client cancellation/cleanup cannot finish before process exit, the server limits
-still bound the abandoned statement. URI/environment `options` and differently
-cased aliases cannot override the fixed session name and timeouts.
-Limits bound returned observations, not all internal database work. Versioned JSON
-on stdout is an observation, not a floor/drain verdict. Failures return nonzero
-with sanitized diagnostics; an output failure can leave a partial JSON prefix.
-Operational output belongs outside this public checkout. Runtime/deploy wiring,
-command/operator coverage, independent inventory/drain receipts, canonical callers,
-guards and activation remain separate gates. This command does not complete 0a.
+Status: M0 characterization, inventories and synthetic probes are complete.
+Passive 0a schema, transaction/persistence seams and private receipt kernels are
+implemented. Canonical lifecycle mutations, complete caller conversion, provider/
+storage/recovery proof and an established compatibility floor remain outstanding.
+No authority or activation follows from passive metadata or receipt equality.
 
-Passive attribution also covers the existing one-connection pools in
-`deploy-guardrail` and `worker-deployctl`, using `143:operator:<safe-build>`.
-The fixed connection-only operator formatter shares the runtime build-label
-policy. Both packaged operator binaries embed the same `BUILD_SHA` argument as
-the server; builds without an injected SHA retain the explicit `dev` label.
-The commands intentionally override a DSN-supplied application name while
-retaining their existing 15-second and 20-second contexts, pool limits and
-operational decisions. They start no writer observer and set no writer-version
-marker. The four lease-writer roles and registry schema remain unchanged.
-The census recognizes operator connection labels but continues to classify a
-supplied operator writer-lease role as unknown. This extends the connection-role
-enum within the existing schema-1 JSON shape; external consumers with a strict
-four-role enum must accept the added value before relying on these reports.
-Labels remain self-reported and do not distinguish these two tools, invocation
-identity or privilege. This is partial command coverage: `backfill-usage`,
-`migrate`, `wait-postgres`, `demo-seed` and manual SQL paths remain unattributed
-by this slice. No command uses a label as deployment, drain or activation proof.
-The subsequent command slices below supersede that partial coverage list.
+Use [the 0a delivery plan](session-lifecycle-0a.md) for the current source baseline,
+bounded remaining packages, dependencies and separate local/CI/release/activation
+exits. It supersedes the earlier chronological 0a delivery order. The
+[M0 contract](session-lifecycle-m0-contract.md) remains the normative technical
+contract; M1–M6 below retain their prerequisite gates.
 
-A following migration-only slice labels connections opened by `cmd/migrate`
-with the same `143:operator:<safe-build>` policy. It retains golang-migrate's
-PostgreSQL/libpq driver, migration source, database selection and defaults,
-custom `x-*` options, migration locking and narrow dirty-repair allowlists.
-Only case-insensitive application-name parameters are replaced in recognized
-PostgreSQL URIs; other input retains the existing driver's handling. Its query
-parsing behavior is preserved. Docker and `make build` embed
-the existing binary build SHA in the migration command, while uninjected
-single-file `go run` builds retain `dev`. There is no observer, lease or
-writer-version marker. This does not label `demo-seed`'s separate embedded
-migrator, `backfill-usage`, `wait-postgres` or manual SQL. Schema behavior,
-writer authority and every deployment/activation gate remain unchanged.
-The subsequent demo attribution slice below covers its embedded migrator.
-
-Demo-seed check mode now removes native `dbname`/`database` query overrides when
-selecting its generated temporary database, for both pgx and lib/pq. Malformed
-query parameters fail before it opens a connection. Unsupported case variants
-retain PostgreSQL's rejection behavior. A full-schema check against a disposable
-source database verifies that its original rows and catalog remain unchanged and
-that the temporary sibling is removed. This target-isolation repair adds no
-writer attribution, observer or lifecycle authority.
-
-The auxiliary attribution slice labels `backfill-usage` and `wait-postgres` with
-the same operator/build policy. Backfill retains its pool defaults and rollup
-behavior. The waiter parses and labels each existing retry attempt, preserving
-native URI/keyword/environment handling, Ping/Close and timeout behavior. The
-shared pool builder now removes case-insensitive application-name aliases only
-when a caller explicitly supplies attribution; empty options retain all previous
-naming inputs. Unrelated startup options remain untouched. Neither command starts
-an observer or sets a writer-version marker; uninjected builds retain `dev`.
-
-Demo-seed's admin, fallback and temporary pools and its embedded migrator now
-share that passive operator/build policy. Pool budgets, native parsing, simple
-protocol and existing Check deadlines/cleanup remain unchanged. The migration
-URI transformation has one owner in `internal/db`; `cmd/migrate` delegates to
-it without changing driver behavior. Existing demo entrypoints remain uninjected
-development builds unless their caller explicitly supplies the shared SHA linker
-flag. Labels do not distinguish command instances, prove privilege or grant a
-writer floor. Manual SQL and any unlabelled external writer remain inventory gates.
-
-The passive epoch schema slice adds `admission_epoch bigint NOT NULL DEFAULT 0`,
-nullable `end_epoch bigint`, and `lifecycle_version smallint NOT NULL DEFAULT 0`
-to sessions and threads. Migration 322 changes only sessions; migration 323
-changes only threads, each in a separate transaction with a five-second lock
-timeout. This avoids holding both hot-table DDL locks in one transaction.
-Each table still requires its own exclusive DDL lock; lock timeout remains a
-migration failure, not evidence that the schema was applied.
-Existing rows and legacy inserts receive version-zero defaults without an
-application backfill. A separate DB-only `LifecycleEpochState`
-and tenant-scoped read store expose the values without changing public session or
-thread representations. Thread reads also require the exact parent session.
-Reads retain existing deleted-session/archived-thread visibility and acquire no
-row locks. SQL types and nullability are storage representation only; no epoch
-relationship policy or admission/start/end authority is installed. No existing
-runtime caller reads, increments or enforces these fields. Dispatch/claim records,
-canonical fences, cutover state, writer-version changes and activation remain
-separate 0a work. Roll back readers before removing the passive columns.
-
-Source baseline: `ffe919dcf63807795eb85e1aa24cebe26ef36521`. Source anchors
-identify the inspected implementation; the executable inventory rechecks the
-current tree rather than treating line numbers as permanent identities.
-Publication preparation uses base `c80f042ab17f9414f465212ac0212351a9a2bd00`;
-inventory checks and source-drift review must run against that base before
-publication. The earlier M0 review does not establish exact-head approval of
-publication edits or later source changes.
-Recheck the caller inventory before each migration slice.
-
-Milestone 0's concrete contract and evidence are maintained in
-[session-lifecycle-m0-contract.md](session-lifecycle-m0-contract.md). That document
-specifies the compatibility release; it does not claim that release exists.
+Historical characterization anchors use baseline
+`ffe919dcf63807795eb85e1aa24cebe26ef36521`; current implementation status is
+anchored separately in the 0a plan. Recheck the executable caller inventory and
+source drift before each implementation increment. Historical validation below
+does not establish current CI, fleet deployment or production acceptance.
 
 ## Goal and scope
 
@@ -831,349 +664,48 @@ designs are concrete. No unresolved transaction-composition question is hidden
 behind "extract helper". The chosen representation and queries still need real
 database and rollout proof; these textual policies do not constitute that proof.
 
-### 0a. Deploy a lock/fence compatibility release
+### 0a. Implement and establish the lock/fence compatibility release
 
-Implementation is split into reviewable slices; none individually establishes a
-deployed compatibility floor. The first slice adds
-`internal/db/session_lifecycle_transaction.go`: a pool-owned top-level runner and
-an explicit caller-owned transaction configurator. Both use READ COMMITTED and
-transaction-local protocol settings. The runner gives acquisition, setup, work,
-retries and commit one cooperative two-second context budget; independent
-rollback cleanup may add up to 250ms afterward. A callback that ignores its
-context cannot be forcibly bounded by this helper. It retries only classified
-contention after confirmed rollback; commit uncertainty is never replayed. A
-live context is not a minimum commit-time reserve, so a late deadline may still
-leave commit uncertain; callers must resolve their command receipt, not resubmit.
-Any commit-reserve policy remains a measured pre-activation decision, not an
-arbitrary new cutoff in this passive slice. This is mechanical plumbing, not
-tenant/domain/epoch authority or evidence that a binary is floor-compatible.
-No existing writer uses it yet. Subsequent slices still need passive schema,
-composable persistence/grants, canonical durable mutations and every caller
-conversion below before any activation.
+[The 0a delivery plan](session-lifecycle-0a.md) owns the re-baselined execution
+order. Completed passive preparation is recorded separately from the remaining
+packages; none of those foundations establishes a compatible production floor.
 
-The next passive slice splits `AgentCapabilityPolicyStore.AppendApprovedSessionGrant`
-into its existing transaction-owning wrapper and
-`AppendApprovedSessionGrantInTx(ctx, orgID, tx, sessionID, item)`. The helper uses
-only the caller's concrete `pgx.Tx`; it never settles or retries the unit. The
-wrapper retains its existing errors, duplicate behavior, SQL and
-session-before-automation lock order. This lower-level persistence seam is not
-the canonical `AppendApprovedGrantInTx` authority operation. The initial extraction
-did not rewire human-input callers; the later version-0 answer atomicity step
-below does. Canonical consent, exact request/readiness, epochs and domain
-domain prelocking remain unimplemented gates. Existing snapshot representation
-is sufficient for this slice; no speculative schema is added. The syntax guard
-explicitly inventories the extracted root and its direct callers so extraction
-cannot silently remove its review coverage.
+| Package | Required outcome |
+| --- | --- |
+| A | Canonical admission, exact durable consumer binding and waiting reconciliation |
+| B | Execution/input boundaries, own-attempt settlement, end/owner/topology fences |
+| C | Exact request readiness and current workspace evidence |
+| D | Fresh-key publication, guarded expiry and bounded tombstone-first cleanup |
+| E | Tested exact-target launch and durable accepted-undelivered control |
+| F | Reachable paused/control recovery and explicit legacy dispositions |
+| G | Complete caller/constructor coverage, consumer routing and database guards |
+| H | Activation controller, adjacent/assembled rolling-version proof, performance, rollback and authorized activation |
 
-The initial extraction retained a joined-read lost-update hazard: its metadata
-snapshot preceded the wait on `FOR UPDATE OF s`, and acquiring the lock did not
-refresh that snapshot. A subsequent freshness slice requires READ COMMITTED
-before any parent access, locks the parent in a separate statement, then reads
-fresh metadata. Both wrapper and caller-owned paths preserve concurrent distinct
-grants and recognize a concurrent duplicate on the full schema. An unsupported
-caller or connection-default isolation fails explicitly without being downgraded;
-the caller retains settlement of its transaction. No writer marker is installed.
-Historical binaries using the joined read/lock SQL can still overwrite grants:
-the test-only historical probe retains that evidence, not a desired production
-contract. This repair does not establish a drained floor, canonical lock order,
-exact consent/readiness or epoch authority. The session-before-automation order
-and independent human-input grant transaction still require conversion.
+Each package has reviewable increments, real-caller/full-schema exit evidence and
+explicit exclusions in that plan. Its crosswalk assigns the remaining obligations
+from this section at the source baseline and every companion section. The
+companion retains the canonical operations, lock graph and detailed policy; no
+requirement is waived by shortening this delivery summary.
 
-The result/phase persistence slice exposes concrete `pgx.Tx` variants of the
-three existing combined result, status and turn-completion boundaries. Existing
-wrappers remain transaction owners and call the same persistence implementation.
-No InTx path begins, settles, retries or publishes, including its row/head/diff
-helpers. Opaque `SessionPersistenceEffects` returns workspace notification data;
-the owner discards it after error, rollback or uncertain commit and publishes
-only after confirmed commit. It is not a commit receipt, durable outbox or
-lifecycle authority. Status and phase publication remain service responsibilities.
-SQL predicates, legacy returned-row shape and session/phase association behavior
-are unchanged: canonical admission must still establish exact phase ownership,
-current allocation and shared epochs before composing these resource-only writes.
+Build A–G in bounded increments without enabling new semantics. An increment may
+land dark after separate publication authorization, its own review/CI and compatible
+adjacent-build proof; it need not wait for the entire program. This planning task
+authorizes no publication. Begin each changed live
+writer's adjacent-build lock/effect proof with that increment; test both full
+pre-floor/floor and floor/new transitions on the assembled release as well.
+The runner's version-1 marker is not authority or a binary-wide compatibility
+claim. Every active path needs locked mode routing and the complete canonical
+mutation; legacy multi-transaction sequences cannot enqueue across activation
+without re-observing and resolving exact identity.
 
-Thread status, no-result turn completion, result and result-bearing turn writes
-also have concrete `pgx.Tx` persistence variants. Each shares unchanged private
-row SQL with its legacy wrapper; only the wrapper retains immediate best-effort
-publication. InTx paths return opaque org/thread reload identity, never publish
-or settle, and reject missing transaction or result before writing. Legacy nil
-result behavior is unchanged. The explicit post-commit adapter reloads current
-visible state, possibly a later write; it does not promise the earlier write's
-snapshot, durable delivery or commit attestation. Archived-row mutation versus
-hidden notification, nil versus empty diff, exact turn and provider-ID behavior
-remain intentional legacy semantics, not new authority checks.
-
-The inventory guard registers the explicit composable seam names as both
-boundaries and contract-required direct calls. A cross-package `p.store` receiver
-cannot bypass review merely because its name lacks session/thread vocabulary.
-The two generic InTx name collisions require an explicit reviewed non-lifecycle
-classification; ordinary generic status/result discovery remains unchanged.
-Empty-SQL lexical fixtures prove discovery and contract enforcement for all eight
-named result/phase, thread and seed seams. This is syntax coverage, not runtime
-transaction ownership, semantic call resolution or authority enforcement.
-
-Standalone session turn persistence now owns the row/head/snapshot sequence used
-by its legacy transactional branch, combined phase boundary and actual evidence
-recheck completion. Recheck uses explicit session and thread InTx methods in its
-existing receipt transaction, including head-only and authoritative empty-diff
-results; it no longer enters a nested savepoint for those cases. Its read-only
-nonempty-diff rejection, root usage, domain receipt checks and legacy lock order
-are unchanged. Temporary stores still have no publishers and returned passive
-effects are deliberately discarded, so this conversion adds no notification.
-It does not add canonical shared allocation or admission/end epoch fencing.
-
-Seed materialization, inbox claim/ack/application, phase insertion and runtime
-watermarks now have one caller-owned `StartSeedPhaseInTx` persistence sequence.
-The legacy wrapper still validates before Begin and retains its original commit
-and error behavior. The explicit seam does not settle or publish, including
-through phase-start helpers; successful phase/batch records remain staged until
-the outer owner commits. Existing runtime lease, exact message/range, historical
-never-started batch and primary-tab rules are unchanged. They are not immutable
-allocation, shared admission/end epoch or new provider-launch authority.
-
-Standalone result and status projections now also expose explicit caller-owned
-transaction seams. Combined result/status plus phase persistence delegates to
-them. The plain status wrapper and result wrapper's no-head/no-snapshot direct
-path retain their original DBTX behavior; only the existing transactional result
-branch delegates. Returned session records keep the original UPDATE RETURNING
-shape, before later snapshot revisions or AFTER-trigger mirrors. Status, terminal
-stream expiry and workspace notifications retain their original order after
-pool-backed commit. Legacy wrappers called through tx-bound stores can still
-publish after savepoint release before the true outer commit; converting those
-callers and carrying effects to the outer owner remains required. No new
-allocation, current-turn or epoch authority is implied.
-
-Force-fresh review cancellation now passes its existing PR-locked transaction to
-`ReconcileDrainedTerminalTurnInTx`, rather than entering a nested savepoint via a
-tx-bound wrapper. The same terminal receipt, retained PR owner, physical drain
-and exact thread-turn predicates are shared with the standalone wrapper. The PR
-owner still updates scheduling state, commits and then emits its existing event.
-This is caller-transaction composition, not shared epoch or allocation fencing.
-
-The structured-answer path now constructs its approved capability through one
-shared validation method and persists it through the existing answer transaction.
-A later claim, message, job enqueue or commit failure therefore rolls back both
-the answer and capability snapshots, including the linked automation mirror.
-The handler adapter only constructs the item; it cannot independently commit a
-grant. The standalone grant service retains its configuration error and duplicate
-behavior and currently has no production callers; it remains for compatibility
-and tests. Answer's pure construction does not require that standalone appender;
-production wiring still configures it. This version-0 atomicity prerequisite
-preserves existing pending-request,
-approval parsing, checkpoint and resume policy, including the request-before-parent
-lock order. It is not the canonical `AdmitAnswerInTx`/`AppendApprovedGrantInTx`
-authority operation, and cannot activate readiness enforcement or a writer floor.
-Acquisition order is unchanged, but the session `FOR UPDATE`, metadata and
-automation-row locks now remain held through the outer claim/message/job commit.
-The stronger parent lock can block implicit FK `KEY SHARE` child inserts for
-that window; this does not establish compatibility with competing run-first
-automation writers or the chosen future lock protocol.
-
-Atomic steering now calls a private concrete-transaction acknowledgement core,
-instead of entering the standalone acknowledgement owner's nested savepoint.
-One SQL sequence retains old-phase closure, exact delivered-input acknowledgement,
-batch creation and watermark CAS before the existing replacement-phase operation.
-The standalone path keeps input validation and initial replay before Begin, plus
-its distinct ordinary and concurrent-replay commit errors. The public service
-still publishes only after the store reports success; no new provider authority,
-epoch check, lock order or event policy is introduced.
-
-Full-assessment completion and crash reconciliation now settle their assessment,
-joined requests and PR scheduling state through the same transaction already
-owned by the worker. Shared private PR locking and terminal-policy helpers retain
-the existing repository/tenant checks, active-owner and pending-intent rules.
-The standalone scheduler still reads assessment identity before Begin, commits
-and then publishes its optional event. The two worker stores still have no
-publisher, so removing their nested savepoints adds no event. This is persistence
-composition, not a new current-allocation, review-authority or epoch fence.
-
-The pool-backed automation attempt owner now captures status and workspace
-effects from its existing result/status/turn callback methods. They use explicit
-supplied-transaction persistence, and the fresh bound store's inherited methods
-have no publisher. Only a successful outer commit dispatches effects through the
-original publisher, preserving each call's returned row and status/expiry/workspace
-order. Callback, late duration and commit errors discard them without retry.
-The actual failed-result and awaiting-input status paths no longer publish before
-commit. Actual successful automation callbacks remain diff-free and gain no new
-event; arbitrary diff-bearing callbacks are separately covered as a latent case.
-This owner-local adapter is not a supported way to nest an already tx-bound
-`TurnStore` or a replacement for canonical turn authority.
-
-Scheduled review creation now uses a private session-store adapter whose only
-override calls the existing `CreateInTx` with the PR owner's transaction.
-Standalone creation, the service interface and inherited read/status/failure
-methods remain unchanged. The scoped store is still fresh and publisherless.
-The real scheduler therefore persists its session, primary thread/changeset,
-review metadata, request, controller job and PR state without a creation savepoint.
-This removes nested settlement; it does not add canonical review admission.
-
-Automation checkpoint publication now persists the unchanged checkpoint and
-generation-provenance statement through a concrete supplied-transaction seam.
-The real attempt-locked owner dispatches the captured checkpoint event only after
-its outer commit, through the original publisher. Existing diff effects retain
-their `diff_snapshot` reason; checkpoint effects retain `checkpoint` and the
-original returned revision/time. The standalone DBTX wrapper keeps its existing
-single-statement behavior and immediate notification policy.
-
-The legacy CTE can update the session before finding no matching provenance row,
-then return false. The seam returns no effect and requires whole-owner rollback
-on false as well as error; the automation owner already does that. Standalone
-autocommit's historical false-with-mutation behavior is explicitly characterized,
-not silently repaired here. No active-generation predicate, final-pause/readiness
-proof, upload obligation, new authority or compatibility floor is added.
-
-The recheck publication callback now also uses `SettleAssessmentInTx` with the
-existing publication owner's concrete transaction. Assessment completion,
-request/scheduler settlement and optional status-comment job insertion keep
-their original order and commit together without a scheduling savepoint.
-Earlier publication preparation and the bounded external receipt protocol remain
-separate; this does not make GitHub publication atomic with the database or add
-new scheduling notifications, review policy or canonical execution authority.
-
-Before activating larger transactions, update competing old entry points and
-store primitives to the chosen compatible lock order. Include structured answers,
-grant persistence, ordinary sends/drains, and sibling claim/archive CTEs; explicitly
-order multi-row locks. Audit implicit FK locks and retained specialist transactions.
-Introduce the authoritative DB `...InTx` fence/mutation primitives and wire all
-inventoried floor callers to them in this release. Add narrow lifecycle service
-operations for ordinary command policy; DB specialists compose the same DB
-primitives directly in their own transactions. Implement the explicit wrapper/
-in-transaction split for atomic-CTE and nested scheduling callers. Never accept
-pool writes, copied predicates, reverse service imports, or nested commits as a
-compatibility shortcut. Boundary/call-through checks cover `internal/db` as well
-as handlers/workers from this first release; later extraction does not create the
-first authoritative fence.
-Implement and wire `RecoverPendingInput`, its compatible workers, API/tools, and
-notice action in 0a before any recovery-required classification becomes active.
-The action is not deferred to M4. A notice/action contract test starting in paused
-state is an activation gate. M4 later reuses this command while migrating the
-remaining failed-session retry/start-over and control orchestration.
-Implement the companion's exact-conversation VerifyResumable start preparation,
-final authorization/launch marker and durable parked-control outcome in this
-readiness prerequisite. Retry/abandon remain reachable after transient execution
-leases expire. Guarded expiry and fresh per-attempt publication keys cover every
-snapshot producer, including PR/branch pending uploads and their async promotion/
-failure-clear callbacks, as well as every cleanup caller. The same release owns
-bounded discovery and exact-key cleanup of superseded and orphan uploads, with
-durable handoff before Save, reference/writer checks and a tombstone barrier before
-deletion. It cannot replace one mutable key with an unbounded stream of abandoned
-objects. The companion owns that narrow storage contract and its failure rules.
-Shared HOME
-remains inside the documented trusted-session model; no private-context export
-or provider-isolation program is required for this release.
-
-Prove both mixed-version transitions: pre-floor writers alongside compatibility
-writers, then compatibility writers alongside the new commands. The compatibility
-release itself changes ordering and is not safe merely because its final order
-matches the new kernel. Milestone 0 must select an explicit coexistence protocol
-before 0a begins. A candidate is nonblocking acquisition of newly ordered
-conflicting locks, with confirmed whole-transaction rollback and bounded retry
-before any external effect. `NOWAIT` cannot bound implicit FK waits: require
-`SET LOCAL lock_timeout` with a documented bound for those waits as well. Retry
-the whole transaction with bounded attempts/backoff only after confirmed abort
-for explicitly classified `40P01`/`55P03` conflicts and the companion section 5's
-one concrete actual cutover-advisory-conflict exception; revalidate state each time.
-Never retry unknown commit, arbitrary errors, or partially published effects.
-When attempts exhaust, unaccepted synchronous commands return a typed contention
-outcome without answer/grant/claim changes; adapters map it to a retryable response.
-Accepted async intent stays pending in its durable receipt for later reconciliation
-until its recorded deadline, then receives the defined visible recovery/terminal
-outcome. Exhaustion never becomes false acceptance, silent loss, or status reset.
-Account for every competing row/FK lock, not just the first parent. If this cannot
-be proved, specify a staged compatible protocol or a separately authorized intake barrier with
-natural drain; do not assume a normal rolling deploy is safe.
-
-Test both transitions on separate connections. Reproduce the pre-floor answer
-holding its input lock while waiting for a session, and the compatibility writer
-holding that session while trying the input; prove the chosen protocol releases
-the conflict and commands settle without duplicate effects. Include sibling
-claim/archive, automation-run/grant, and implicit-FK competitors. Record existing
-pre-floor lock inversions and observed error outcomes separately from regressions.
-Require no new deadlock pairs versus that baseline, bounded progress for floor/
-new writers, and no effects from aborted attempts. A pre-floor command may return
-its characterized abort response; that is not evidence the new protocol is safe.
-Known baseline cycles cannot excuse starvation or an unresolved floor/new lock graph.
-
-The floor also installs the execution-start/end, cleanup, seed claim/ack, and
-live-delivery boundary, plus the minimum conditional competing-status writes.
-Those use the chosen DB-canonical mutations, not additional predicate
-implementations. Deploy proof publication and every compatible answer/recovery
-consumer first. Shadow inventory may run earlier but is inert. Once no pre-floor
-producer, consumer, or in-flight answer call remains, activate classification and
-enforcement together per request under its locks, with notice outbox intent in
-that commit. New requests adopt the active version at creation. Do not send a
-recovery notice before this per-request boundary; notification delivery rechecks
-its version/current state. Readiness enforcement is inseparable from effective
-classification, not a later global step after visible classification.
-Include initial starts and legacy retry payloads; job claim is not authorization
-to start. Bind/prove legacy identity or naturally drain/reconcile it without
-assigning today's generation. Do not enable new queued-answer bindings while old
-workers still answer "latest pending", or new end semantics while an older starter/
-poller/cleanup path can bypass them. Prove job version/target routing if needed.
-Finish deploying the floor to all database writers, runtime starters, and delivery
-claimants, including standalone session executors and long-lived workers. Existing work
-drains naturally; do not force-stop it to activate the refactor. If old writers
-remain, keep the old compatible transaction boundaries active until the floor is
-established. Record the supported rollback floor; do not roll a new kernel back
-into incompatible pre-floor lock order or fence interpretation.
-The proposed database minimum-writer guard covers every active-record authority
-surface, not just session/thread status: owner and repair reservations, workspace/
-changeset/materialization, preview and holder mutations can change eligibility
-without writing a session row. The companion maps those tables to tenant/session
-cutovers, including OLD and NEW identities for update/delete. Missing provenance
-for an active association fails closed; version-0 coexistence before activation
-remains unchanged. This guard supplements build/transaction census and consumer
-routing; it is not a replacement for tenant, attempt or domain authorization.
-Every protected write uses an explicit READ COMMITTED transaction that sets
-`SET LOCAL lifecycle143.writer_version='1'` before mutation, including queue
-claimers, heartbeats, maintenance/operator scripts and old compatibility wrappers.
-Protected autocommit pool writes are not a fallback. Connection startup settings
-alone are not safe through transaction-mode pooling. On a pooled connection with
-no startup custom GUC, `current_setting(..., true)` is NULL before first use and
-can be an empty string after a `SET LOCAL` transaction ends. Future guards must
-treat both NULL and empty as unset/version zero, not cast empty text to a valid
-writer version or infer authority from having observed a marker earlier.
-Activation uses bounded
-try-lock/backoff and a visible deferred outcome under sustained shared holders;
-it cannot busy-spin, force-stop work or claim starvation-free activation without
-the 0a mixed-writer/throughput evidence specified in the companion.
-After ACTIVATION_CONTENDED, the lifecycle activation controller owns the stopped
-attempt and its visible receipt. An explicitly authorized operator retry of the
-same org/session and expected cutover version resets only that attempt; normal
-queue work does not silently restart activation. Measure SET LOCAL's extra
-protocol/round-trip cost on hot claims and heartbeat/lease writers, including
-transaction-mode pooling, in the 0a latency/throughput gate. Non-lifecycle jobs
-are positively excluded from lifecycle-job triggers by typed job kind and absent
-lifecycle association; malformed versioned/session bindings fail closed.
-Before activation, unbound jobs from pre-floor producers retain characterized
-legacy semantics; do not deploy a consumer that silently holds all legacy work.
-The new hold-unknown contract activates only after no pre-floor producer/consumer
-remains and old job dispositions are established. Legacy request classifications
-become effective only in their atomic classify-and-enforce commit; any preceding
-inventory is shadow data. Completed M1 waits for that backlog activation.
-Require activation/rollback tests for both sides of that boundary.
-Activation and M1 can proceed by an explicitly enumerated session/provider
-cohort. Every request in that cohort must meet the active classification rule;
-the compatible version-0 tail remains visible as activation-deferred and retains
-its old semantics. This is partial cohort coverage, not repository-wide safety
-or full-plan completion. Final acceptance requires no unbounded active version-0
-tail. Before activation, every provider/pinned-build/ResumeIdentity variant in the
-cohort needs an implemented, tested exact resumability check. Until then those
-sessions retain characterized version-0 semantics with a visible deferred reason;
-an active session cannot downgrade or switch to an unsupported variant. Missing
-private-isolation capability is not this gate. Unexpected unsupported/context-loss
-results after activation use durable undelivered control, never silent history
-reconstruction. Companion sections 7 and 9 define capability and switch checks.
-The same tested-tuple gate applies before routing an upgraded sandbox image/CLI
-build to an active cohort, not only before first session activation. Unsupported
-candidate builds leave the compatible serving build in place with a visible
-rollout-deferred reason; they must not park every bound answer after deployment.
-
-Exit: writer/build inventory establishes the floor, pre-floor/floor and floor/new
-concurrency tests pass, and required transaction-bound grant/store operations are
-available. Legacy in-flight jobs have a proven disposition and every relevant
-consumer/failure hook honors the new fence. This is a prerequisite for any slice
-that changes lock overlap or relies on these semantics, even if that moves part
-of a later milestone's storage work forward.
+Track local completion, publication/exact-head CI, established fleet floor and
+explicitly authorized cohort activation separately. Keep version-0 policy
+characterized until its effective boundary, with no premature answer-latest
+retirement, recovery notice or new end semantics. Natural writer/transaction
+drain, exact provider/build eligibility, reachable recovery, all protected OLD/NEW
+scope guards and supported rollback remain mandatory. M1's completed answer-enabled
+slice follows the established floor and atomic backlog enforcement for its cohort.
+Partial cohort progress never proves repository-wide acceptance.
 
 ### 1. Extract legacy session send as the first vertical slice
 
@@ -1687,8 +1219,6 @@ revision; it must not reinterpret new durable records or trigger replay.
   compatibility-floor rollout.
 - [x] Enforce both inventories in repository-root command tests and add
   checker-path regressions for newly introduced status sites.
-- [x] Complete independent adversarial review of M0 and address all blocking
-  design and characterization findings.
 - [x] Start 0a with the passive transaction runner/configurator and focused unit
   and real PostgreSQL transaction tests. Review-driven regressions prevent a
   runner from taking ownership of an existing connection's outer transaction.
@@ -1703,8 +1233,8 @@ revision; it must not reinterpret new durable records or trigger replay.
   with the complete unmodified migration chain, plus concurrent characterization
   of legacy lost updates and prior-statement prelocking; no prerequisite skips
   remain. This does not fix or authorize conversion of the legacy writer.
-- [x] Complete final independent review of this passive foundation candidate
-  after the cleanup, concurrency-characterization and proof follow-ups.
+- [x] Complete passive-foundation cleanup, concurrency characterization and
+  transaction proof follow-ups without enabling canonical authority.
 - [x] Validate passive runtime connection attribution on PostgreSQL 17, including
   fresh, reused and reset-pool connections and PID-scoped activity checks. This
   does not implement transaction census, process-instance correlation,
@@ -1808,13 +1338,17 @@ revision; it must not reinterpret new durable records or trigger replay.
   stable batched acquisition and read-only policy verification. Prove exact scope,
   caller-owned settlement and confirmed-abort retry composition without exporting
   authorization snapshots or wiring production callers.
-- [ ] Add remaining passive versioned schema and composable persistence with
-  their concrete consumers, then wire canonical mutations by inventoried family.
-- [ ] In 0a, prove new/legacy readiness, all-answer binding, canonical fence
-  wiring, retained-owner end policy, activation and compatibility with real callers.
-- [ ] In 0a, complete remaining real-caller/full-schema characterization and close
-  lock/receipt implementation proof gates; synthetic M0 probes do not satisfy them.
-- [ ] Complete the compatibility-floor release before changing transaction overlap.
+- [ ] Complete 0a packages A–G and their bounded increments in
+  [the delivery plan](session-lifecycle-0a.md), including per-increment caller and
+  adjacent-build proof. Synthetic probes and passive schema do not satisfy them.
+- [ ] For each separately authorized dark increment, complete source review,
+  adjacent-build proof, public-boundary scrub and exact-head CI independently.
+- [ ] Complete 0a H's assembled real-caller, mixed-version, provider/storage,
+  performance and rollback proof; earlier dark publication does not satisfy it.
+- [ ] Establish the separately authorized compatible fleet floor and positive
+  natural drain before any cohort activation.
+- [ ] Complete separately authorized atomic request enforcement for the named
+  cohort; keep the compatible version-0 tail explicit until full acceptance.
 - [ ] Implement milestones 1–4 for ordinary commands and adapters.
 - [ ] Implement milestone 5 for runtime projections and specialist composition.
 - [ ] Complete boundary guards, verification, documentation and rollout evidence.
@@ -1915,7 +1449,7 @@ still drain. Reproduce with an owned PostgreSQL 15+ server and
 `go test -race -p=1 ./internal/db -run '^TestAgentCapabilityApprovedGrant' -count=1
 -parallel=1 -timeout=3m`. This is freshness proof, not consent or floor proof.
 
-After the review follow-ups, the combined race selection on PostgreSQL 17.10
+The combined historical race selection on PostgreSQL 17.10
 passed 334 subtests and 45 test roots, with zero failures or skips (23.429s).
 Both full-schema roots also passed three additional repetitions: 30 root/subtest
 pass events, no failures or skips (51.832s). No fixture databases or lock-probe
@@ -1953,14 +1487,6 @@ and passes its race suite. Gosec module version v2.22.4 scanned 140 files in
 `internal/db` and `cmd/lint-lifecycle` with zero issues. The only new scanner
 exception is a single-site G404 justification for non-security contention-delay
 jitter; it does not govern identity, authorization or replay permission.
-
-Independent Opus review at xhigh approved this passive foundation slice on
-2026-10-18 with no residual findings under the unchanged acceptance criteria.
-The reviewer verified all ten frozen file hashes before and after review and
-independently repeated the 45-root/334-subtest PostgreSQL race selection without
-failures or skips. The final changes to this plan only record that verdict and
-complete the review checkbox. This is not approval of canonical authority,
-caller conversion, whole 0a, activation, deployment or production acceptance.
 
 ### 0a passive-census validation
 
@@ -2195,7 +1721,7 @@ authority, canonical fencing, a deployed writer floor or production acceptance.
 
 ### Composable persistence proof follow-ups
 
-Independent review follow-ups strengthen tests without changing production
+Additional persistence regressions strengthen tests without changing production
 behavior. Foreign thread notification effects must produce the exact explicit
 rejection log before any reload, and zero effects produce no log or database
 access. Seed retry after rollback validates returned phase/batch values against
@@ -3032,10 +2558,10 @@ binding; they are not evidence that existing behavior has been repaired.
   activation. Runnable claims, nonterminal input ownership, cleanup and unrelated
   domain state machines must not share a blindly broadened status set.
 
-## Adversarial review
+## Remaining implementation proof
 
-Independent adversarial review accepted the M0 technical scope on 2026-10-18 with
-all six review criteria passing and no critical or major findings remaining:
+The following requirements remain implementation gates, beyond M0's synthetic
+characterization:
 
 1. Stale parked work has current-authority closure and cannot permanently retain
    a logical lane claim.
@@ -3046,15 +2572,12 @@ all six review criteria passing and no critical or major findings remaining:
 4. Reconciliation requires the exact control write before other authority can
    advance, and pinned-build rollout requires the tested tuple.
 5. Focused mechanical checks pass without skipped database cases.
-6. Scope remains M0 plan, inventory and characterization work; uncertainty,
-   immutable request binding, consent and compatibility safeguards are preserved.
+6. Real callers preserve uncertainty, immutable request binding, consent and
+   compatibility safeguards through commit, retry and recovery.
 
-The review applies to design and synthetic-characterization scope. It does not
-approve a compatibility release or establish runtime correctness. One optional
-0a ledger follow-up remains: mirror the contract's `snapshot_object_cleanup`
-exclusion in the ClaimNextRunnable entry's `action_0a` when implementing that
-migration. Exclusive SnapshotReaper routing is already a required contract, not
-a waived gate.
+Mirror the contract's `snapshot_object_cleanup` exclusion in the ClaimNextRunnable
+entry's `action_0a` when implementing that migration. Exclusive SnapshotReaper
+routing is mandatory before the first cleanup job, not a waived or optional gate.
 
 ## Outcomes & Retrospective
 
