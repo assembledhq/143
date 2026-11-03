@@ -197,6 +197,7 @@ type Config struct {
 	CodeReviewTeamSlugs                     []string `env:"CODE_REVIEW_TEAM_SLUGS"          envSeparator:","`
 	CodeReviewAssessmentsEnabled            bool     `env:"CODE_REVIEW_ASSESSMENTS_ENABLED" envDefault:"false"`
 	CodeReviewRechecksEnabled               bool     `env:"CODE_REVIEW_RECHECKS_ENABLED" envDefault:"false"`
+	CodeReviewPriorFindingsEnabled          bool     `env:"CODE_REVIEW_PRIOR_FINDINGS_ENABLED" envDefault:"false"`
 	CodeReviewDisputeReassessmentsEnabled   bool     `env:"CODE_REVIEW_DISPUTE_REASSESSMENTS_ENABLED" envDefault:"true"`
 	CodeReviewDisputeMaxActiveReassessments int      `env:"CODE_REVIEW_DISPUTE_MAX_ACTIVE_REASSESSMENTS" envDefault:"1000"`
 

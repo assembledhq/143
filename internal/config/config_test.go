@@ -50,6 +50,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	t.Setenv("OPENROUTER_APP_NAME", "")
 	t.Setenv("CODE_REVIEW_ASSESSMENTS_ENABLED", "")
 	t.Setenv("CODE_REVIEW_RECHECKS_ENABLED", "")
+	t.Setenv("CODE_REVIEW_PRIOR_FINDINGS_ENABLED", "")
 	t.Setenv("CODE_REVIEW_DISPUTE_REASSESSMENTS_ENABLED", "")
 	t.Setenv("CODE_REVIEW_DISPUTE_MAX_ACTIVE_REASSESSMENTS", "")
 
@@ -70,6 +71,7 @@ func TestLoad_UsesDefaults(t *testing.T) {
 	require.Equal(t, 10*time.Minute, cfg.PRHealthSweepStaleAfter, "Load should default the background health sweep to the ten-minute stale threshold")
 	require.False(t, cfg.CodeReviewAssessmentsEnabled, "assessment capture should default disabled")
 	require.False(t, cfg.CodeReviewRechecksEnabled, "recheck admission should default disabled")
+	require.False(t, cfg.CodeReviewPriorFindingsEnabled, "prior findings must stay off until workers support it")
 	require.Empty(t, cfg.GitHubRateLimitInstallationAllowlist, "Load should default to no installation allowlist")
 	require.Equal(t, "all", cfg.Mode, "Load should default mode to all")
 	require.Equal(t, defaultDemoEmail, cfg.DemoEmail, "Load should default demo email to seeded admin")

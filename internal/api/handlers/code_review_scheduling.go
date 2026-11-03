@@ -95,6 +95,10 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "include_prior_findings requires review_now")
 		return
 	}
+	if req.IncludePriorFindings && !h.priorFindingsCapability {
+		writeError(w, r, 409, "CODE_REVIEW_CAPABILITY_UNAVAILABLE", "reviews with prior findings are not available")
+		return
+	}
 	result, err := s.RequestScheduledReview(r.Context(), codereviewsvc.ScheduleRequestInput{OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id, RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode, Reason: strings.TrimSpace(req.Reason), IncludePriorFindings: req.IncludePriorFindings})
 	if err != nil {
 		writeScheduleError(w, r, err)

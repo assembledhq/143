@@ -467,6 +467,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	codeReviewHandler := handlers.NewCodeReviewHandler(codeReviewStore, repoStore)
 	codeReviewExportHandler := handlers.NewCodeReviewExportHandler(codereviewsvc.NewHistoricalExportService(db.NewCodeReviewExportStore(pool)))
 	codeReviewHandler.SetContinuationCapabilities(cfg.CodeReviewAssessmentsEnabled, cfg.CodeReviewRechecksEnabled)
+	codeReviewHandler.SetPriorFindingsCapability(cfg.CodeReviewPriorFindingsEnabled)
 	codeReviewHandler.SetAssessments(db.NewCodeReviewAssessmentStore(pool), db.NewCodeReviewRecheckStore(pool), pullRequestStore)
 	codeReviewHandler.SetRetryService(codeReviewSvc)
 	codeReviewHandler.SetAuditEmitter(auditEmitter)

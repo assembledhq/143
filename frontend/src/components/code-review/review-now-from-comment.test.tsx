@@ -6,12 +6,12 @@ import { ReviewNowFromComment } from "./review-now-from-comment";
 
 const sessionID = "90d8a47d-d87e-4780-90af-040f5144685a";
 const prID = "b8c1dede-d37b-497c-95c9-ec096f514c2a";
-function mockTarget({ enabled = true, inaccessible = false } = {}) {
+function mockTarget({ enabled = true, inaccessible = false, priorFindings = true } = {}) {
   server.use(
     http.get("*/api/v1/code-reviews/:id", () => inaccessible
       ? HttpResponse.json({ error: { code: "NOT_FOUND", message: "Not found" } }, { status: 404 })
       : HttpResponse.json({ data: { session_id: sessionID, pull_request_id: prID, github_repo: "acme/api", github_pr_number: 17, pull_request_title: "Reduce duplicate reviews" } })),
-    http.get("*/api/v1/code-review-policies", () => HttpResponse.json({ data: { capabilities: { scheduling: enabled } } })),
+    http.get("*/api/v1/code-review-policies", () => HttpResponse.json({ data: { capabilities: { scheduling: enabled, prior_findings: priorFindings } } })),
   );
 }
 function renderLink(canManage = true) {
@@ -72,6 +72,22 @@ describe("review link from a GitHub comment", () => {
     expect(within(dialog).getByText(expected.include_prior_findings ? /Starts a new full review/ : /may be reused/)).toBeInTheDocument();
     await user.click(await within(dialog).findByRole("button", { name: "Request full review" }));
     await waitFor(() => expect(bodies).toEqual([{ request_id: expect.any(String), mode: "review_now", ...expected }]));
+  });
+  it("hides the opt-in and never sends it until the installation supports it", async () => {
+    mockTarget({ priorFindings: false });
+    const bodies: unknown[] = [];
+    server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
+      bodies.push(await request.json());
+      return HttpResponse.json({ data: { disposition: "queued" } }, { status: 202 });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewNowFromComment canManage />, { searchParams: { review_now: sessionID, include_prior_findings: "true" }, nuqsHasMemory: true });
+    const dialog = await screen.findByRole("dialog", { name: "Request full review" });
+    const action = await within(dialog).findByRole("button", { name: "Request full review" });
+    await waitFor(() => expect(action).toBeEnabled());
+    expect(within(dialog).queryByRole("checkbox")).not.toBeInTheDocument();
+    await user.click(action);
+    await waitFor(() => expect(bodies).toEqual([{ request_id: expect.any(String), mode: "review_now" }]));
   });
   it("closing the dialog does not submit a review", async () => {
     mockTarget();

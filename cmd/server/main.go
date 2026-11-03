@@ -1980,6 +1980,7 @@ func buildServices(
 		CodeReviewRepositoryGuidance: prService,
 		CodeReviewAssessmentsEnabled: cfg.CodeReviewAssessmentsEnabled,
 		CodeReviewRechecksEnabled:    cfg.CodeReviewAssessmentsEnabled && cfg.CodeReviewRechecksEnabled,
+		CodeReviewPriorFindings:      cfg.CodeReviewPriorFindingsEnabled,
 		Orchestrator:                 orchestrator,
 		PR:                           prService,
 		Failure:                      failureSvc,

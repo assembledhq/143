@@ -42,6 +42,7 @@ export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
     loading={validID && (review.isPending || policy.isPending)}
     error={error}
     unavailable={unavailable}
+    priorFindingsAvailable={policy.data?.data.capabilities?.prior_findings === true}
     defaultIncludePriorFindings={includePriorFindings === true}
   />;
 }

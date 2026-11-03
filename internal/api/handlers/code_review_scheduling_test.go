@@ -49,6 +49,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 	tests := []struct {
 		name, mode          string
 		includePrior        bool
+		priorDisabled       bool
 		disposition         models.CodeReviewRequestDisposition
 		disabled, anonymous bool
 		err                 error
@@ -58,6 +59,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 		{name: "records authorized tenant request", mode: "review_now", status: 202},
 		{name: "supports ensure current", mode: "ensure_current", status: 202},
 		{name: "carries the prior findings opt-in", mode: "review_now", includePrior: true, status: 202},
+		{name: "rejects the prior findings opt-in until workers support it", mode: "review_now", includePrior: true, priorDisabled: true, status: 409, code: "CODE_REVIEW_CAPABILITY_UNAVAILABLE"},
 		{name: "rejects the prior findings opt-in on other modes", mode: "ensure_current", includePrior: true, status: 400, code: "CODE_REVIEW_REQUEST_INVALID"},
 		{name: "returns completed reuse", mode: "review_now", disposition: models.CodeReviewRequestReused, status: 200},
 		{name: "returns cancelled request redelivery", mode: "review_now", disposition: models.CodeReviewRequestCancelled, status: 200},
@@ -87,6 +89,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 			}}
 			handler := NewCodeReviewHandler(nil, nil)
 			handler.retryService = stub
+			handler.SetPriorFindingsCapability(!tt.priorDisabled)
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(fmt.Sprintf(`{"request_id":%q,"mode":%q,"include_prior_findings":%t}`, requestID.String(), tt.mode, tt.includePrior)))
 			ctx := middleware.WithOrgID(req.Context(), org)
 			if !tt.anonymous {

@@ -309,6 +309,9 @@ func codeReviewNowURL(frontendURL string, sessionID uuid.UUID) string {
 }
 
 func codeReviewAvailablePriorFindingsURL(services *Services, sessionID uuid.UUID) string {
+	if services == nil || !services.CodeReviewPriorFindings {
+		return ""
+	}
 	target, err := url.Parse(codeReviewAvailableReviewNowURL(services, sessionID))
 	if err != nil || target.Host == "" {
 		return ""

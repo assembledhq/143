@@ -92,11 +92,12 @@ func TestCodeReviewAvailablePriorFindingsURL(t *testing.T) {
 		expected string
 	}{
 		{name: "missing services"},
-		{name: "scheduling disabled", services: &Services{FrontendURL: "https://143.test", CodeReviewLifecycle: &statusCommentSchedulingStub{}}},
-		{name: "missing frontend", services: &Services{CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: true}}},
+		{name: "capability disabled", services: &Services{FrontendURL: "https://143.test", CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: true}}},
+		{name: "scheduling disabled", services: &Services{CodeReviewPriorFindings: true, FrontendURL: "https://143.test", CodeReviewLifecycle: &statusCommentSchedulingStub{}}},
+		{name: "missing frontend", services: &Services{CodeReviewPriorFindings: true, CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: true}}},
 		{
 			name:     "scheduling enabled",
-			services: &Services{FrontendURL: "https://143.test/", CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: true}},
+			services: &Services{CodeReviewPriorFindings: true, FrontendURL: "https://143.test/", CodeReviewLifecycle: &statusCommentSchedulingStub{enabled: true}},
 			expected: "https://143.test/code-reviews?include_prior_findings=true&review_now=90d8a47d-d87e-4780-90af-040f5144685a",
 		},
 	}

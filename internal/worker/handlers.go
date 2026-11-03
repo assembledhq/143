@@ -953,6 +953,7 @@ type Services struct {
 	CodeReviewRepositoryGuidance codereviewsvc.RepositoryGuidanceCapturer
 	CodeReviewAssessmentsEnabled bool
 	CodeReviewRechecksEnabled    bool
+	CodeReviewPriorFindings      bool
 	Orchestrator                 orchestratorService
 	PR                           prCreator
 	Failure                      *agent.FailureService
