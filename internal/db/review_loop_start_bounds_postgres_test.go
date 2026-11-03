@@ -41,7 +41,13 @@ func TestReviewLoopStartPreparationJSONBBoundsPostgres(t *testing.T) {
 			envelope := `{"version":1}`
 			padding := `"` + strings.Repeat("x", 8*1024*1024-65536) + `"`
 			if tt.expanded {
-				padding = `[` + strings.Repeat("9223372036854775807,", 410000) + `9223372036854775807]`
+				// JSONB adds a space after every comma. These 2,048 strings
+				// occupy 8 MiB as JSONB text before the enclosing object, but
+				// compact JSON leaves 2,047 bytes for that object. Large strings
+				// exercise the byte limit without hundreds of thousands of
+				// tokens making this a CPU benchmark under race instrumentation.
+				element := `"` + strings.Repeat("x", 4092) + `"`
+				padding = `[` + strings.Repeat(element+`,`, 2047) + element + `]`
 			}
 			if tt.input {
 				input = strings.TrimSuffix(input, "}") + `,"padding":` + padding + `}`
