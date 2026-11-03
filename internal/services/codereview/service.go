@@ -120,11 +120,12 @@ type ReviewRequestedInput struct {
 // requested a review. It is carried only to the orchestrator synthesis prompt;
 // reviewer agents still inspect the PR independently.
 type ReviewRequestContext struct {
-	Source             string `json:"source"`
-	AuthorLogin        string `json:"author_login,omitempty"`
-	Body               string `json:"body"`
-	URL                string `json:"url,omitempty"`
-	OverrideSizeLimits bool   `json:"override_size_limits,omitempty"`
+	Source                    string `json:"source"`
+	AuthorLogin               string `json:"author_login,omitempty"`
+	Body                      string `json:"body"`
+	URL                       string `json:"url,omitempty"`
+	OverrideSizeLimits        bool   `json:"override_size_limits,omitempty"`
+	OverrideSizeLimitsHeadSHA string `json:"override_size_limits_head_sha,omitempty"`
 }
 
 type ReviewMentionedInput struct {
@@ -1457,16 +1458,28 @@ func HasGitHubTeamMention(body string) bool {
 	return len(githubTeamMentions(body)) > 0
 }
 
+// bindSizeLimitOverrideToHead ties a new override to the head it was requested
+// on, so an automatic retarget or retry on a newer head applies the limits again.
+func bindSizeLimitOverrideToHead(input *ReviewRequestContext, headSHA string) *ReviewRequestContext {
+	if input == nil || !input.OverrideSizeLimits || input.OverrideSizeLimitsHeadSHA != "" {
+		return input
+	}
+	bound := *input
+	bound.OverrideSizeLimitsHeadSHA = strings.TrimSpace(headSHA)
+	return &bound
+}
+
 func normalizeReviewRequestContext(input *ReviewRequestContext) *ReviewRequestContext {
 	if input == nil {
 		return nil
 	}
 	normalized := &ReviewRequestContext{
-		Source:             strings.TrimSpace(input.Source),
-		AuthorLogin:        strings.TrimSpace(input.AuthorLogin),
-		Body:               strings.TrimSpace(input.Body),
-		URL:                strings.TrimSpace(input.URL),
-		OverrideSizeLimits: input.OverrideSizeLimits,
+		Source:                    strings.TrimSpace(input.Source),
+		AuthorLogin:               strings.TrimSpace(input.AuthorLogin),
+		Body:                      strings.TrimSpace(input.Body),
+		URL:                       strings.TrimSpace(input.URL),
+		OverrideSizeLimits:        input.OverrideSizeLimits,
+		OverrideSizeLimitsHeadSHA: strings.TrimSpace(input.OverrideSizeLimitsHeadSHA),
 	}
 	if normalized.Body == "" && !normalized.OverrideSizeLimits {
 		return nil

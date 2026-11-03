@@ -353,6 +353,7 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"single connection snapshot after lock wait", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingSingleConnection(t, p, org, repo, pr, snapshot, "wait")
 		}},
+		{"size limit override stays bound when a push retargets the request", testSchedulingSizeLimitOverrideHeadBinding},
 		{"snapshot preparation outage preserves pending intent", testSchedulingPreparationRecovery},
 		{"snapshot preparation outage preserves replay and terminal paths", testSchedulingPreparationFastPaths},
 		{"single connection validation", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
@@ -1096,6 +1097,33 @@ func testSchedulingSingleConnection(t *testing.T, adminPool *pgxpool.Pool, org, 
 		}
 	}
 	require.NoError(t, err, "scheduling path cannot reacquire its transaction's saturated pool")
+}
+
+func testSchedulingSizeLimitOverrideHeadBinding(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	ctx := context.Background()
+	service, _, _ := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	snapshot.Lock()
+	confirmedHead := snapshot.snapshot.HeadSHA
+	snapshot.Unlock()
+	requested, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow, OverrideSizeLimits: true})
+	require.NoError(t, err, "the override request should be accepted")
+	require.NotNil(t, requested.Schedule.PendingInput, "the override request should wait as pending intent")
+	var pending scheduledReviewIntent
+	require.NoError(t, json.Unmarshal(requested.Schedule.PendingInput, &pending), "pending intent should decode")
+	require.NotNil(t, pending.Input.RequestContext, "pending intent should keep the override context")
+	require.Equal(t, confirmedHead, pending.Input.RequestContext.OverrideSizeLimitsHeadSHA, "the override should bind to the head the request observed")
+
+	snapshot.Lock()
+	snapshot.snapshot.HeadSHA = "pushed-after-confirmation"
+	snapshot.Unlock()
+	_, err = service.QueueReviewChanged(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr})
+	require.NoError(t, err, "the push should retarget the pending request")
+	retargeted, err := service.GetSchedule(ctx, org, pr)
+	require.NoError(t, err, "read the retargeted schedule")
+	require.NoError(t, json.Unmarshal(retargeted.PendingInput, &pending), "retargeted intent should decode")
+	require.Equal(t, "pushed-after-confirmation", pending.Input.HeadSHA, "the pending request should move to the pushed head")
+	require.NotNil(t, pending.Input.RequestContext, "the retargeted request should keep its context")
+	require.Equal(t, confirmedHead, pending.Input.RequestContext.OverrideSizeLimitsHeadSHA, "the push must not move the override to the new head")
 }
 
 func testSchedulingPreparationRecovery(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {

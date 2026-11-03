@@ -45,6 +45,42 @@ func TestNormalizeReviewRequestContextKeepsSizeLimitOverride(t *testing.T) {
 		"the opt-in should survive persistence and job dispatch")
 }
 
+func TestBindSizeLimitOverrideToHead(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    *ReviewRequestContext
+		expected *ReviewRequestContext
+	}{
+		{name: "no request context"},
+		{name: "plain request stays unbound", input: &ReviewRequestContext{Body: "Look again."}, expected: &ReviewRequestContext{Body: "Look again."}},
+		{
+			name:     "new override binds to the observed head",
+			input:    &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true},
+			expected: &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "new-head"},
+		},
+		{
+			name:     "retargeted override keeps its original head",
+			input:    &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "confirmed-head"},
+			expected: &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "confirmed-head"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.expected, bindSizeLimitOverrideToHead(tt.input, "new-head"), "an override should stay bound to the head it was requested on")
+		})
+	}
+}
+
+func TestNormalizeReviewRequestContextKeepsSizeLimitOverrideHead(t *testing.T) {
+	t.Parallel()
+
+	input := &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: " head "}
+	require.Equal(t, "head", normalizeReviewRequestContext(input).OverrideSizeLimitsHeadSHA, "the bound head should survive persistence and job dispatch")
+}
+
 func TestReviewRequestHashSeparatesSizeLimitOverride(t *testing.T) {
 	t.Parallel()
 

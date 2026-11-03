@@ -488,6 +488,7 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 			mode = pending.Mode
 			force = force || pending.Force
 		}
+		input.RequestContext = bindSizeLimitOverrideToHead(input.RequestContext, snapshot.HeadSHA)
 		if !input.ExplicitRequest && (pending.Mode == models.CodeReviewReviewNow || pending.Mode == models.CodeReviewRecheck || pending.Mode == models.CodeReviewForceFresh) {
 			mode = pending.Mode
 		}

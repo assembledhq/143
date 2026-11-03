@@ -302,8 +302,20 @@ func codeReviewAvailableReviewNowURL(services *Services, sessionID uuid.UUID) st
 	return ""
 }
 
-func codeReviewOverrideSizeLimits(requestContext *codereviewsvc.ReviewRequestContext) bool {
-	return requestContext != nil && requestContext.OverrideSizeLimits
+func codeReviewOverrideSizeLimits(job runCodeReviewPayload) bool {
+	requestContext := job.RequestContext
+	return requestContext != nil && requestContext.OverrideSizeLimits &&
+		requestContext.OverrideSizeLimitsHeadSHA != "" && strings.EqualFold(requestContext.OverrideSizeLimitsHeadSHA, strings.TrimSpace(job.HeadSHA))
+}
+
+func codeReviewOverriddenSizeLimits(policy models.CodeReviewPolicyConfig, job runCodeReviewPayload, changedFiles []codereviewsvc.PullRequestFile) []models.CodeReviewRiskReason {
+	additions, deletions := codeReviewLineChanges(changedFiles)
+	return models.CodeReviewOverriddenSizeLimits(policy, models.CodeReviewRiskInput{
+		FilesChanged:       len(changedFiles),
+		Additions:          additions,
+		Deletions:          deletions,
+		OverrideSizeLimits: codeReviewOverrideSizeLimits(job),
+	})
 }
 
 func codeReviewSizeLimitOverrideURL(policy models.CodeReviewPolicyConfig, reviewNowURL string) string {
