@@ -76,14 +76,10 @@ const workerThreadSendParentSQL = `SELECT id, org_id, status, deleted_at, archiv
 		admission_epoch, end_epoch, lifecycle_version
 		FROM sessions WHERE org_id = $1 AND id = $2
 		FOR NO KEY UPDATE NOWAIT`
-const workerThreadSendKeysSQL = `SELECT id FROM session_threads
-	WHERE org_id = $1 AND session_id = $2 AND (archived_at IS NULL OR id = $3)
-	ORDER BY id LIMIT $4`
 const workerThreadSendLanesSQL = `SELECT id, org_id, session_id, status, archived_at,
-		admission_epoch, end_epoch, lifecycle_version
-		FROM session_threads
-		WHERE org_id = $1 AND session_id = $2 AND id = ANY($3::uuid[])
-		ORDER BY id FOR NO KEY UPDATE NOWAIT`
+	admission_epoch, end_epoch, lifecycle_version FROM session_threads
+	WHERE org_id = $1 AND session_id = $2 AND (archived_at IS NULL OR id = $3)
+	ORDER BY id LIMIT $4 FOR NO KEY UPDATE NOWAIT`
 
 func expectWorkerThreadSendSQLStart(mock pgxmock.PgxPoolIface, orgID, sessionID uuid.UUID) {
 	mock.ExpectBegin()
@@ -108,7 +104,6 @@ func expectWorkerThreadSendSQLEntry(mock pgxmock.PgxPoolIface, orgID, sessionID 
 func expectWorkerThreadSendSQLMutation(mock pgxmock.PgxPoolIface, orgID, sessionID, threadID uuid.UUID, parentStatus models.SessionStatus, laneStatus models.ThreadStatus) {
 	expectWorkerThreadSendSQLStart(mock, orgID, sessionID)
 	expectWorkerThreadSendSQLPolicy(mock)
-	mock.ExpectQuery(regexp.QuoteMeta(workerThreadSendParentSQL)).WithArgs(orgID, sessionID).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "status", "deleted", "archived", "epoch", "end", "protocol"}).AddRow(sessionID, orgID, parentStatus, nil, nil, int64(0), nil, int16(0)))
-	mock.ExpectQuery(regexp.QuoteMeta(workerThreadSendKeysSQL)).WithArgs(orgID, sessionID, threadID, 4097).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(threadID))
-	mock.ExpectQuery(regexp.QuoteMeta(workerThreadSendLanesSQL)).WithArgs(orgID, sessionID, []uuid.UUID{threadID}).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "session", "status", "archived", "epoch", "end", "protocol"}).AddRow(threadID, orgID, sessionID, laneStatus, nil, int64(0), nil, int16(0)))
+	mock.ExpectQuery(regexp.QuoteMeta(workerThreadSendParentSQL)).WithArgs(pgx.QueryExecModeExec, orgID, sessionID).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "status", "deleted", "archived", "epoch", "end", "protocol"}).AddRow(sessionID, orgID, parentStatus, nil, nil, int64(0), nil, int16(0)))
+	mock.ExpectQuery(regexp.QuoteMeta(workerThreadSendLanesSQL)).WithArgs(pgx.QueryExecModeExec, orgID, sessionID, threadID, 4097).WillReturnRows(pgxmock.NewRows([]string{"id", "org", "session", "status", "archived", "epoch", "end", "protocol"}).AddRow(threadID, orgID, sessionID, laneStatus, nil, int64(0), nil, int16(0)))
 }

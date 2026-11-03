@@ -322,7 +322,7 @@ func TestPromptedRunningSessionAppendsUnderSessionLockWithoutContinuationJob(t *
 			now, now,
 		))
 	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
-		WithArgs(sessionID, orgID).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -385,7 +385,7 @@ func TestPromptedRunningSessionAppendsWhenRevisionPromptsDisabled(t *testing.T) 
 			now, now,
 		))
 	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
-		WithArgs(sessionID, orgID).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -451,7 +451,7 @@ func TestPromptedRunningSessionRetriesWhenTurnCompletesBeforeAppend(t *testing.T
 			now, now,
 		))
 	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
-		WithArgs(sessionID, orgID).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -513,7 +513,7 @@ func TestPromptedTerminalSessionRespectsDisabledRevisionPrompts(t *testing.T) {
 			now, now,
 		))
 	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
-		WithArgs(sessionID, orgID).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -572,7 +572,7 @@ func TestPromptedIdleSessionRollsBackMessageWhenContinueEnqueueFails(t *testing.
 			now, now,
 		))
 	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
-		WithArgs(sessionID, orgID).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
 			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 7, nil, nil)...))
 	mock.ExpectBegin()
@@ -640,14 +640,14 @@ func TestPromptedResumedTerminalSessionRestoresOriginalStatusWhenContinueEnqueue
 			now, now,
 		))
 	mock.ExpectQuery("(?s)UPDATE sessions.*status = 'idle'").
-		WithArgs(sessionID, orgID).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnError(pgx.ErrNoRows)
 	mock.ExpectQuery(`(?s)SELECT\s+id, org_id, status, current_turn`).
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "status", "current_turn"}).
 			AddRow(sessionID, orgID, models.SessionStatusCompleted, 7))
 	mock.ExpectQuery(`(?s)UPDATE sessions\s+SET status = 'running', started_at = now\(\), completed_at = NULL,\s+runtime_soft_deadline_at = NULL,\s+runtime_hard_deadline_at = NULL,\s+runtime_last_progress_at = NULL,\s+runtime_last_progress_type = '',\s+runtime_last_progress_strength = '',\s+runtime_extension_count = 0,\s+runtime_extension_seconds = 0,\s+runtime_stop_reason = '',\s+runtime_graceful_stop_at = NULL,\s+last_activity_at = now\(\)`).
-		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).
 			AddRow(workerSessionRow(sessionID, issueID, orgID, models.SessionStatusRunning, 7, nil, nil)...))
 	mock.ExpectBegin()

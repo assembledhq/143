@@ -3228,13 +3228,13 @@ func TestPRServiceResumeRepairSession(t *testing.T) {
 				setPRHealthSessionThreadRowValue(threadRow, "current_turn", 4)
 				mock.ExpectBegin()
 				mock.ExpectQuery("UPDATE sessions").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnError(pgx.ErrNoRows)
 				// ClaimForResume now binds the resumable-status set as a
 				// runtime parameter, so the query carries an extra @statuses
 				// arg compared to the legacy hardcoded IN (...) shape.
 				mock.ExpectQuery("UPDATE sessions").
-					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WithArgs(pgx.QueryExecModeExec, pgxmock.AnyArg()).
 					WillReturnRows(pgxmock.NewRows(prHealthSessionColumns).AddRow(claimedSessionRow...))
 				mock.ExpectExec("UPDATE sessions.+SET revision_context").
 					WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
