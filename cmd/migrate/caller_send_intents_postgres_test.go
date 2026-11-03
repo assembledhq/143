@@ -177,7 +177,7 @@ func TestCallerSendIntentMigrationCommandPostgres(t *testing.T) {
 	if err := build.Run(); err != nil {
 		t.Fatal("build the actual migration executable without publishing its captured output")
 	}
-	workingDirectory := callerIntentMigrationCommandSourceThrough(t, 393)
+	workingDirectory := callerIntentMigrationCommandSourceThrough(t, inactiveRuntimeSchemaVersion)
 	migration, conn := newContentMigrationPostgres(t, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -185,9 +185,9 @@ func TestCallerSendIntentMigrationCommandPostgres(t *testing.T) {
 	f := seedCallerIntentMigrationLegacy(t, ctx, conn)
 	beforeLegacy := callerIntentMigrationRows(t, ctx, conn, f.org, true)
 	conn = runCallerIntentMigrationCommand(t, ctx, binary, workingDirectory, "up", false, conn)
-	requireCallerIntentMigrationLedger(t, ctx, migration, conn, 393, false)
+	requireCallerIntentMigrationLedger(t, ctx, migration, conn, inactiveRuntimeSchemaVersion, false)
 	conn = runCallerIntentMigrationCommand(t, ctx, binary, workingDirectory, "up", false, conn)
-	requireCallerIntentMigrationLedger(t, ctx, migration, conn, 393, false)
+	requireCallerIntentMigrationLedger(t, ctx, migration, conn, inactiveRuntimeSchemaVersion, false)
 	// The runtime command only accepts a complete supported schema. After
 	// proving upgrade and no-change acceptance, pin this isolated fixture to
 	// the historical down guard being tested; production never runs this step.

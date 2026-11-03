@@ -933,6 +933,17 @@
       ]
     },
     {
+      "id": "internal/db/jobs.go:JobStore.LatestJobOutcomeByDedupeKey:sql:1",
+      "source_sha256": "658466643ed8589b7c3d1323f7361e9a5ddf5704ff613f40876dc9eaf22412a1",
+      "classification": "observation",
+      "action_0a": "Keep the exact latest status and last_error observation from the same tenant/queue/dedupe job; downstream consumers must classify parked controls explicitly if initializer jobs become parkable. Do not infer readiness or mutation authority from this diagnostic read.",
+      "reason": "The generation-scoped read observes an initializer outcome without changing job eligibility or ownership.",
+      "evidence": [
+        "internal/db/jobs.go:378",
+        "status"
+      ]
+    },
+    {
       "id": "internal/db/jobs.go:JobStore.LatestJobStatusByDedupeKey:sql:1",
       "source_sha256": "cc9dbbb176b401f6b0a5f76216a41a7ab61efe09119154af4adc014523535f0e",
       "classification": "observation",
@@ -1822,13 +1833,46 @@
       ]
     },
     {
+      "id": "internal/worker/code_review_setup_failure.go:codeReviewPersistedSetupFailure:go:1",
+      "source_sha256": "d2e40f963692e22698ecc49faf821fa9bbb91eeb1b3fb6f86b80c9052a51cb5e",
+      "classification": "terminal-only",
+      "action_0a": "Retain dead_letter-only interpretation of the exact versioned, allowlisted setup-failure record; awaiting_start_control is not a terminal failure and must not stop a review through this classifier.",
+      "reason": "Only a committed terminal initializer failure can transport deterministic npm rejection to the controller; raw diagnostics and nonterminal statuses do not qualify.",
+      "evidence": [
+        "internal/worker/code_review_setup_failure.go:38",
+        "status != models.JobStatusDeadLetter || failure == nil || !strings.HasPrefix(*failure, codeReviewSetupFailurePrefix)"
+      ]
+    },
+    {
       "id": "internal/worker/code_review_workspace.go:ensureCodeReviewWorkspaceReadyWithFallback:go:1",
+      "source_sha256": "d976374544dcbb5d9c01bb2ba096f6e2bfd0f400a45abcb2cab13a187796d366",
+      "classification": "unrelated-domain",
+      "action_0a": "Keep prepare_code_review_workspace pending/running initializers waiting after preflight rather than launching duplicate reviewer setup. Initializers remain non-parkable; explicitly classify awaiting_start_control before permitting parked initializer jobs.",
+      "reason": "This fallback guard observes the physical workspace initializer, not an admitted resumable session input.",
+      "evidence": [
+        "internal/worker/code_review_workspace.go:159",
+        "afterPreflight && latestStatus != models.JobStatusPending && latestStatus != models.JobStatusRunning"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_workspace.go:ensureCodeReviewWorkspaceReadyWithFallback:go:2",
+      "source_sha256": "17de24ec57baf383ec23ca6f907470a5a177f16d504a6d5e7f3e505cf01edc42",
+      "classification": "unrelated-domain",
+      "action_0a": "Keep cancellation uncertainty and pending/running initializer outcomes blocking reviewer fallback. Initializers remain non-parkable; if parked controls are introduced, treat them as nonterminal ownership and require canonical closure before fallback.",
+      "reason": "The post-cancellation guard prevents concurrent initializer and reviewer setup; it does not authorize lifecycle parked-input cancellation.",
+      "evidence": [
+        "internal/worker/code_review_workspace.go:189",
+        "cancelErr != nil || status == models.JobStatusPending || status == models.JobStatusRunning"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_workspace.go:ensureCodeReviewWorkspaceReadyWithFallback:go:3",
       "source_sha256": "2012b2eda3b3e03036305d3f4fd2672bb242f2ab78fa24090525c0374063c83f",
       "classification": "unrelated-domain",
       "action_0a": "Keep prepare_code_review_workspace initializer pending/running handling separate from parked session inputs; explicitly reject an impossible parked initializer result instead of falling through to fresh/fallback execution. Review anew if initializer jobs ever gain parked controls.",
       "reason": "This switch consumes the workspace-initializer status lookup, not a resumable answered request.",
       "evidence": [
-        "internal/worker/code_review_workspace.go:171",
+        "internal/worker/code_review_workspace.go:196",
         "switch latestStatus;case(models.JobStatusFailed, models.JobStatusDeadLetter, models.JobStatusCancelled);case(models.JobStatusPending, models.JobStatusRunning);case()"
       ]
     },
