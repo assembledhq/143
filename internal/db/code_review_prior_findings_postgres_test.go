@@ -67,6 +67,8 @@ func TestCodeReviewStore_ListPublishedFindingsForPullRequestPostgres(t *testing.
 			org_id uuid NOT NULL,
 			session_id uuid NOT NULL,
 			github_thread_root_comment_id bigint,
+			superseded_by_dispute_id uuid,
+			source_updated_at timestamptz,
 			body text NOT NULL,
 			filed_by_login text NOT NULL,
 			author_is_pr_author boolean NOT NULL,
@@ -114,12 +116,16 @@ func TestCodeReviewStore_ListPublishedFindingsForPullRequestPostgres(t *testing.
 
 	_, err = conn.Exec(ctx, `
 		INSERT INTO code_review_decision_disputes
-			(id, org_id, session_id, github_thread_root_comment_id, body, filed_by_login, author_is_pr_author, created_at)
+			(id, org_id, session_id, github_thread_root_comment_id, superseded_by_dispute_id, source_updated_at, body, filed_by_login, author_is_pr_author, created_at)
 		VALUES
-			($1, $4, $6, 101, 'First reply.', 'amy', true, $7),
-			($2, $4, $6, 101, 'Fixed: API exports now return raw values.', 'amy', true, $8),
-			($3, $5, $6, 101, 'Other org reply.', 'mallory', false, $9)`,
-		uuid.New(), uuid.New(), uuid.New(), orgID, otherOrgID, firstSessionID, base.Add(10*time.Minute), base.Add(20*time.Minute), base.Add(30*time.Minute))
+			($1, $4, $6, 101, NULL, NULL, 'First reply.', 'amy', true, $7),
+			($2, $4, $6, 101, NULL, $8, 'Fixed: API exports now return raw values.', 'amy', true, $8),
+			($3, $5, $6, 101, NULL, NULL, 'Other org reply.', 'mallory', false, $9),
+			($10, $4, $6, 101, NULL, $11, 'Older comment delivered late.', 'amy', true, $12),
+			($13, $4, $6, 101, $2, $14, 'Superseded edit delivered late.', 'amy', true, $15)`,
+		uuid.New(), uuid.New(), uuid.New(), orgID, otherOrgID, firstSessionID, base.Add(10*time.Minute), base.Add(20*time.Minute), base.Add(30*time.Minute),
+		uuid.New(), base.Add(15*time.Minute), base.Add(40*time.Minute),
+		uuid.New(), base.Add(25*time.Minute), base.Add(50*time.Minute))
 	require.NoError(t, err, "test should insert thread replies")
 
 	store := NewCodeReviewStore(conn)

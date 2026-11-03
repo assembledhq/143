@@ -123,6 +123,7 @@ type codeReviewOrchestratorSynthesis struct {
 	ReviewerDisagreement    bool                                      `json:"reviewer_disagreement,omitempty"`
 	PromptInjectionDetected bool                                      `json:"prompt_injection_detected,omitempty"`
 	DescriptionInputHash    string                                    `json:"-"`
+	PriorReplyInjection     bool                                      `json:"-"`
 }
 
 func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.Logger) JobHandler {
@@ -1347,6 +1348,7 @@ type codeReviewOrchestratorStructuredResult struct {
 	ThreadID                string                          `json:"thread_id,omitempty"`
 	PromptRecordKey         string                          `json:"prompt_record_key,omitempty"`
 	DescriptionInputHash    string                          `json:"description_input_hash,omitempty"`
+	PriorReplyInjection     bool                            `json:"prior_reply_injection,omitempty"`
 	FindingCount            int                             `json:"finding_count,omitempty"`
 	CostCents               float64                         `json:"cost_cents,omitempty"`
 	RawRecordKey            string                          `json:"raw_record_key,omitempty"`
@@ -2022,7 +2024,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		RequiredReviewerQuorum:     codeReviewRequiredReviewerQuorum(cfg, agentResults),
 		InlineCommentLimit:         cfg.InlineCommentLimit,
 		DescriptionRequirements:    codeReviewDescriptionRequirementsForPrompt(cfg, changedFiles),
-		RiskReasons:                models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, agentResults, findings, visualEvidence)),
+		RiskReasons:                models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, agentResults, findings, priorFindings, visualEvidence)),
 		ReviewerOutputs:            codeReviewReviewerOutputsForPrompt(agentResults),
 		Findings:                   codeReviewFindingsForPrompt(findings),
 		PriorFindings:              codeReviewPriorFindingsForPrompt(priorFindings),
@@ -2038,7 +2040,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 	})
 }
 
-func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) []models.CodeReviewRiskReason {
+func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, priorFindings []models.CodeReviewPriorFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) []models.CodeReviewRiskReason {
 	reviewerQuorum, _ := codeReviewReviewerEvidence(agentResults)
 	additions, deletions := codeReviewLineChanges(changedFiles)
 	risk := models.EvaluateCodeReviewRisk(cfg, models.CodeReviewRiskInput{
@@ -2060,7 +2062,7 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		HeadSHAChanged:       codeReviewHeadChanged(job.HeadSHA, pr, health),
 		BlockingFindings:     codeReviewBlockingFindings(findings),
 		ReviewerDisagreement: false,
-		PromptInjectionFound: codeReviewPromptInjectionLikely(stringPtrValue(pr.Body), job.RequestContext) || codeReviewVisualEvidencePromptInjectionLikely(visualEvidence),
+		PromptInjectionFound: codeReviewPromptInjectionLikely(stringPtrValue(pr.Body), job.RequestContext) || codeReviewVisualEvidencePromptInjectionLikely(visualEvidence) || codeReviewPriorRepliesPromptInjectionLikely(priorFindings),
 	})
 	requiredReviewerQuorum := codeReviewRequiredReviewerQuorum(cfg, agentResults)
 	if reviewerQuorum < requiredReviewerQuorum {
@@ -2262,6 +2264,15 @@ func codeReviewPromptInjectionLikely(prBody string, requestContext *codereviewsv
 func codeReviewVisualEvidencePromptInjectionLikely(snapshot models.CodeReviewVisualEvidenceSnapshot) bool {
 	for _, evidence := range snapshot.Evidence {
 		if codeReviewPromptInjectionLikely(evidence.Source.AltText+"\n"+evidence.Source.ContextText, nil) {
+			return true
+		}
+	}
+	return false
+}
+
+func codeReviewPriorRepliesPromptInjectionLikely(priorFindings []models.CodeReviewPriorFinding) bool {
+	for _, finding := range codeReviewPriorFindingsForPrompt(priorFindings) {
+		if codeReviewPromptInjectionLikely(finding.ReplyBody, nil) {
 			return true
 		}
 	}
@@ -2523,6 +2534,7 @@ func codeReviewOrchestratorSynthesisFromResults(results []models.CodeReviewAgent
 		}
 		synthesis := state.Synthesis
 		synthesis.DescriptionInputHash = state.DescriptionInputHash
+		synthesis.PriorReplyInjection = state.PriorReplyInjection
 		return synthesis
 	}
 	return codeReviewOrchestratorSynthesis{}
@@ -3403,6 +3415,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		ThreadID:             threadID.String(),
 		PromptRecordKey:      recordKey,
 		DescriptionInputHash: descriptionInputHash,
+		PriorReplyInjection:  codeReviewPriorRepliesPromptInjectionLikely(priorFindings),
 		ReadOnly:             attempt > 0 || services.CodeReviewAssessmentsEnabled && stores.CodeReviewAssessments != nil,
 	})
 	// The orchestrator agent result is created only once the thread is actually
@@ -3983,7 +3996,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ScopeMismatch:         input.OrchestratorSynthesis.ScopeMismatch,
 		UnresolvedUncertainty: input.OrchestratorSynthesis.UnresolvedUncertainty,
 		UncertaintyReasons:    input.OrchestratorSynthesis.UncertaintyReasons,
-		PromptInjectionFound:  codeReviewPromptInjectionLikely(stringPtrValue(input.PullRequest.Body), input.Job.RequestContext) || codeReviewVisualEvidencePromptInjectionLikely(input.VisualEvidence) || input.OrchestratorSynthesis.PromptInjectionDetected,
+		PromptInjectionFound:  codeReviewPromptInjectionLikely(stringPtrValue(input.PullRequest.Body), input.Job.RequestContext) || codeReviewVisualEvidencePromptInjectionLikely(input.VisualEvidence) || input.OrchestratorSynthesis.PromptInjectionDetected || input.OrchestratorSynthesis.PriorReplyInjection,
 	})
 	if reviewerQuorum < requiredReviewerQuorum {
 		risk.AddReason(models.CodeReviewRiskReason{Code: models.CodeReviewRiskReasonReviewerQuorum, Actual: reviewerQuorum, Limit: requiredReviewerQuorum})

@@ -2837,7 +2837,8 @@ func (s *CodeReviewStore) ListPublishedFindingsForPullRequest(ctx context.Contex
 			WHERE d.org_id = f.org_id
 			  AND d.session_id = f.session_id
 			  AND d.github_thread_root_comment_id = f.github_comment_id
-			ORDER BY d.created_at DESC, d.id DESC
+			  AND d.superseded_by_dispute_id IS NULL
+			ORDER BY COALESCE(d.source_updated_at, d.created_at) DESC, d.created_at DESC, d.id DESC
 			LIMIT 1
 		) reply ON true
 		WHERE m.org_id = @org_id

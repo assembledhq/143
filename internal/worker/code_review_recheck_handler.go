@@ -343,7 +343,9 @@ func recheckBaselineSynthesis(results []models.CodeReviewAgentResult) (codeRevie
 		if err != nil || id == uuid.Nil {
 			continue
 		}
-		return state.Synthesis, id, nil
+		synthesis := state.Synthesis
+		synthesis.PriorReplyInjection = state.PriorReplyInjection
+		return synthesis, id, nil
 	}
 	return codeReviewOrchestratorSynthesis{}, uuid.Nil, errors.New("missing validated full-review orchestrator evidence")
 }
