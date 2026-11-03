@@ -1048,6 +1048,13 @@ func prepareCodeReviewPreflight(ctx context.Context, stores *Stores, services *S
 	if err := validateCodeReviewScheduledExecution(ctx, services, job); err != nil {
 		return nil, nil, err
 	}
+	if metadata.Phase != nil && *metadata.Phase == models.CodeReviewPhasePreparingWorkspace {
+		updated, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseSyncingGitHub)
+		if err != nil {
+			return nil, nil, fmt.Errorf("set code review GitHub preflight phase: %w", err)
+		}
+		metadata = updated
+	}
 	assessment, captured, err := prepareFullAssessment(ctx, stores, services, job, metadata)
 	if err != nil {
 		if errors.Is(err, codereviewsvc.ErrReviewIneligible) {
