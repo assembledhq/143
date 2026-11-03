@@ -379,6 +379,7 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"mention preserves completed reuse", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingOrdinaryCompletedReuse(t, p, org, repo, pr, snapshot, true)
 		}},
+		{"prior findings opt-in starts a new review", testSchedulingPriorFindingsOptInStartsReview},
 		{"full assessment completion settles uncaptured joins", testSchedulingFullAssessmentJoinSettlement},
 		{"superseded full review preserves joins for replacement", testSchedulingSupersededFullReviewJoin},
 		{"legacy generation compatibility", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {

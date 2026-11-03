@@ -22,6 +22,8 @@ var codeReviewCommentEasternTime = func() *time.Location {
 	return location
 }()
 
+const codeReviewPriorFindingsLinkLabel = "Review with prior findings"
+
 // CodeReviewCommentFooter contains navigation for the displayed assessment.
 // Historical navigation belongs in the history or previous-result disclosure.
 type CodeReviewCommentFooter struct {
@@ -29,6 +31,7 @@ type CodeReviewCommentFooter struct {
 	DetailLabel        string
 	EvidenceRecheckURL string
 	ReviewNowURL       string
+	PriorFindingsURL   string
 }
 
 // CodeReviewCommentTime uses GitHub's localized timestamp element with a
@@ -63,11 +66,14 @@ func CodeReviewCommentDetailLabel(detailURL string, active bool) string {
 // action from current structured state; this function only renders that choice.
 func WithCodeReviewCommentFooter(body string, footer CodeReviewCommentFooter) string {
 	body, _ = SplitCodeReviewCommentFooter(body, footer.DetailURL)
-	links := make([]string, 0, 2)
+	links := make([]string, 0, 3)
 	if target := codeReviewCommentURL(footer.EvidenceRecheckURL); target != "" {
 		links = append(links, "[Re-check evidence]("+target+")")
 	} else if target := codeReviewCommentURL(footer.ReviewNowURL); target != "" {
 		links = append(links, "[Request review]("+target+")")
+	}
+	if target := codeReviewCommentURL(footer.PriorFindingsURL); target != "" {
+		links = append(links, "["+codeReviewPriorFindingsLinkLabel+"]("+target+")")
 	}
 	if target := codeReviewCommentURL(footer.DetailURL); target != "" {
 		label := footer.DetailLabel
@@ -111,7 +117,7 @@ func SplitCodeReviewCommentFooter(body, trustedDetailURL string) (string, CodeRe
 func parseCodeReviewFooter(line, trustedDetailURL string) (CodeReviewCommentFooter, bool) {
 	var footer CodeReviewCommentFooter
 	links := strings.Split(line, " · ")
-	if len(links) > 2 {
+	if len(links) > 3 {
 		return footer, false
 	}
 	for _, link := range links {
@@ -124,6 +130,8 @@ func parseCodeReviewFooter(line, trustedDetailURL string) (CodeReviewCommentFoot
 			footer.EvidenceRecheckURL = target
 		case label == "Request review" && footer.EvidenceRecheckURL == "" && footer.ReviewNowURL == "":
 			footer.ReviewNowURL = target
+		case label == codeReviewPriorFindingsLinkLabel && footer.PriorFindingsURL == "":
+			footer.PriorFindingsURL = target
 		case codeReviewDetailLabel(label) && footer.DetailURL == "":
 			footer.DetailURL, footer.DetailLabel = target, label
 		default:

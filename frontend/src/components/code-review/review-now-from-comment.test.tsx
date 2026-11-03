@@ -53,6 +53,25 @@ describe("review link from a GitHub comment", () => {
     const action = within(dialog).queryByRole("button", { name: "Request full review" });
     if (action) expect(action).toBeDisabled();
   });
+  it.each<{ name: string; linkParams: Record<string, string>; toggle: boolean; expected: { include_prior_findings?: boolean } }>([
+    { name: "the prior findings link preselects the opt-in", linkParams: { include_prior_findings: "true" }, toggle: false, expected: { include_prior_findings: true } },
+    { name: "the opt-in can be selected in the dialog", linkParams: {}, toggle: true, expected: { include_prior_findings: true } },
+    { name: "a preselected opt-in can be cleared", linkParams: { include_prior_findings: "true" }, toggle: true, expected: {} },
+  ])("$name", async ({ linkParams, toggle, expected }) => {
+    mockTarget();
+    const bodies: unknown[] = [];
+    server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
+      bodies.push(await request.json());
+      return HttpResponse.json({ data: { disposition: "queued" } }, { status: 202 });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewNowFromComment canManage />, { searchParams: { review_now: sessionID, ...linkParams }, nuqsHasMemory: true });
+    const dialog = await screen.findByRole("dialog", { name: "Request full review" });
+    const optIn = await within(dialog).findByRole("checkbox", { name: /Include findings from earlier rounds/ });
+    if (toggle) await user.click(optIn);
+    await user.click(await within(dialog).findByRole("button", { name: "Request full review" }));
+    await waitFor(() => expect(bodies).toEqual([{ request_id: expect.any(String), mode: "review_now", ...expected }]));
+  });
   it("closing the dialog does not submit a review", async () => {
     mockTarget();
     renderLink();

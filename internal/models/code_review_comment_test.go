@@ -61,6 +61,12 @@ func TestWithCodeReviewCommentFooter(t *testing.T) {
 			expected: "Review result.\n\n<!-- 143-code-review-footer:start -->\n[Re-check evidence](" + recheck + ") · [View full review](" + detail + ")\n<!-- 143-code-review-footer:end -->",
 		},
 		{
+			name:     "prior findings link sits between the action and the detail link",
+			body:     "Review result.",
+			footer:   CodeReviewCommentFooter{DetailURL: detail, ReviewNowURL: request, PriorFindingsURL: request + "&include_prior_findings=true"},
+			expected: "Review result.\n\n<!-- 143-code-review-footer:start -->\n[Request review](" + request + ") · [Review with prior findings](" + request + "&include_prior_findings=true) · [View full review](" + detail + ")\n<!-- 143-code-review-footer:end -->",
+		},
+		{
 			name:     "full request fallback",
 			body:     "Review failed.",
 			footer:   CodeReviewCommentFooter{DetailURL: detail, DetailLabel: "View review", ReviewNowURL: request},
@@ -234,4 +240,20 @@ func TestCodeReviewCommentDetailLabel(t *testing.T) {
 			require.Equal(t, tt.expected, CodeReviewCommentDetailLabel(tt.url, tt.active), "detail link should name the displayed review kind and lifecycle")
 		})
 	}
+}
+
+func TestSplitCodeReviewCommentFooterKeepsPriorFindingsLink(t *testing.T) {
+	t.Parallel()
+
+	footer := CodeReviewCommentFooter{
+		DetailURL:          "https://143.test/sessions/review",
+		DetailLabel:        "View full review",
+		EvidenceRecheckURL: "https://143.test/code-reviews?recheck=assessment",
+		PriorFindingsURL:   "https://143.test/code-reviews?include_prior_findings=true&review_now=review",
+	}
+
+	body, actual := SplitCodeReviewCommentFooter(WithCodeReviewCommentFooter("Review result.", footer), footer.DetailURL)
+
+	require.Equal(t, "Review result.", body, "the footer should be removed from the review body")
+	require.Equal(t, footer, actual, "all three footer links should round trip so status comments can reuse them")
 }

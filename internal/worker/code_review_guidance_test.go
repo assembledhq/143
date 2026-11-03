@@ -161,7 +161,7 @@ func TestCodeReviewCapturedGuidancePrompts(t *testing.T) {
 			cfg := models.DefaultCodeReviewPolicyConfig()
 			cfg.ReviewInstructions = "Apply organization conventions."
 			reviewer := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{}, guidance)
-			synthesis := codeReviewOrchestratorPrompt(runCodeReviewPayload{RepositoryGuidance: guidance}, models.PullRequest{}, nil, cfg, 1, "", nil, nil, nil, models.CodeReviewVisualEvidenceSnapshot{})
+			synthesis := codeReviewOrchestratorPrompt(runCodeReviewPayload{RepositoryGuidance: guidance}, models.PullRequest{}, nil, cfg, 1, "", nil, nil, nil, nil, models.CodeReviewVisualEvidenceSnapshot{})
 			if guidance != nil {
 				require.Less(t, strings.Index(synthesis, "<repository_review_guidance>"), strings.Index(synthesis, "STRICT OUTPUT CONTRACT"), "machine-readable output contract must follow repository guidance")
 				require.Contains(t, reviewer, "except for the separately captured default-branch REVIEW.md guidance", "organization instructions must recognize the captured guidance exception")

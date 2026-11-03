@@ -1,13 +1,15 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { StatusLabel } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
+import { Label } from "@/components/ui/label";
 import { api, ApiError } from "@/lib/api";
 import type { CodeReviewRequestResponse } from "@/lib/types";
 
@@ -27,6 +29,7 @@ interface ReviewRequestDialogProps {
   error?: string;
   unavailable?: string;
   assessmentID?: string;
+  defaultIncludePriorFindings?: boolean;
 }
 
 function resultCopy(result: CodeReviewRequestResponse, mode: RequestMode) {
@@ -46,14 +49,15 @@ function resultCopy(result: CodeReviewRequestResponse, mode: RequestMode) {
 }
 
 /** Shared confirmation and receipt for the read-only GitHub action links. */
-export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID }: ReviewRequestDialogProps) {
+export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID, defaultIncludePriorFindings = false }: ReviewRequestDialogProps) {
   const client = useQueryClient();
   const requestID = useRef<string | null>(null);
+  const [includePriorFindings, setIncludePriorFindings] = useState(defaultIncludePriorFindings);
   const mutation = useMutation({
     mutationFn: () => {
       if (!target) throw new Error("The pull request is not available.");
       requestID.current ??= crypto.randomUUID();
-      return api.codeReviews.requestReview(target.pull_request_id, { request_id: requestID.current, mode });
+      return api.codeReviews.requestReview(target.pull_request_id, { request_id: requestID.current, mode, ...(includePriorFindings && mode === "review_now" ? { include_prior_findings: true } : {}) });
     },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["code-reviews"] });
@@ -98,6 +102,13 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
           {target && !loading && !error ? <p className="text-sm text-muted-foreground">{isRecheck
             ? "Previous findings stay in place. Changes to code or review policy require a full review."
             : "A running or completed review may be reused if it already covers these changes."}</p> : null}
+          {!isRecheck && target && !loading && !error ? <div className="flex items-start gap-2">
+            <Checkbox id="include-prior-findings" className="mt-0.5" checked={includePriorFindings} onCheckedChange={(checked) => { setIncludePriorFindings(checked === true); requestID.current = null; }} />
+            <div className="space-y-1">
+              <Label htmlFor="include-prior-findings">Include findings from earlier rounds (experimental)</Label>
+              <p className="text-xs text-muted-foreground">143 weighs the findings it posted on this pull request, and the latest reply to each, so it can avoid repeating or silently reversing them.</p>
+            </div>
+          </div> : null}
           {unavailable && !loading && !error ? <p role="status" className="text-sm text-muted-foreground">{unavailable}</p> : null}
           {assessmentID && target ? <Button variant="link" size="sm" className="h-auto p-0" asChild><Link href={`/code-reviews?assessment=${assessmentID}`}>View previous assessment</Link></Button> : null}
           {mutation.isError ? <ErrorNotice title="Request could not be confirmed" description={mutation.error.message} /> : null}

@@ -120,10 +120,11 @@ type ReviewRequestedInput struct {
 // requested a review. It is carried only to the orchestrator synthesis prompt;
 // reviewer agents still inspect the PR independently.
 type ReviewRequestContext struct {
-	Source      string `json:"source"`
-	AuthorLogin string `json:"author_login,omitempty"`
-	Body        string `json:"body"`
-	URL         string `json:"url,omitempty"`
+	Source               string `json:"source"`
+	AuthorLogin          string `json:"author_login,omitempty"`
+	Body                 string `json:"body"`
+	URL                  string `json:"url,omitempty"`
+	IncludePriorFindings bool   `json:"include_prior_findings,omitempty"`
 }
 
 type ReviewMentionedInput struct {
@@ -1461,12 +1462,13 @@ func normalizeReviewRequestContext(input *ReviewRequestContext) *ReviewRequestCo
 		return nil
 	}
 	normalized := &ReviewRequestContext{
-		Source:      strings.TrimSpace(input.Source),
-		AuthorLogin: strings.TrimSpace(input.AuthorLogin),
-		Body:        strings.TrimSpace(input.Body),
-		URL:         strings.TrimSpace(input.URL),
+		Source:               strings.TrimSpace(input.Source),
+		AuthorLogin:          strings.TrimSpace(input.AuthorLogin),
+		Body:                 strings.TrimSpace(input.Body),
+		URL:                  strings.TrimSpace(input.URL),
+		IncludePriorFindings: input.IncludePriorFindings,
 	}
-	if normalized.Body == "" {
+	if normalized.Body == "" && !normalized.IncludePriorFindings {
 		return nil
 	}
 	runes := []rune(normalized.Body)

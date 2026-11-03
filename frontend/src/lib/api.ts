@@ -423,7 +423,7 @@ export const api = {
     deleteGitHubTrigger: (repositoryId: string) =>
       del<void>(`/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`),
     pendingSchedules: (cursor?: string, limit = 25) => get<import('./types').ListResponse<import('./types').CodeReviewScheduledTarget>>(`/api/v1/code-review-targets?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
-    requestReview: (prID: string, body: { request_id: string; mode: 'review_now' | 'recheck' | 'force_fresh'; reason?: string }) =>
+    requestReview: (prID: string, body: { request_id: string; mode: 'review_now' | 'recheck' | 'force_fresh'; reason?: string; include_prior_findings?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').CodeReviewRequestResponse>>(`/api/v1/pull-requests/${prID}/code-review/requests`, body),
     reviewNow: (prID: string, requestID: string) => api.codeReviews.requestReview(prID, { request_id: requestID, mode: 'review_now' }),
     pauseSchedule: (prID: string, paused: boolean) => request<import('./types').SingleResponse<import('./types').CodeReviewSchedule>>(`/api/v1/pull-requests/${prID}/code-review`, { method: 'PATCH', body: JSON.stringify({ automatic_paused: paused }) }),

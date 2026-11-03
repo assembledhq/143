@@ -17,6 +17,7 @@ type CodeReviewFinalReviewInput struct {
 	PolicySettingsURL         string
 	EvidenceRecheckURL        string
 	ReviewNowURL              string
+	PriorFindingsURL          string
 	ReviewProvenance          string
 	DescriptionPassed         *bool
 	DescriptionIssues         []string
@@ -123,6 +124,7 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	}
 	if !input.Acceptable && input.Decision != CodeReviewDecisionApproved {
 		footer.ReviewNowURL = input.ReviewNowURL
+		footer.PriorFindingsURL = input.PriorFindingsURL
 		if codeReviewBlockerCount(input.RiskReasons, blockingFindings) == 1 {
 			if revision := codeReviewShortSHA(input.HeadSHA); revision != "" {
 				paragraphs = append(paragraphs, "This is the only blocker as of `"+revision+"`.")

@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { parseAsString, useQueryState } from "nuqs";
+import { parseAsBoolean, parseAsString, useQueryState } from "nuqs";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { ReviewRequestDialog } from "./review-request-dialog";
@@ -11,6 +11,7 @@ const sessionIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 /** A GitHub comment link opens a read-only confirmation, never an automatic POST. */
 export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
   const [sessionID, setSessionID] = useQueryState("review_now", parseAsString);
+  const [includePriorFindings, setIncludePriorFindings] = useQueryState("include_prior_findings", parseAsBoolean);
   const validID = Boolean(sessionID && sessionIDPattern.test(sessionID));
   const review = useQuery({
     queryKey: ["code-review-link", sessionID],
@@ -23,7 +24,7 @@ export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
     queryFn: () => api.codeReviews.getPolicy(),
     enabled: Boolean(sessionID),
   });
-  const close = () => { void setSessionID(null); };
+  const close = () => { void setSessionID(null); void setIncludePriorFindings(null); };
   const target = review.data?.data;
   const available = policy.data?.data.capabilities?.scheduling === true;
   const error = !validID ? "This review link is invalid."
@@ -41,5 +42,6 @@ export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
     loading={validID && (review.isPending || policy.isPending)}
     error={error}
     unavailable={unavailable}
+    defaultIncludePriorFindings={includePriorFindings === true}
   />;
 }

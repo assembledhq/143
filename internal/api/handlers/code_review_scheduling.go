@@ -68,9 +68,10 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		RequestID uuid.UUID                    `json:"request_id"`
-		Mode      models.CodeReviewRequestMode `json:"mode"`
-		Reason    string                       `json:"reason,omitempty"`
+		RequestID            uuid.UUID                    `json:"request_id"`
+		Mode                 models.CodeReviewRequestMode `json:"mode"`
+		Reason               string                       `json:"reason,omitempty"`
+		IncludePriorFindings bool                         `json:"include_prior_findings,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RequestID == uuid.Nil {
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "request_id and mode are required")
@@ -90,7 +91,11 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "invalid request mode", err)
 		return
 	}
-	result, err := s.RequestScheduledReview(r.Context(), codereviewsvc.ScheduleRequestInput{OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id, RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode, Reason: strings.TrimSpace(req.Reason)})
+	if req.IncludePriorFindings && req.Mode != models.CodeReviewReviewNow {
+		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "include_prior_findings requires review_now")
+		return
+	}
+	result, err := s.RequestScheduledReview(r.Context(), codereviewsvc.ScheduleRequestInput{OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id, RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode, Reason: strings.TrimSpace(req.Reason), IncludePriorFindings: req.IncludePriorFindings})
 	if err != nil {
 		writeScheduleError(w, r, err)
 		return

@@ -223,6 +223,7 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 		}
 		if !codeReviewCommentNeedsNoAction(metadata) {
 			footer.EvidenceRecheckURL = savedFooter.EvidenceRecheckURL
+			footer.PriorFindingsURL = savedFooter.PriorFindingsURL
 			if footer.EvidenceRecheckURL == "" {
 				footer.ReviewNowURL = reviewNowURL
 			}
@@ -305,6 +306,17 @@ func codeReviewAvailableReviewNowURL(services *Services, sessionID uuid.UUID) st
 // button click to POST, so GitHub link previews cannot spend review capacity.
 func codeReviewNowURL(frontendURL string, sessionID uuid.UUID) string {
 	return codeReviewRequestURL(frontendURL, sessionID, "review_now")
+}
+
+func codeReviewAvailablePriorFindingsURL(services *Services, sessionID uuid.UUID) string {
+	target, err := url.Parse(codeReviewAvailableReviewNowURL(services, sessionID))
+	if err != nil || target.Host == "" {
+		return ""
+	}
+	query := target.Query()
+	query.Set("include_prior_findings", "true")
+	target.RawQuery = query.Encode()
+	return target.String()
 }
 
 func codeReviewRequestURL(frontendURL string, id uuid.UUID, action string) string {

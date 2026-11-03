@@ -523,3 +523,27 @@ func TestSelectCodeReviewInlineFindingsPrioritizesSeverityAndConfidence(t *testi
 func testCodeReviewTime(hour int) time.Time {
 	return time.Date(2026, 6, 26, hour, 0, 0, 0, time.UTC)
 }
+
+func TestBuildCodeReviewFinalReviewBodyPriorFindingsLink(t *testing.T) {
+	t.Parallel()
+
+	const target = "https://143.dev/code-reviews?include_prior_findings=true&review_now=review"
+	tests := []struct {
+		name     string
+		decision CodeReviewDecision
+		expected bool
+	}{
+		{name: "blocked review offers the link", decision: CodeReviewDecisionNeedsHumanReview, expected: true},
+		{name: "approved review has nothing to act on", decision: CodeReviewDecisionApproved},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body := BuildCodeReviewFinalReviewBody(CodeReviewFinalReviewInput{
+				Decision: tt.decision, Acceptable: tt.decision == CodeReviewDecisionApproved,
+				SessionURL: "https://143.dev/sessions/review", PriorFindingsURL: target,
+			})
+			require.Equal(t, tt.expected, strings.Contains(body, "[Review with prior findings]("+target+")"), "only reviews that need action should offer another review")
+		})
+	}
+}

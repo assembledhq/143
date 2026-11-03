@@ -177,10 +177,11 @@ func assessmentRequestContext(req ScheduleRequestInput) *ReviewRequestContext {
 	if req.RequestContext != nil {
 		return normalizeReviewRequestContext(req.RequestContext)
 	}
-	if strings.TrimSpace(req.Reason) == "" {
+	includePriorFindings := req.Mode == models.CodeReviewReviewNow && req.IncludePriorFindings
+	if strings.TrimSpace(req.Reason) == "" && !includePriorFindings {
 		return nil
 	}
-	return &ReviewRequestContext{Source: "ui", Body: strings.TrimSpace(req.Reason)}
+	return &ReviewRequestContext{Source: "ui", Body: strings.TrimSpace(req.Reason), IncludePriorFindings: includePriorFindings}
 }
 
 func decodeAssessmentManifest(raw json.RawMessage) (ReviewInputManifest, error) {

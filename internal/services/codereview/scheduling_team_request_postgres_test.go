@@ -151,6 +151,23 @@ func testSchedulingOrdinaryCompletedReuse(t *testing.T, pool *pgxpool.Pool, org,
 	require.Equal(t, models.CodeReviewScheduleCovered, after.State, "the existing review should cover the ordinary request")
 }
 
+func testSchedulingPriorFindingsOptInStartsReview(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	t.Helper()
+	ctx := context.Background()
+	service, claim, sourceID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	completeSchedulingTeamReview(t, pool, org, sourceID)
+	_, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow, IncludePriorFindings: true})
+	require.NoError(t, err, "request Review now with the prior findings opt-in on an unchanged completed review")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "start the opted-in review")
+	latest, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read the opted-in review")
+	require.NotEqual(t, sourceID, latest.SessionID, "the opt-in must start a new review instead of reusing the completed one")
+	var includePriorFindings bool
+	err = pool.QueryRow(ctx, `SELECT (revision_context->'request_context'->>'include_prior_findings')::boolean FROM sessions WHERE org_id=$1 AND id=$2`, org, latest.SessionID).Scan(&includePriorFindings)
+	require.NoError(t, err, "read the opted-in review's request context")
+	require.True(t, includePriorFindings, "the new review must carry the opt-in")
+}
+
 func testSchedulingFullAssessmentJoinSettlement(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 	t.Helper()
 	ctx := context.Background()

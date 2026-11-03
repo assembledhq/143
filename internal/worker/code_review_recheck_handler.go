@@ -300,6 +300,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			SessionURL:            codeReviewAssessmentURL(services.FrontendURL, a.ID),
 			PolicySettingsURL:     codeReviewPolicySettingsURL(services.FrontendURL),
 			EvidenceRecheckURL:    codeReviewEvidenceRecheckURL(services, fresh.Policy.Config(), a.ID, true),
+			PriorFindingsURL:      codeReviewAvailablePriorFindingsURL(services, a.SessionID),
 			ReviewProvenance:      "Code review reused from assessment `" + baseline.ID.String() + "`. Updated evidence was checked in this assessment.",
 		})
 		outcome, err := json.Marshal(struct {
