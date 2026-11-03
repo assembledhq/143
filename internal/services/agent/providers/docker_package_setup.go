@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/nodetoolchain"
 	"github.com/assembledhq/143/internal/repoconfig"
 	"github.com/assembledhq/143/internal/services/agent"
 	cerrdefs "github.com/containerd/errdefs"
@@ -61,7 +62,24 @@ func (d *DockerProvider) PrepareNPMDependencies(ctx context.Context, sb *agent.S
 	if err != nil {
 		return "", err
 	}
+	toolchain, err := selectNPMToolchain(manifest.Files, targets)
+	if err != nil {
+		return "", err
+	}
+	control["toolchain"] = toolchain
+	manifest, err = d.npmSetupProbe(ctx, sb, control)
+	if err != nil {
+		return "", err
+	}
+	confirmed, selectErr := selectNPMToolchain(manifest.Files, targets)
+	if selectErr != nil {
+		return "", selectErr
+	}
+	if confirmed != toolchain {
+		return "", errors.New("npm setup inputs changed during toolchain selection")
+	}
 	if manifest.Ready {
+		applyNPMToolchain(sb, toolchain)
 		return manifest.Fingerprint, nil
 	}
 	credentials, err := resolve(ctx)
@@ -109,7 +127,40 @@ func (d *DockerProvider) PrepareNPMDependencies(ctx context.Context, sb *agent.S
 	if !stamped.Ready || stamped.Fingerprint != manifest.Fingerprint {
 		return "", errors.New("npm setup inputs changed during installation")
 	}
+	applyNPMToolchain(sb, toolchain)
 	return manifest.Fingerprint, nil
+}
+
+func selectNPMToolchain(files map[string]string, targets []repoconfig.NPMSetup) (nodetoolchain.Toolchain, error) {
+	directories := make([]string, len(targets))
+	for i, target := range targets {
+		directories[i] = target.Directory
+	}
+	toolchain, err := nodetoolchain.Select(files, directories)
+	if err != nil {
+		return nodetoolchain.Toolchain{}, &agent.NPMSetupError{Code: "EBADENGINE", Category: "permanent"}
+	}
+	return toolchain, nil
+}
+
+func applyNPMToolchain(sb *agent.Sandbox, toolchain nodetoolchain.Toolchain) {
+	env := make(map[string]string, len(sb.Env)+1)
+	for key, value := range sb.Env {
+		env[key] = value
+	}
+	sb.NPMToolchainIdentity = "node@" + toolchain.NodeVersion + "/npm@" + toolchain.NPMVersion
+	existing := sb.Env["PATH"]
+	if existing == "" {
+		existing = "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+	}
+	paths := []string{toolchain.BinDir()}
+	for _, entry := range strings.Split(existing, ":") {
+		if entry != "" && !strings.HasPrefix(entry, "/opt/143/node/") {
+			paths = append(paths, entry)
+		}
+	}
+	env["PATH"] = strings.Join(paths, ":")
+	sb.Env = env
 }
 
 func npmSetupSandbox(sb *agent.Sandbox) agent.Sandbox {
@@ -139,6 +190,10 @@ func (d *DockerProvider) npmSetupProbe(ctx context.Context, sb *agent.Sandbox, c
 }
 
 func (d *DockerProvider) runIsolatedNPMSetup(ctx context.Context, sb *agent.Sandbox, image string, targets []repoconfig.NPMSetup, files map[string]string, credentials []npmSetupCredential, profiles ...npmSetupNetworkProfile) (result *os.File, returnErr error) {
+	toolchain, err := selectNPMToolchain(files, targets)
+	if err != nil {
+		return nil, err
+	}
 	pids := int64(128)
 	profile := npmSetupNetworkProfile{Network: d.network, ResolvConf: d.resolvConf}
 	if len(profiles) > 0 {
@@ -185,10 +240,11 @@ func (d *DockerProvider) runIsolatedNPMSetup(ctx context.Context, sb *agent.Sand
 		return nil, errors.New("isolated npm setup container could not start")
 	}
 	raw, err := json.Marshal(struct {
-		Files       map[string]string     `json:"files"`
-		Targets     []repoconfig.NPMSetup `json:"targets"`
-		Credentials []npmSetupCredential  `json:"credentials"`
-	}{files, targets, credentials})
+		Files       map[string]string       `json:"files"`
+		Targets     []repoconfig.NPMSetup   `json:"targets"`
+		Credentials []npmSetupCredential    `json:"credentials"`
+		Toolchain   nodetoolchain.Toolchain `json:"toolchain"`
+	}{files, targets, credentials, toolchain})
 	if err != nil {
 		return nil, errors.New("isolated npm setup input unavailable")
 	}
@@ -376,7 +432,20 @@ for target in p['targets']:
   for field in ('dependencies','devDependencies','optionalDependencies'):
    for spec in package.get(field,{}).values():
     if not isinstance(spec,str) or spec.startswith(('file:','link:','git:','git+','http:','https:','ssh:','github:')) or '/' in spec and not spec.startswith(('npm:','@')): raise RuntimeError('unsupported dependency')
-canonical=json.dumps({'files':files,'targets':p['targets'],'revision':p['revision'],'image':p['image']},sort_keys=True,separators=(',',':'))
+# Capture selectors only at the repository and explicit setup-target roots.
+for directory in sorted(set(['.']+[t['directory'] for t in p['targets']])):
+ for name in ('.nvmrc','.node-version','package.json'):
+  f=root/directory/name;relative=f.relative_to(root).as_posix()
+  if relative in files or not os.path.lexists(f): continue
+  fd=os.open(f,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+  with os.fdopen(fd,'rb') as stream:
+   info=os.fstat(stream.fileno());limit=4096 if name!='package.json' else 4*1024*1024
+   if not stat.S_ISREG(info.st_mode) or info.st_size>limit: raise RuntimeError('unsafe selector')
+   raw=stream.read(limit+1)
+  total+=len(raw)
+  if len(raw)>limit or len(files)>=512 or total>16*1024*1024: raise RuntimeError('selector capacity')
+  files[relative]=raw.decode()
+canonical=json.dumps({'files':files,'targets':p['targets'],'revision':p['revision'],'image':p['image'],'toolchain':p.get('toolchain')},sort_keys=True,separators=(',',':'))
 key=hashlib.sha256(canonical.encode()).hexdigest()
 receipt_directory=root/'.git'
 if not receipt_directory.is_dir() or receipt_directory.is_symlink():
@@ -439,8 +508,23 @@ from urllib.parse import urlparse
 p=json.load(sys.stdin);root=pathlib.Path('/setup/project');root.mkdir()
 for relative,content in p['files'].items():
  path=pathlib.PurePosixPath(relative)
- if path.is_absolute() or '..' in path.parts or path.name not in {'package.json','package-lock.json'}: raise RuntimeError('invalid manifest')
+ if path.is_absolute() or '..' in path.parts or path.name not in {'package.json','package-lock.json','.nvmrc','.node-version'}: raise RuntimeError('invalid manifest')
  target=root/path;target.parent.mkdir(parents=True,exist_ok=True);target.write_text(content)
+toolchain=p['toolchain']
+# Match catalog by exact versions, never accept paths supplied by repository files.
+pair=(toolchain.get('node_version'),toolchain.get('npm_version'))
+if any(not isinstance(v,str) or not re.fullmatch(r'[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}',v) for v in pair): raise RuntimeError('unsupported toolchain')
+node_version,npm_version=pair
+bin_dir='/opt/143/node/'+node_version+'/bin'
+node=bin_dir+'/node';npm='/opt/143/node/'+node_version+'/lib/node_modules/npm/bin/npm-cli.js'
+environment={'PATH':bin_dir+':/usr/bin:/bin','HOME':'/private/home','TMPDIR':'/private/tmp'}
+def version(command):
+ try:
+  value=subprocess.check_output(command,stderr=subprocess.DEVNULL,env=environment,timeout=10).decode().strip()
+  return value if re.fullmatch(r'v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}',value) else ''
+ except Exception: return ''
+if version([node,'--version'])!='v'+node_version or version([node,npm,'--version'])!=npm_version:
+ print(json.dumps({'code':'EBADENGINE','category':'permanent'}),flush=True);sys.exit(1)
 private=pathlib.Path('/private');(private/'home').mkdir();(private/'tmp').mkdir()
 config=private/'npmrc';lines=[];registries=set();scopes=set()
 for credential in p.pop('credentials') or []:
@@ -452,17 +536,12 @@ for credential in p.pop('credentials') or []:
 fd=os.open(config,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
 with os.fdopen(fd,'w') as stream: stream.write('\n'.join(lines)+'\n')
 del lines
-def version(command):
- try:
-  value=subprocess.check_output(command,stderr=subprocess.DEVNULL,env={'PATH':'/usr/bin:/bin'},timeout=10).decode().strip()
-  return value if re.fullmatch(r'v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}',value) else ''
- except Exception: return ''
 started=time.monotonic();failure=None
 try:
  for target in p['targets']:
-  args=['/usr/bin/npm','ci','--ignore-scripts','--no-audit','--no-fund','--registry=https://registry.npmjs.org/','--userconfig='+str(config),'--globalconfig=/dev/null','--cache=/private/cache','--logs-dir=/private/logs','--global=false','--package-lock=true','--install-links=false','--legacy-peer-deps='+str(target.get('legacy_peer_deps',False)).lower()]
+  args=[node,npm,'ci','--ignore-scripts','--no-audit','--no-fund','--registry=https://registry.npmjs.org/','--userconfig='+str(config),'--globalconfig=/dev/null','--cache=/private/cache','--logs-dir=/private/logs','--global=false','--package-lock=true','--install-links=false','--legacy-peer-deps='+str(target.get('legacy_peer_deps',False)).lower()]
   with open(private/'output','w+b') as output:
-   result=subprocess.Popen(args,cwd=root/target['directory'],env={'PATH':'/usr/bin:/bin','HOME':'/private/home','TMPDIR':'/private/tmp'},stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+   result=subprocess.Popen(args,cwd=root/target['directory'],env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
    remaining=1048576
    while True:
     chunk=result.stdout.read(65536)
@@ -475,7 +554,7 @@ try:
     codes=re.findall(r'(?im)^npm (?:ERR!|error) code (E[A-Z]+)\s*$',text)
     code=codes[-1] if codes else ''
     if code in {'EUSAGE','EBADENGINE','ELOCKVERIFY'}:
-     failure={'code':code,'category':'permanent','node_version':version(['/usr/bin/node','--version']),'npm_version':version(['/usr/bin/npm','--version']),'phase_durations_ms':{'install':min(600000,int((time.monotonic()-started)*1000))}}
+     failure={'code':code,'category':'permanent','node_version':version([node,'--version']),'npm_version':version([node,npm,'--version']),'phase_durations_ms':{'install':min(600000,int((time.monotonic()-started)*1000))}}
     raise RuntimeError('npm installation failed')
   (root/target['directory']/'node_modules').mkdir(exist_ok=True)
 except Exception:

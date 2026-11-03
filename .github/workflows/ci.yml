@@ -77,6 +77,8 @@ jobs:
               - 'frontend/Dockerfile*'
               - 'sandbox/Dockerfile*'
               - 'sandbox/versions.json'
+              - 'sandbox/install_node_toolchains.py'
+              - 'internal/nodetoolchain/catalog.json'
               - '.dockerignore'
             deploy:
               - 'deploy/**'

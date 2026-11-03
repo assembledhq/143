@@ -589,12 +589,13 @@ func SlugForRepo(fullName string) string {
 
 // Sandbox represents a running isolated environment for agent execution.
 type Sandbox struct {
-	ID       string            // unique sandbox identifier (container ID, VM ID, etc.)
-	Provider string            // which provider created this sandbox
-	WorkDir  string            // path to the repo checkout inside the sandbox
-	HomeDir  string            // sandbox user's home dir (HOME env); distinct from WorkDir
-	Env      map[string]string `json:"-"` // environment passed to agent CLI execs; never persist secrets
-	Metadata map[string]string // provider-specific metadata
+	ID                   string            // unique sandbox identifier (container ID, VM ID, etc.)
+	Provider             string            // which provider created this sandbox
+	WorkDir              string            // path to the repo checkout inside the sandbox
+	HomeDir              string            // sandbox user's home dir (HOME env); distinct from WorkDir
+	Env                  map[string]string `json:"-"` // environment passed to agent CLI execs; never persist secrets
+	Metadata             map[string]string // provider-specific metadata
+	NPMToolchainIdentity string            `json:"-"` // selected immutable Node/npm pair for this preparation
 
 	// In-memory auth selection for this execution; never persisted or exported.
 	credentialResolution *resolvedAgentEnv

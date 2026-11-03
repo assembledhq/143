@@ -1,0 +1,22 @@
+{
+  "toolchains": [
+    {
+      "id": "node24-npm11",
+      "node_version": "24.22.2",
+      "npm_version": "11.19.1",
+      "sha256": {
+        "linux-x64": "48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75",
+        "linux-arm64": "eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8"
+      }
+    },
+    {
+      "id": "node22-npm10",
+      "node_version": "22.23.4",
+      "npm_version": "10.9.9",
+      "sha256": {
+        "linux-x64": "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce",
+        "linux-arm64": "6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b"
+      }
+    }
+  ]
+}
