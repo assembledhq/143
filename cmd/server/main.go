@@ -1678,8 +1678,7 @@ func buildServices(
 	if cfg.EncryptionMasterKey != "" {
 		packageCrypto, err = crypto.NewService(cfg.EncryptionMasterKey)
 		if err != nil {
-			logger.Error().Msg("package credential encryption initialization failed")
-			return nil
+			return nil, fmt.Errorf("initialize worker-services package credential encryption: %w", err)
 		}
 	}
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{

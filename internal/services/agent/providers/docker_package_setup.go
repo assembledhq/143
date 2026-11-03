@@ -271,9 +271,23 @@ func validateNPMSetupArchive(file *os.File, files map[string]string) error {
 		switch header.Typeflag {
 		case tar.TypeReg, tar.TypeDir:
 		case tar.TypeSymlink:
-			target := path.Clean(path.Join(path.Dir(name), header.Linkname))
-			if path.IsAbs(header.Linkname) || target == ".." || strings.HasPrefix(target, "../") {
+			if path.IsAbs(header.Linkname) {
 				return errors.New("npm setup output link escapes repository")
+			}
+			// The archive name is canonical and relative. Resolve link components
+			// from its parent without allowing a step above the repository root.
+			depth := len(parts) - 1
+			for _, component := range strings.Split(header.Linkname, "/") {
+				switch component {
+				case "", ".":
+				case "..":
+					depth--
+				default:
+					depth++
+				}
+				if depth < 0 {
+					return errors.New("npm setup output link escapes repository")
+				}
 			}
 		default:
 			return errors.New("npm setup output contains unsupported files")

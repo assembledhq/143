@@ -45,6 +45,20 @@ func TestValidateNPMSetupArchive(t *testing.T) {
 			manifests: []string{"package.json", "packages/widget/package.json"},
 		},
 		{
+			name: "relative link normalization remains within repository",
+			headers: []tar.Header{
+				{Name: "node_modules/.bin/fixture", Typeflag: tar.TypeSymlink, Linkname: "./../fixture//bin/../cli.js"},
+			},
+			manifests: []string{"package.json"},
+		},
+		{
+			name: "workspace link may traverse exactly to repository root",
+			headers: []tar.Header{
+				{Name: "packages/widget/node_modules/@fixture/shared", Typeflag: tar.TypeSymlink, Linkname: "../../../../packages/shared"},
+			},
+			manifests: []string{"package.json", "packages/widget/package.json", "packages/shared/package.json"},
+		},
+		{
 			name: "source file cannot be published",
 			headers: []tar.Header{
 				{Name: "src/index.js", Typeflag: tar.TypeReg},
@@ -146,6 +160,14 @@ func TestValidateNPMSetupArchive(t *testing.T) {
 				{Name: "packages/widget/node_modules/dependency", Typeflag: tar.TypeSymlink, Linkname: "../../../../outside"},
 			},
 			manifests: []string{"package.json", "packages/widget/package.json"},
+			wantError: "npm setup output link escapes repository",
+		},
+		{
+			name: "link cannot escape and then return to a dependency path",
+			headers: []tar.Header{
+				{Name: "node_modules/dependency", Typeflag: tar.TypeSymlink, Linkname: "../../outside/../node_modules/dependency"},
+			},
+			manifests: []string{"package.json"},
 			wantError: "npm setup output link escapes repository",
 		},
 		{
