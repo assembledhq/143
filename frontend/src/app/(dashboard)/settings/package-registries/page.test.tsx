@@ -4,6 +4,7 @@ import { act } from "@testing-library/react";
 import { queryKeys } from "@/lib/query-keys";
 import { createTestQueryClient, fireEvent, renderWithProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
+import { formatDateTime } from "@/lib/utils";
 import PackageRegistriesPage from "./page";
 
 const auth = vi.hoisted(() => ({ role: "admin" }));
@@ -35,6 +36,7 @@ describe("PackageRegistriesPage", () => {
     renderWithProviders(<PackageRegistriesPage />);
     expect(await screen.findByText(credential.registry_url)).toBeInTheDocument();
     expect(screen.getByText("@example")).toBeInTheDocument();
+    expect(screen.getByText(formatDateTime(credential.updated_at, { year: true }))).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /reveal/i })).not.toBeInTheDocument();
     expect(screen.queryByText(secret)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("combobox", { name: "Repository" }));
