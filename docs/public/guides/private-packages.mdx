@@ -9,7 +9,7 @@ tags:
   - npm
   - credentials
   - repo-config
-llm_summary: Add an admin-managed repository npm registry credential, declare setup.npm directories in .143/config.json, and run package scripts after controlled installation removes credentials.
+llm_summary: Add an admin-managed repository npm registry credential and declare setup.npm directories in .143/config.json. Built-in reviews inspect source by default and install dependencies only when review.install_npm_dependencies is enabled.
 ---
 
 Use this setup when a repository depends on private, scoped npm packages. You need an organization administrator to save a read-only registry token and permission to commit the repository configuration.
@@ -47,9 +47,26 @@ Commit `.143/config.json` with the npm directories that require installation:
 
 Each directory needs a committed `package.json` and npm lockfile version 2 or 3 in `package-lock.json`. Paths are relative to the repository root. `.` selects the root project. For an npm workspace, select the workspace root so its lockfile controls the installation. A standalone nested project, such as `tools/example`, needs its own manifest and lockfile. List the root installation first when a nested project relies on peers provided by the root. Use `legacy_peer_deps: true` only when that project's lockfile requires npm's legacy peer-dependency resolution.
 
-143 runs a platform-controlled `npm ci --ignore-scripts --no-audit` before repository bootstrap or review commands. It uses the saved credential only during this installation. Package lifecycle scripts are skipped while credentials are available. Repository `.npmrc` files are not copied into this isolated installation; use the typed `legacy_peer_deps` field when needed.
+143 runs a platform-controlled `npm ci --ignore-scripts --no-audit` before repository bootstrap in coding sessions and automations. It uses the saved credential only during this installation. Package lifecycle scripts are skipped while credentials are available. The isolated installer uses the typed `legacy_peer_deps` field in place of repository `.npmrc` settings.
 
-If dependencies need lifecycle scripts, run `npm rebuild` or the specific required script in your bootstrap or review commands afterward. These commands run after credential removal. Remove duplicate `npm ci` commands from those recipes: the token is no longer available there, and reinstalling discards the dependencies already prepared.
+If dependencies need lifecycle scripts, run `npm rebuild` or the specific required script in your bootstrap or review commands afterward. These commands run after credential removal. Remove duplicate `npm ci` commands from those recipes because reinstalling discards the dependencies already prepared and needs a registry token.
+
+## Opt in to installation for built-in reviews
+
+Built-in code reviews inspect the checked-out source by default. If reviewers need npm dependencies to run tests or other checks, set `review.install_npm_dependencies` to `true` alongside the existing `setup.npm` directories in `.143/config.json`.
+
+```json
+{
+  "setup": {
+    "npm": [{ "directory": "." }]
+  },
+  "review": {
+    "install_npm_dependencies": true
+  }
+}
+```
+
+This setting enables the isolated installer during built-in review preparation. Existing `setup.npm` declarations continue to drive installation for coding sessions and automations.
 
 ## Node and npm versions
 
@@ -74,7 +91,7 @@ Authenticated setup requires a trusted repository configuration. Reviews from fo
 
 ## Troubleshooting
 
-- **The review stops during workspace preparation:** npm rejected the package manifests, lockfile, or runtime requirements. Check that the declared Node and npm versions match a supported toolchain, then validate the committed lockfile with those versions. Fix the inputs and request a new review. Recognized deterministic failures during shared workspace preparation stop the review before launching reviewers. Transient failures retain bounded retries. Instance administrators can inspect the sanitized error code, Node/npm versions, and installation duration; raw npm output is not retained.
+- **An opted-in review reports an npm setup failure.** Check that the declared Node and npm versions match a supported toolchain, then validate the committed lockfile with those versions. Fix the inputs and request a new review. Recognized deterministic npm failures stop the review before launching reviewers. Transient failures retain bounded retries. Instance administrators can inspect the sanitized error code, Node/npm versions, and installation duration.
 - **Authentication fails:** check that the registry origin and package scope match the locked packages, and rotate an expired or insufficiently scoped token.
 - **A package needs an install script:** add the required script to bootstrap or review commands after controlled installation. Do not put the token in those commands.
 - **Credential storage is unavailable:** ask your instance administrator to configure package credential encryption, then try again. 143 does not save plaintext tokens as a fallback.
