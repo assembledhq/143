@@ -124,13 +124,32 @@ func TestNPMSetupMainCancellationWaitsForRemoteProcessCleanup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
 	pidPath := filepath.Join(root, "child-pid")
 	latePath := filepath.Join(root, "late-write")
-	script := fmt.Sprintf("import os,pathlib,time;pathlib.Path(%q).write_text(str(os.getpid()));time.sleep(2);pathlib.Path(%q).write_text('unsafe')", pidPath, latePath)
+	// Publish the completed PID atomically so existence cannot precede its contents.
+	script := fmt.Sprintf(`
+import os,pathlib,time
+pid=pathlib.Path(%q)
+temporary=pid.with_suffix('.tmp')
+temporary.write_text(str(os.getpid()))
+temporary.replace(pid)
+time.sleep(30)
+pathlib.Path(%q).write_text('unsafe')
+`, pidPath, latePath)
 	finished := make(chan error, 1)
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-finished:
+		case <-time.After(7 * time.Second):
+			t.Error("fixture remote process cleanup did not finish before teardown")
+		}
+	})
 	go func() {
 		_, err := provider.npmSetupMainExec(runCtx, &agent.Sandbox{ID: "main", WorkDir: root}, script, `{}`, nil, io.Discard)
 		finished <- err
+		close(finished)
 	}()
 	require.Eventually(t, func() bool { _, err := os.Stat(pidPath); return err == nil }, 3*time.Second, 10*time.Millisecond, "fixture must start its actual remote child before cancelling the attachment")
 	raw, err := os.ReadFile(pidPath)
