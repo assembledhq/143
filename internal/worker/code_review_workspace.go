@@ -148,7 +148,15 @@ func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Sto
 		log.Warn().Str("session_id", session.ID.String()).Msg("using ordinary reviewer workspace path for ineligible preparation session")
 		return nil
 	}
-	if afterPreflight {
+	key := codeReviewWorkspacePreparationKey(metadata.ID, session.ID, session.WorkspaceGeneration)
+	latestStatus, failure, statusErr := stores.Jobs.LatestJobOutcomeByDedupeKey(ctx, job.OrgID, "agent", key)
+	if statusErr != nil && !errors.Is(statusErr, pgx.ErrNoRows) {
+		return fmt.Errorf("load review workspace preparation outcome: %w", statusErr)
+	}
+	if err := codeReviewPersistedSetupFailure(latestStatus, failure); err != nil {
+		return err
+	}
+	if afterPreflight && latestStatus != models.JobStatusPending && latestStatus != models.JobStatusRunning {
 		log.Warn().Str("session_id", session.ID.String()).
 			Msg("prepared workspace lost readiness during preflight; using ordinary reviewer path")
 		return nil
@@ -160,7 +168,6 @@ func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Sto
 	if controllerID, ok := jobctx.JobIDFromContext(ctx); ok && controllerID != uuid.Nil {
 		payload.ControllerJobID = &controllerID
 	}
-	key := codeReviewWorkspacePreparationKey(metadata.ID, session.ID, session.WorkspaceGeneration)
 	startedAt, startErr := stores.Jobs.FirstJobCreatedAtByDedupeKey(ctx, job.OrgID, "agent", key)
 	if startErr != nil && !errors.Is(startErr, pgx.ErrNoRows) {
 		return fmt.Errorf("load review workspace wait start: %w", startErr)
@@ -168,17 +175,23 @@ func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Sto
 	if startErr == nil && !time.Now().Before(startedAt.Add(codeReviewWorkspaceWaitLimit)) {
 		cancelled, cancelErr := stores.Jobs.CancelActiveCodeReviewPreparation(ctx, job.OrgID, "agent", key)
 		if cancelErr != nil {
-			// An uncertain cancellation cannot bypass the session/holder CAS in
-			// either workspace path, so let the review proceed after logging it.
 			log.Warn().Err(cancelErr).Str("session_id", session.ID.String()).Msg("could not cancel timed-out review workspace preparation")
+		}
+		// A deterministic failure may have committed between the initial read
+		// and cancellation. Cancellation does not overwrite a terminal job.
+		status, failure, err := stores.Jobs.LatestJobOutcomeByDedupeKey(ctx, job.OrgID, "agent", key)
+		if err != nil {
+			return fmt.Errorf("recheck timed-out review workspace preparation outcome: %w", err)
+		}
+		if err := codeReviewPersistedSetupFailure(status, failure); err != nil {
+			return err
+		}
+		if cancelErr != nil || status == models.JobStatusPending || status == models.JobStatusRunning {
+			return fmt.Errorf("review workspace preparation cancellation is unconfirmed: %w", errors.Join(cancelErr, errCodeReviewWorkspaceCancellationUnconfirmed))
 		}
 		log.Warn().Str("session_id", session.ID.String()).Int64("cancelled_preparation_jobs", cancelled).
 			Msg("review workspace preparation exceeded wait limit; using ordinary reviewer path")
 		return nil
-	}
-	latestStatus, statusErr := stores.Jobs.LatestJobStatusByDedupeKey(ctx, job.OrgID, "agent", key)
-	if statusErr != nil && !errors.Is(statusErr, pgx.ErrNoRows) {
-		return fmt.Errorf("load review workspace preparation status: %w", statusErr)
 	}
 	switch latestStatus {
 	case models.JobStatusFailed, models.JobStatusDeadLetter, models.JobStatusCancelled:
@@ -209,6 +222,9 @@ func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Sto
 		if err != nil {
 			return fmt.Errorf("load review workspace wait start after enqueue: %w", err)
 		}
+	}
+	if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhasePreparingWorkspace); err != nil {
+		return fmt.Errorf("set code review workspace preparation phase: %w", err)
 	}
 	log.Debug().Str("session_id", session.ID.String()).Int64("generation", session.WorkspaceGeneration).Msg("waiting for prepared code review workspace")
 	retry := codeReviewControllerWorkspaceWaitError("preparation pending", startedAt)
@@ -347,6 +363,9 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 		}
 		sandbox, err := services.CodeReviewWorkspacePreparer.PrepareCodeReviewWorkspace(ctx, &session, metadata.HeadSHA)
 		if err != nil {
+			if agent.IsTerminalNPMSetupError(err) {
+				return codeReviewPreparationFailure(err)
+			}
 			if errors.Is(err, agent.ErrSandboxCapacityReached) {
 				log.Warn().Err(err).Str("current_node_id", ownerNodeID).
 					Msg("review workspace preparation rejected by local sandbox capacity")

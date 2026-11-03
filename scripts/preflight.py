@@ -72,29 +72,34 @@ def plan(files, bases, extended=False, full_frontend=False):
         'Makefile', 'go.mod', 'go.sum', '.golangci.yml',
         'scripts/preflight.py', 'scripts/test_preflight.py', 'setup.sh',
     }
-    broad = any(
-        f in shared_inputs or f.startswith(('.github/workflows/', '.github/scripts/', '.githooks/'))
-        for f in files
-    )
+    ci_prefixes = ('.github/workflows/', '.github/scripts/', '.githooks/')
+    shared = any(f in shared_inputs for f in files)
+    ci = shared or any(f.startswith(ci_prefixes) for f in files)
+    # CI-only edits need configuration checks locally; hosted CI validates the
+    # application. Explicit extended runs still exercise the full local plan.
+    broad = shared or (extended and ci)
     backend = broad or any(f.endswith('.go') or f.startswith('migrations/') for f in files)
-    frontend = broad or any(f.startswith('frontend/') for f in files)
-    deploy = broad or any(f.startswith(('deploy/', 'Dockerfile', 'docker-compose')) for f in files)
+    frontend = broad or any(f.startswith(('frontend/', 'docs/public/')) for f in files)
+    deploy = ci or any(f.startswith(('deploy/', 'Dockerfile', 'docker-compose')) for f in files)
     commands = []
     if backend:
         commands.append((['make', 'lint'], '.'))
     if frontend:
         commands += [(['npm', 'run', 'typecheck'], 'frontend'), (['npm', 'run', 'lint'], 'frontend')]
-        full = broad or full_frontend or _FRONTEND_SELECTOR.needs_full_suite(files) or any(
-            f.startswith(('frontend/package', 'frontend/src/test/', 'frontend/docs/', 'frontend/src/app/'))
+        # The hosted selector deliberately expands CI edits to full coverage;
+        # local mixed changes should use their ordinary application scope.
+        application_files = {f for f in files if not f.startswith(ci_prefixes)}
+        full = broad or full_frontend or _FRONTEND_SELECTOR.needs_full_suite(application_files) or any(
+            f.startswith(('frontend/package', 'frontend/src/test/', 'frontend/docs/', 'frontend/src/app/', 'docs/public/'))
             or 'config.' in f or f.endswith(('.md', '.mdx'))
-            for f in files
+            for f in application_files
         )
         if full:
             commands += [(['npm', 'run', 'build'], 'frontend'), (['npx', '--no-install', 'vitest', 'run'], 'frontend')]
         else:
             for base in sorted(set(bases)):
                 commands.append((['npx', '--no-install', 'vitest', 'run', '--changed=' + base, '--passWithNoTests'], 'frontend'))
-    if broad:
+    if ci:
         commands += [(['python3', '-B', '-m', 'unittest', 'discover', '-s', '.github/scripts', '-p', 'test_*.py'], '.'),
                      (['python3', '-B', '-m', 'unittest', 'discover', '-s', 'scripts', '-p', 'test_preflight.py'], '.')]
     if deploy:

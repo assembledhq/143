@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_jobs_lifecycle_nonterminal_input_consumers;

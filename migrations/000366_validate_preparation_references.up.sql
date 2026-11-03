@@ -1,0 +1,6 @@
+SET LOCAL lock_timeout = '5s';
+ALTER TABLE session_runtime_start_preparations VALIDATE CONSTRAINT start_preparations_session_fk;
+ALTER TABLE session_runtime_start_preparations VALIDATE CONSTRAINT start_preparations_thread_fk;
+ALTER TABLE session_runtime_start_preparations VALIDATE CONSTRAINT start_preparations_job_fk;
+ALTER TABLE session_runtime_start_preparations VALIDATE CONSTRAINT start_preparations_request_fk;
+ALTER TABLE sessions VALIDATE CONSTRAINT sessions_workspace_recovery_shape_check;

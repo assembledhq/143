@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -32,6 +33,10 @@ type reviewWorkspaceProvider struct {
 	commands      []string
 	actualHead    string
 	createdConfig SandboxConfig
+}
+
+func (*reviewWorkspaceProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, os.ErrNotExist
 }
 
 func (p *reviewWorkspaceProvider) Create(_ context.Context, cfg SandboxConfig) (*Sandbox, error) {

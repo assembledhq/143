@@ -147,3 +147,73 @@ func TestCodeReviewPreflightRejectsUnownedScheduledExecution(t *testing.T) {
 		})
 	}
 }
+
+func TestCodeReviewPreflightLeavesWorkspacePreparationPhase(t *testing.T) {
+	t.Parallel()
+	writeFailure := errors.New("phase update unavailable")
+	tests := []struct {
+		name       string
+		phase      *models.CodeReviewPhase
+		capture    bool
+		unowned    bool
+		writeError error
+		want       error
+	}{
+		{name: "ready workspace before ordinary sync", phase: new(models.CodeReviewPhasePreparingWorkspace)},
+		{name: "ready workspace before assessment capture", phase: new(models.CodeReviewPhasePreparingWorkspace), capture: true},
+		{name: "existing syncing phase", phase: new(models.CodeReviewPhaseSyncingGitHub)},
+		{name: "reviewing phase is preserved", phase: new(models.CodeReviewPhaseReviewing)},
+		{name: "synthesizing phase is preserved", phase: new(models.CodeReviewPhaseSynthesizing)},
+		{name: "legacy absent phase"},
+		{name: "phase persistence failure blocks provider work", phase: new(models.CodeReviewPhasePreparingWorkspace), writeError: writeFailure, want: writeFailure},
+		{name: "unowned work cannot change phase", phase: new(models.CodeReviewPhasePreparingWorkspace), unowned: true, want: errCodeReviewSchedulingSuperseded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create an isolated phase handoff store")
+			defer mock.Close()
+			job := runCodeReviewPayload{OrgID: uuid.New(), MetadataID: uuid.New(), RepositoryID: uuid.New(), PullRequestID: uuid.New(), SessionID: uuid.New(), PolicyID: uuid.New(), HeadSHA: "head"}
+			if !tt.unowned && tt.phase != nil && *tt.phase == models.CodeReviewPhasePreparingWorkspace {
+				query := mock.ExpectQuery("UPDATE code_review_session_metadata").WithArgs(pgx.NamedArgs{
+					"org_id": job.OrgID, "session_id": job.SessionID, "phase": models.CodeReviewPhaseSyncingGitHub,
+				})
+				if tt.writeError != nil {
+					query.WillReturnError(tt.writeError)
+				} else {
+					query.WillReturnRows(newCodeReviewMetadataRows().AddRow(
+						job.MetadataID, job.OrgID, job.SessionID, job.RepositoryID, job.PullRequestID, job.PolicyID,
+						"base", job.HeadSHA, false, models.CodeReviewTriggerSourceAppReviewer,
+						models.CodeReviewSessionStatusRunning, new(models.CodeReviewPhaseSyncingGitHub), nil, nil, nil, nil, false,
+						nil, nil, false, nil, "output-key", nil, nil, nil, nil, nil, nil, time.Now()))
+				}
+			}
+			if tt.capture {
+				mock.ExpectQuery("SELECT .* FROM code_review_revision_assessments WHERE org_id=\\$1 AND session_id=\\$2").
+					WithArgs(job.OrgID, job.SessionID).WillReturnError(pgx.ErrNoRows)
+			}
+			validator := &captureHandoffLifecycle{valid: !tt.unowned}
+			capture := &captureHandoffProbe{cause: codereviewsvc.ErrAssessmentReuseUnavailable, onCall: func(context.Context) {
+				require.NoError(t, mock.ExpectationsWereMet(), "phase transition must commit before assessment capture starts")
+			}}
+			syncs := 0
+			services := &Services{CodeReviewAssessmentsEnabled: tt.capture, CodeReviewInputCapture: capture, CodeReviewLifecycle: validator, PR: &stubPRService{syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error {
+				syncs++
+				require.NoError(t, mock.ExpectationsWereMet(), "phase transition must commit before GitHub synchronization starts")
+				return nil
+			}}}
+			stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(mock)}
+			_, _, err = prepareCodeReviewPreflight(context.Background(), stores, services, zerolog.Nop(), job, models.CodeReviewSessionMetadata{Phase: tt.phase})
+			if tt.want != nil {
+				require.ErrorIs(t, err, tt.want, "ownership and persistence errors must prevent provider work")
+				require.Equal(t, 0, syncs, "failed transition must not start GitHub synchronization")
+				require.Empty(t, capture.requests, "failed transition must not capture provider inputs")
+			} else {
+				require.NoError(t, err, "valid phase handoff must preserve existing preflight behavior")
+				require.Equal(t, 1, syncs, "preflight must retain its ordinary refresh")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "only preparing workspace should change phase, after ownership validation")
+		})
+	}
+}

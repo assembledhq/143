@@ -909,6 +909,8 @@ type Orchestrator struct {
 	sessionMessages            SessionMessageStore
 	sessionThreads             SessionThreadStore
 	codeReviewRoles            CodeReviewRoleResolver
+	packageCredentials         PackageRegistryCredentialResolver
+	packageSetupTrust          PackageSetupPullRequestTrust
 	sessionIssueLinks          SessionIssueLinkStore
 	issueSnapshots             SessionIssueSnapshotStore
 	projectTasks               ProjectTaskUpdater               // can be nil
@@ -1448,6 +1450,7 @@ type OrchestratorConfig struct {
 	HumanInputRequests         SessionHumanInputRequestStore
 	SessionMessages            SessionMessageStore
 	SessionThreads             SessionThreadStore
+	PackageCredentials         PackageRegistryCredentialResolver
 	CodeReviewRoles            CodeReviewRoleResolver // optional — nil retains full repository preparation
 	SessionIssueLinks          SessionIssueLinkStore
 	IssueSnapshots             SessionIssueSnapshotStore
@@ -1550,6 +1553,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		sessionMessages:            cfg.SessionMessages,
 		sessionThreads:             cfg.SessionThreads,
 		codeReviewRoles:            cfg.CodeReviewRoles,
+		packageCredentials:         cfg.PackageCredentials,
 		sessionIssueLinks:          cfg.SessionIssueLinks,
 		issueSnapshots:             cfg.IssueSnapshots,
 		projectTasks:               cfg.ProjectTasks,
@@ -1687,7 +1691,7 @@ func (o *Orchestrator) warmMentionIndexFromSandboxAsync(ctx context.Context, ses
 }
 
 func defaultSandboxPATH() string {
-	return "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	return DefaultSandboxPATH
 }
 
 func prependSandboxBinDir(env map[string]string, homeDir string) {
@@ -3825,7 +3829,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 				return fmt.Errorf("render automation turn prompt: %w", err)
 			}
 			input.UserMessage = rendered
-		} else if err := prepareSandboxRepositoryForSession(ctx, o.provider, run, sandbox, sandboxCfg.WorkDir, repositoryPreparationFull, log); err != nil {
+		} else if err := o.prepareSandboxRepositoryForSession(ctx, o.provider, run, sandbox, sandboxCfg.WorkDir, repositoryPreparationFull, log); err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("prepare repository: %s", err))
 			return fmt.Errorf("prepare repository: %w", err)
 		}
@@ -4437,6 +4441,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			HeadSHA:           opts.PRFeedback.HeadSHA,
 			WorkspaceMode:     models.PullRequestRepairWorkspaceMode(opts.PRFeedback.WorkspaceMode),
 		}
+	}
+	if prRepairOpts != nil {
+		ctx = context.WithValue(ctx, packageSetupPRIdentityKey{}, packageSetupPRIdentity{prRepairOpts.PullRequestNumber, prRepairOpts.HeadSHA})
 	}
 	prHeadReconstruction := prRepairOpts != nil && prRepairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction
 
@@ -5713,6 +5720,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	attachmentMessages := taskMessages
 	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, messageTurnNumber, attachmentMessages, log)
 	if reusedExisting || hasSnapshot {
+		if reusedExisting && session.Origin != models.SessionOriginCodeReview {
+			cfg, err := o.readPackageSetupConfig(ctx, sandbox, sandboxCfg.WorkDir)
+			if err != nil {
+				return err
+			}
+			packageSetup, err := o.preparePackageRegistryDependencies(ctx, session, sandbox, cfg)
+			if err != nil {
+				return err
+			}
+			if automationTurn != nil && packageSetup != "" {
+				fingerprint, err := o.automationTurnDependencyFingerprint(ctx, sandbox, cfg.Dependencies, sandboxCfg.Image)
+				if err != nil {
+					return err
+				}
+				automationTurn.applyDependencyFingerprint(fingerprint + ":npm:" + packageSetup)
+			}
+		}
 		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
 		// Cheap, and catches the case where the file was cleared or drifted
 		// while the container was idle (or where the preview created the
@@ -5752,7 +5776,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				if refreshedRole != "" {
 					preparationLog = log.With().Str("review_role", string(refreshedRole)).Logger()
 				}
-				if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
+				if err := o.prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
 					return fmt.Errorf("prepare repository: %w", err)
 				}
 			}
@@ -5925,7 +5949,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if refreshedRole != "" {
 				preparationLog = log.With().Str("review_role", string(refreshedRole)).Logger()
 			}
-			if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
+			if err := o.prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
 				return fmt.Errorf("prepare repository: %w", err)
 			}
 		}

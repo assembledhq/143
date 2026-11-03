@@ -587,6 +587,9 @@ func SlugForRepo(fullName string) string {
 	return slug
 }
 
+// DefaultSandboxPATH includes the tool directories installed in the sandbox image.
+const DefaultSandboxPATH = "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 // Sandbox represents a running isolated environment for agent execution.
 type Sandbox struct {
 	ID       string            // unique sandbox identifier (container ID, VM ID, etc.)

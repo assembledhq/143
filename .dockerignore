@@ -2,6 +2,9 @@
 .github
 .cache
 .tmp
+# Keep runner-specific builder configuration out of source layers.
+buildkitd.toml
+docker-container-buildkitd.toml
 .env
 .env.*
 !.env.example
