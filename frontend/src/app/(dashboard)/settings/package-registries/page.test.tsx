@@ -43,6 +43,26 @@ describe("PackageRegistriesPage", () => {
     expect(screen.queryByText("@example")).not.toBeInTheDocument();
     expect(requests).toEqual(["repo-1", "repo-2"]);
   });
+  it.each([
+    ["repositories", "Repositories could not be loaded", "*/api/v1/repositories"],
+    ["credentials", "Package credentials could not be loaded", "*/api/v1/repositories/:id/package-registry-credentials"],
+  ])("uses the standard error notice and retries failed %s requests", async (resource, message, url) => {
+    let attempts = 0;
+    server.use(http.get(url, () => {
+      attempts += 1;
+      if (attempts === 1) return HttpResponse.json({ error: { code: "UNAVAILABLE", message: "unavailable" } }, { status: 503 });
+      return HttpResponse.json(resource === "repositories"
+        ? { data: [{ id: "repo-1", full_name: "example/application" }], meta: {} }
+        : { data: [credential], meta: {} });
+    }));
+    renderWithProviders(<PackageRegistriesPage />);
+    const notice = await screen.findByRole("alert");
+    expect(notice).toHaveAttribute("data-slot", "error-notice");
+    expect(notice).toHaveTextContent(message);
+    await userEvent.click(within(notice).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(attempts).toBe(2));
+    expect(await screen.findByText(credential.registry_url)).toBeInTheDocument();
+  });
   it("creates with a password input, clears after success, and never caches the token", async () => {
     const bodies: unknown[] = [];
     server.use(http.post("*/api/v1/repositories/repo-1/package-registry-credentials", async ({ request }) => { bodies.push(await request.json()); return HttpResponse.json({ data: credential }, { status: 201 }); }));
