@@ -731,7 +731,8 @@ jobs:
     name: All Checks Pass
     needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test, deploy-config-test]
     runs-on: ubuntu-latest
-    if: always()
+    # Report dependency failures and skips, but let cancelled workflows stop.
+    if: ${{ !cancelled() }}
     steps:
       - name: Check all jobs passed
         run: |
