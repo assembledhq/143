@@ -158,6 +158,11 @@ jobs:
           # Lightweight jobs must not populate Backend Test's build cache.
           cache: false
 
+      - name: Set up Node for isolated npm setup tests
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Identify backend Go cache
         id: go-cache
         run: |

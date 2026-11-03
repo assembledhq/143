@@ -284,6 +284,17 @@ func (o *Orchestrator) prepareCodeReviewInputs(ctx context.Context, session *mod
 		if err != nil {
 			return nil, codeReviewInputAvailabilityError(prepareCtx, "load shared review input repository", err)
 		}
+		setupConfig, err := o.readPackageSetupConfig(prepareCtx, sandbox, sandbox.WorkDir)
+		if err != nil {
+			return nil, err
+		}
+		packageCtx := prepareCtx
+		if verifyOnly {
+			packageCtx = context.WithValue(prepareCtx, packageSetupVerifyOnlyKey{}, true)
+		}
+		if _, err := o.preparePackageRegistryDependencies(packageCtx, session, sandbox, setupConfig); err != nil {
+			return nil, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageDependencySetup, err)
+		}
 		if verifyExisting || verifyOnly {
 			exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, true)
 			if verifyOnly {
