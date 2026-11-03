@@ -424,7 +424,6 @@ func TestLifecycleCutoverBusyRetriesPreserveFailureExclusions(t *testing.T) {
 			t.Cleanup(cancel)
 			fixture := newCutoverUnitFixture()
 			mock.ExpectBeginTx(pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-			mock.ExpectQuery("SHOW transaction_isolation").WillReturnRows(pgxmock.NewRows([]string{"transaction_isolation"}).AddRow("read committed"))
 			mock.ExpectExec(expectedLifecycleSettings).WillReturnResult(pgxmock.NewResult("SELECT", 1))
 			expectLifecycleScopePolicy(mock)
 			mock.ExpectQuery(cutoverSharedSQL).WithArgs(fixture.key).WillReturnRows(cutoverLockRows().AddRow(false))

@@ -732,7 +732,7 @@ func TestSessionThreadStore_ClaimIdleForSessionClearsCancelRequestedAt(t *testin
 	now := time.Now()
 
 	mock.ExpectQuery("UPDATE session_threads[\\s\\S]*SET status = 'running',[\\s\\S]*cancel_requested_at = NULL").
-		WithArgs(anyArgs(5)...).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": threadID, "org_id": orgID, "session_id": sessionID, "max_running": models.MaxRunningThreadsPerSession, "claimable_statuses": []string{"idle"}}).
 		WillReturnRows(
 			pgxmock.NewRows(sessionThreadTestColumns).
 				AddRow(newSessionThreadRow(threadID, sessionID, orgID, "Backend", now)...),
@@ -850,7 +850,7 @@ func TestSessionThreadStore_ClaimIdleForSessionRejectsAtLimit(t *testing.T) {
 	// no rows. Carries 5 named args: id, org_id, session_id, max_running,
 	// claimable_statuses.
 	mock.ExpectQuery("UPDATE session_threads").
-		WithArgs(anyArgs(5)...).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": threadID, "org_id": orgID, "session_id": sessionID, "max_running": models.MaxRunningThreadsPerSession, "claimable_statuses": []string{"idle"}}).
 		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
 
 	// Second query: isAtRunningLimit re-inspects state outside the FOR UPDATE
@@ -891,7 +891,7 @@ func TestSessionThreadStore_ClaimIdleForSessionLocksSiblings(t *testing.T) {
 	// regression that drops the status check or reverses the cap inequality
 	// must not pass.
 	mock.ExpectQuery(`(?s)WITH locked_threads AS.*WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL.*FOR UPDATE.*target_claimable.*status\s*=\s*ANY\(@claimable_statuses\).*running_count.*id\s*<>\s*@id.*'pending',\s*'running',\s*'awaiting_input'.*eligible.*running_count\.n\s*<\s*@max_running.*UPDATE session_threads\s+SET status = 'running'.*archived_at IS NULL.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
-		WithArgs(anyArgs(5)...).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": threadID, "org_id": orgID, "session_id": sessionID, "max_running": models.MaxRunningThreadsPerSession, "claimable_statuses": []string{"idle"}}).
 		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
 
 	thread, err := store.ClaimIdleForSession(context.Background(), orgID, sessionID, threadID, models.MaxRunningThreadsPerSession)
@@ -924,7 +924,7 @@ func TestSessionThreadStore_ClaimForResumeInSession(t *testing.T) {
 	// and only fire when status is in the resumable set. The 5 named args mirror
 	// ClaimIdleForSession; claimable_statuses carries models.ResumableThreadStatuses.
 	mock.ExpectQuery(`(?s)WITH locked_threads AS.*WHERE org_id = @org_id AND session_id = @session_id AND archived_at IS NULL.*FOR UPDATE.*target_claimable.*status\s*=\s*ANY\(@claimable_statuses\).*UPDATE session_threads\s+SET status = 'running',\s+started_at = now\(\),\s+completed_at = NULL,\s+last_activity_at = now\(\),\s+cancel_requested_at = NULL.*archived_at IS NULL.*EXISTS\s*\(\s*SELECT 1 FROM eligible\s*\).*RETURNING`).
-		WithArgs(anyArgs(5)...).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": threadID, "org_id": orgID, "session_id": sessionID, "max_running": models.MaxRunningThreadsPerSession, "claimable_statuses": threadStatusStrings(models.ResumableThreadStatuses)}).
 		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns).AddRow(row...))
 
 	thread, err := store.ClaimForResumeInSession(context.Background(), orgID, sessionID, threadID, models.MaxRunningThreadsPerSession)
@@ -949,7 +949,7 @@ func TestSessionThreadStore_ClaimForResumeInSessionRejectsAtLimit(t *testing.T) 
 	// First query: the resume CTE finds no eligible row because the
 	// per-session running cap is full.
 	mock.ExpectQuery("UPDATE session_threads").
-		WithArgs(anyArgs(5)...).
+		WithArgs(pgx.QueryExecModeExec, pgx.NamedArgs{"id": threadID, "org_id": orgID, "session_id": sessionID, "max_running": models.MaxRunningThreadsPerSession, "claimable_statuses": threadStatusStrings(models.ResumableThreadStatuses)}).
 		WillReturnRows(pgxmock.NewRows(sessionThreadTestColumns))
 
 	// Second query: isAtRunningLimit re-inspects without the FOR UPDATE

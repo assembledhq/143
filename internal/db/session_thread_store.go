@@ -834,7 +834,7 @@ func (s *SessionThreadStore) claimForSessionMutationRow(ctx context.Context, con
 		  AND EXISTS (SELECT 1 FROM eligible)
 		RETURNING ` + sessionThreadSelectColumns
 
-	rows, err := conn.Query(ctx, query, pgx.NamedArgs{
+	rows, err := conn.Query(ctx, query, pgx.QueryExecModeExec, pgx.NamedArgs{
 		"id":                 args.threadID,
 		"org_id":             args.orgID,
 		"session_id":         args.sessionID,

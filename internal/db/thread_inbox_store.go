@@ -633,6 +633,22 @@ func (s *ThreadInboxStore) CountPendingBySession(ctx context.Context, orgID, ses
 	return count, nil
 }
 
+// CountPendingBySessionAndThread reads both admission counts from one snapshot.
+// The caller must hold the parent and lane locks before using them for a send.
+func (s *ThreadInboxStore) CountPendingBySessionAndThread(ctx context.Context, orgID, sessionID, threadID uuid.UUID) (int, int, error) {
+	var threadCount, sessionCount int
+	err := s.db.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM thread_inbox_entries WHERE org_id=$1 AND thread_id=$3
+		 AND delivery_state IN ('pending', 'delivering', 'delivered', 'unknown_delivery')),
+		(SELECT count(*) FROM thread_inbox_entries WHERE org_id=$1 AND session_id=$2
+		 AND delivery_state IN ('pending', 'delivering', 'delivered', 'unknown_delivery'))`, pgx.QueryExecModeExec, orgID, sessionID, threadID).
+		Scan(&threadCount, &sessionCount)
+	if err != nil {
+		return 0, 0, fmt.Errorf("count pending send inbox entries: %w", err)
+	}
+	return threadCount, sessionCount, nil
+}
+
 func (s *ThreadInboxStore) GetByClientMessageID(ctx context.Context, orgID, threadID uuid.UUID, clientMessageID string) (models.ThreadInboxEntry, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT `+threadInboxEntryColumns+`

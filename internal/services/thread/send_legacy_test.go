@@ -35,6 +35,7 @@ func TestRunSendUnitUnknownDiagnostics(t *testing.T) {
 		{name: "known exhausted contention", settlement: "contention", workFails: true, wantAttempts: 1},
 		{name: "failure before callback", settlement: "before callback"},
 		{name: "lost commit acknowledgement", settlement: "lost acknowledgement", wantUnknown: true, wantAttempts: 1},
+		{name: "zero abort proof is not authority", settlement: "invalid proof", wantUnknown: true, wantAttempts: 1},
 		{name: "joined settlement cannot prove rollback", settlement: "joined settlement", workFails: true, wantUnknown: true, wantAttempts: 1},
 		{name: "legacy uncertainty has no fabricated ingress", settlement: "lost acknowledgement", legacy: true, wantUnknown: true, wantAttempts: 1},
 	}
@@ -67,6 +68,8 @@ func TestRunSendUnitUnknownDiagnostics(t *testing.T) {
 					}
 					callbackError := work(unitCtx, nil)
 					switch tt.settlement {
+					case "invalid proof":
+						settlementError = &db.LifecycleTransactionAbortedError{}
 					case "contention":
 						settlementError = contention
 					case "lost acknowledgement":

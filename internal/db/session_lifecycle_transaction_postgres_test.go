@@ -529,3 +529,29 @@ func TestLifecycleTransactionFullSchemaPostgres(t *testing.T) {
 	require.NoError(t, err, "reload the actual session after outer commit")
 	require.Equal(t, models.SessionStatusFailed, actual.Status, "the outer commit alone should publish the composed store mutation")
 }
+
+func TestLifecycleTransactionPrecommitDeadlinePostgres(t *testing.T) {
+	t.Parallel()
+	pool, org, _, _ := newSessionLifecycleLockProbe(t)
+	calls := 0
+	err := RunLifecycleTransaction(context.Background(), pool, func(ctx context.Context, tx pgx.Tx) error {
+		calls++
+		if _, err := tx.Exec(ctx, "INSERT INTO probe_effects(org_id,label) VALUES($1,'before-timeout')", org); err != nil {
+			return err
+		}
+		queryCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer cancel()
+		_, err := tx.Exec(queryCtx, "SELECT pg_sleep(1)")
+		return err
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded, "wire cancellation must retain the actual deadline cause")
+	var aborted *LifecycleTransactionAbortedError
+	require.ErrorAs(t, err, &aborted, "a closed connection before COMMIT must report a known abort")
+	require.True(t, aborted.KnownAborted(), "only the runner can construct nonzero abort proof")
+	require.Equal(t, 1, calls, "failed cleanup cannot authorize automatic replay")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var count int
+	require.NoError(t, pool.QueryRow(ctx, "SELECT count(*) FROM probe_effects WHERE org_id=$1", org).Scan(&count), "independently inspect committed rows after cancellation")
+	require.Equal(t, 0, count, "the earlier staged write must roll back when the precommit connection closes")
+}

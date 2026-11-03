@@ -41,6 +41,7 @@ type LegacySendPersistence interface {
 	GetMessageByIDInTx(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, id int64) (models.SessionMessage, error)
 	CountPendingInboxByThreadInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (int, error)
 	CountPendingInboxBySessionInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (int, error)
+	CountPendingInboxInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, threadID uuid.UUID) (int, int, error)
 	GetActiveThreadRuntimeInTx(ctx context.Context, tx pgx.Tx, orgID, threadID uuid.UUID) (models.ThreadRuntime, error)
 	ClaimIdleThreadInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error)
 	ClaimResumeThreadInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, threadID uuid.UUID, maxRunning int) (models.SessionThread, db.ThreadClaimPersistenceEffects, error)
@@ -158,11 +159,14 @@ func (p *sqlLegacySendPersistence) RejectIfOwnedInTx(ctx context.Context, tx pgx
 	if err := p.validateTx(ctx, tx, orgID, sessionID); err != nil {
 		return err
 	}
-	store := db.NewSessionStore(tx)
-	if err := store.RejectIfCodeReviewOwned(ctx, orgID, sessionID); err != nil {
-		return err
+	return db.NewSessionStore(tx).RejectIfSendOwned(ctx, orgID, sessionID)
+}
+
+func (p *sqlLegacySendPersistence) CountPendingInboxInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID, threadID uuid.UUID) (int, int, error) {
+	if err := p.validateTx(ctx, tx, orgID, sessionID, threadID); err != nil {
+		return 0, 0, err
 	}
-	return store.RejectIfAutomationOwned(ctx, orgID, sessionID)
+	return db.NewThreadInboxStore(tx).CountPendingBySessionAndThread(ctx, orgID, sessionID, threadID)
 }
 
 func (p *sqlLegacySendPersistence) GetSessionInTx(ctx context.Context, tx pgx.Tx, orgID, sessionID uuid.UUID) (models.Session, error) {

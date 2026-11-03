@@ -490,3 +490,37 @@ func threadInboxSummaryTestColumns() []string {
 		"last_accepted_at", "last_delivered_at", "last_acked_at", "last_error",
 	}
 }
+
+func TestThreadInboxStore_CountPendingBySessionAndThread(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		thread, session int
+		failure         bool
+	}{
+		{name: "empty"}, {name: "both limits", thread: 10, session: 25}, {name: "read failure", failure: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create isolated counts mock")
+			t.Cleanup(mock.Close)
+			org, session, thread := uuid.New(), uuid.New(), uuid.New()
+			query := mock.ExpectQuery(`(?s)SELECT.*count\(\*\).*WHERE org_id=\$1 AND thread_id=\$3.*'pending', 'delivering', 'delivered', 'unknown_delivery'.*count\(\*\).*WHERE org_id=\$1 AND session_id=\$2.*'pending', 'delivering', 'delivered', 'unknown_delivery'`).WithArgs(pgx.QueryExecModeExec, org, session, thread)
+			if tt.failure {
+				query.WillReturnError(context.Canceled)
+			} else {
+				query.WillReturnRows(pgxmock.NewRows([]string{"thread_count", "session_count"}).AddRow(tt.thread, tt.session))
+			}
+			threadCount, sessionCount, err := NewThreadInboxStore(mock).CountPendingBySessionAndThread(context.Background(), org, session, thread)
+			if tt.failure {
+				require.ErrorIs(t, err, context.Canceled, "counts must not hide query failure")
+			} else {
+				require.NoError(t, err, "both counts must be available in one statement")
+			}
+			require.Equal(t, []int{tt.thread, tt.session}, []int{threadCount, sessionCount}, "counts must preserve per-thread and per-session order")
+			require.NoError(t, mock.ExpectationsWereMet(), "backpressure must use one tenant-scoped statement")
+		})
+	}
+}

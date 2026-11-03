@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -137,6 +138,48 @@ func TestThreadSendTransactionsRejectsBeforeAcquisition(t *testing.T) {
 				require.EqualError(t, actual, expected.Error(), "the sealed wrapper must delegate the exact existing lifecycle transaction policy rather than duplicate or replace it")
 				require.Equal(t, 0, calls, "comparing the existing validation path must still require no network or callback execution")
 			}
+		})
+	}
+}
+
+func TestSendPolicyObservationBoundToLiveTransaction(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                   string
+		other, ended, canceled bool
+	}{
+		{name: "same live transaction"}, {name: "different transaction", other: true},
+		{name: "ended callback", ended: true}, {name: "canceled context", canceled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tx, ctx := newLifecycleScopeMock(t)
+			other, err := pgxmock.NewPool()
+			require.NoError(t, err, "create unrelated transaction")
+			t.Cleanup(other.Close)
+			policy := &threadSendTransactionPolicy{tx: tx}
+			policy.live.Store(!tt.ended)
+			if tt.other {
+				policy.tx = other
+			}
+			ctx = context.WithValue(ctx, threadSendTransactionPolicyKey{}, policy)
+			if tt.canceled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			if tt.other || tt.ended {
+				expectLifecycleScopePolicy(tx)
+			}
+			err = requireLifecycleScopeTransactionInTx(ctx, tx)
+			if tt.canceled {
+				require.ErrorIs(t, err, context.Canceled, "cached policy cannot outlive its deadline")
+			} else {
+				require.NoError(t, err, "a supplied transaction must verify its own policy")
+			}
+			require.NoError(t, tx.ExpectationsWereMet(), "only the same live owner may omit policy SQL")
+			require.NoError(t, other.ExpectationsWereMet(), "policy lookup cannot switch to another transaction")
 		})
 	}
 }

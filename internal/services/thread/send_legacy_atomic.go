@@ -47,8 +47,8 @@ func (s *Service) sendLegacyMessage(ctx context.Context, input SendMessageInput,
 		return nil, ErrReviewCommentsNotConfigured
 	}
 
-	attempt, err := s.runLegacySendUnit(ctx, input.OrgID, input.SessionID, input.ThreadID, func(unitCtx context.Context, tx pgx.Tx) (legacySendAttempt, error) {
-		return s.writeLegacySendInTx(unitCtx, tx, input, holder)
+	attempt, err := s.runLegacySendUnit(ctx, input.OrgID, input.SessionID, input.ThreadID, func(unitCtx context.Context, tx pgx.Tx, snapshot db.LegacyThreadSendSnapshot) (legacySendAttempt, error) {
+		return s.writeLegacySendInTx(unitCtx, tx, input, holder, snapshot)
 	})
 	if err != nil {
 		return nil, err
@@ -74,7 +74,7 @@ func (s *Service) sendLegacyMessage(ctx context.Context, input SendMessageInput,
 	return attempt.result, nil
 }
 
-func (s *Service) writeLegacySendInTx(ctx context.Context, tx pgx.Tx, input SendMessageInput, holder *uuid.UUID) (legacySendAttempt, error) {
+func (s *Service) writeLegacySendInTx(ctx context.Context, tx pgx.Tx, input SendMessageInput, holder *uuid.UUID, snapshot db.LegacyThreadSendSnapshot) (legacySendAttempt, error) {
 	if err := s.validateLegacyCallerStamp(input); err != nil {
 		return legacySendAttempt{}, err
 	}
@@ -95,7 +95,7 @@ func (s *Service) writeLegacySendInTx(ctx context.Context, tx pgx.Tx, input Send
 	if err := s.validateLegacyInboxAdmissionInTx(ctx, tx, input); err != nil {
 		return legacySendAttempt{}, err
 	}
-	thread, preClaimStatus, outcome, claim, err := s.claimLegacyThreadInTx(ctx, tx, input)
+	thread, preClaimStatus, outcome, claim, err := s.claimLegacyThreadInTx(ctx, tx, input, snapshot)
 	if err != nil {
 		return legacySendAttempt{}, err
 	}
@@ -104,7 +104,7 @@ func (s *Service) writeLegacySendInTx(ctx context.Context, tx pgx.Tx, input Send
 	var claimedSession models.Session
 	var preClaimSessionStatus models.SessionStatus
 	if !queued {
-		claimedSession, preClaimSessionStatus, err = s.claimLegacySessionInTx(ctx, tx, input)
+		claimedSession, preClaimSessionStatus, err = s.claimLegacySessionInTx(ctx, tx, input, snapshot)
 		if err != nil {
 			return legacySendAttempt{}, err
 		}
@@ -187,17 +187,52 @@ func (s *Service) writeLegacySendInTx(ctx context.Context, tx pgx.Tx, input Send
 	return attempt, nil
 }
 
-func (s *Service) claimLegacyThreadInTx(ctx context.Context, tx pgx.Tx, input SendMessageInput) (models.SessionThread, models.ThreadStatus, threadClaimOutcome, db.ThreadClaimPersistenceEffects, error) {
-	thread, effects, err := s.send.Legacy.ClaimIdleThreadInTx(ctx, tx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
-	if err == nil {
-		if _, err := visibleThreadInSession(thread, input.SessionID); err != nil {
-			return models.SessionThread{}, "", 0, db.ThreadClaimPersistenceEffects{}, err
-		}
-		return thread, models.ThreadStatusIdle, threadClaimClaimed, effects, nil
+func (s *Service) claimLegacyThreadInTx(ctx context.Context, tx pgx.Tx, input SendMessageInput, snapshot db.LegacyThreadSendSnapshot) (models.SessionThread, models.ThreadStatus, threadClaimOutcome, db.ThreadClaimPersistenceEffects, error) {
+	if snapshot.ThreadArchived {
+		return models.SessionThread{}, "", 0, db.ThreadClaimPersistenceEffects{}, ErrThreadNotFound
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	status := snapshot.ThreadStatus
+	outcome := threadClaimClaimed
+	if threadStatusCanQueue(status) {
+		if len(input.ResolveReviewCommentIDs) > 0 {
+			return models.SessionThread{}, "", 0, db.ThreadClaimPersistenceEffects{}, ErrThreadNotIdle
+		}
+		outcome = threadClaimQueueMidTurn
+	} else if status != models.ThreadStatusIdle && !threadStatusIsResumable(status) {
+		return models.SessionThread{}, "", 0, db.ThreadClaimPersistenceEffects{}, ErrThreadNotIdle
+	} else if snapshot.ActiveSiblings >= models.MaxRunningThreadsPerSession {
+		outcome = threadClaimQueueLimitReached
+	}
+	if outcome != threadClaimClaimed {
+		existing, err := s.send.Legacy.GetThreadInTx(ctx, tx, input.OrgID, input.ThreadID)
+		if err != nil {
+			return models.SessionThread{}, "", 0, db.ThreadClaimPersistenceEffects{}, &legacySendDomainError{domain: ErrThreadNotFound, cause: err}
+		}
+		existing, err = visibleThreadInSession(existing, input.SessionID)
+		return existing, status, outcome, db.ThreadClaimPersistenceEffects{}, err
+	}
+	var thread models.SessionThread
+	var effects db.ThreadClaimPersistenceEffects
+	var err error
+	if status == models.ThreadStatusIdle {
+		thread, effects, err = s.send.Legacy.ClaimIdleThreadInTx(ctx, tx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
+	} else {
+		thread, effects, err = s.send.Legacy.ClaimResumeThreadInTx(ctx, tx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return s.classifyLegacyThreadClaimMissInTx(ctx, tx, input)
+	}
+	if err != nil {
 		return models.SessionThread{}, "", 0, db.ThreadClaimPersistenceEffects{}, err
 	}
+	thread, err = visibleThreadInSession(thread, input.SessionID)
+	return thread, status, threadClaimClaimed, effects, err
+}
+
+// classifyLegacyThreadClaimMissInTx preserves the defensive miss handling for
+// rejected claim predicates. Normal branch selection uses the locked snapshot,
+// so successful resumed and queued sends never pay for speculative claims.
+func (s *Service) classifyLegacyThreadClaimMissInTx(ctx context.Context, tx pgx.Tx, input SendMessageInput) (models.SessionThread, models.ThreadStatus, threadClaimOutcome, db.ThreadClaimPersistenceEffects, error) {
 	existing, err := s.send.Legacy.GetThreadInTx(ctx, tx, input.OrgID, input.ThreadID)
 	if err != nil {
 		return models.SessionThread{}, "", 0, db.ThreadClaimPersistenceEffects{}, &legacySendDomainError{domain: ErrThreadNotFound, cause: err}
@@ -227,7 +262,7 @@ func (s *Service) claimLegacyThreadInTx(ctx context.Context, tx pgx.Tx, input Se
 	if !threadStatusIsResumable(existing.Status) {
 		return models.SessionThread{}, "", 0, db.ThreadClaimPersistenceEffects{}, ErrThreadNotIdle
 	}
-	thread, effects, err = s.send.Legacy.ClaimResumeThreadInTx(ctx, tx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
+	thread, effects, err := s.send.Legacy.ClaimResumeThreadInTx(ctx, tx, input.OrgID, input.SessionID, input.ThreadID, models.MaxRunningThreadsPerSession)
 	if err == nil {
 		return thread, existing.Status, threadClaimClaimed, effects, nil
 	}
@@ -248,17 +283,32 @@ func (s *Service) claimLegacyThreadInTx(ctx context.Context, tx pgx.Tx, input Se
 	return models.SessionThread{}, "", 0, db.ThreadClaimPersistenceEffects{}, ErrThreadNotIdle
 }
 
-func (s *Service) claimLegacySessionInTx(ctx context.Context, tx pgx.Tx, input SendMessageInput) (models.Session, models.SessionStatus, error) {
-	claimed, err := s.send.Legacy.ClaimIdleSessionInTx(ctx, tx, input.OrgID, input.SessionID)
+func (s *Service) claimLegacySessionInTx(ctx context.Context, tx pgx.Tx, input SendMessageInput, snapshot db.LegacyThreadSendSnapshot) (models.Session, models.SessionStatus, error) {
+	// A hidden parent must still follow the visibility-filtered reader. The raw
+	// lock observation is never authorization to resume a deleted session.
+	if snapshot.SessionDeleted {
+		return models.Session{}, "", &legacySendDomainError{domain: ErrSessionNotFound, cause: pgx.ErrNoRows}
+	}
+	if snapshot.SessionStatus == models.SessionStatusRunning {
+		existing, err := s.send.Legacy.GetSessionInTx(ctx, tx, input.OrgID, input.SessionID)
+		return existing, "", err
+	}
+	var claimed models.Session
+	var err error
+	if snapshot.SessionStatus == models.SessionStatusIdle {
+		claimed, err = s.send.Legacy.ClaimIdleSessionInTx(ctx, tx, input.OrgID, input.SessionID)
+	} else {
+		claimed, err = s.send.Legacy.ClaimResumeSessionInTx(ctx, tx, input.OrgID, input.SessionID)
+	}
 	if err == nil {
-		return claimed, models.SessionStatusIdle, nil
+		return claimed, snapshot.SessionStatus, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return models.Session{}, "", err
 	}
-	existing, err := s.send.Legacy.GetSessionInTx(ctx, tx, input.OrgID, input.SessionID)
-	if err != nil {
-		return models.Session{}, "", fmt.Errorf("inspect session for claim fallback: %w", err)
+	existing, readErr := s.send.Legacy.GetSessionInTx(ctx, tx, input.OrgID, input.SessionID)
+	if readErr != nil {
+		return models.Session{}, "", fmt.Errorf("inspect session for claim fallback: %w", readErr)
 	}
 	if existing.Status == models.SessionStatusRunning {
 		return existing, "", nil
@@ -266,11 +316,14 @@ func (s *Service) claimLegacySessionInTx(ctx context.Context, tx pgx.Tx, input S
 	if existing.SandboxState == models.SandboxStateDestroyed {
 		return models.Session{}, "", ErrSessionSnapshotExpired
 	}
-	resumed, err := s.send.Legacy.ClaimResumeSessionInTx(ctx, tx, input.OrgID, input.SessionID)
-	if err != nil {
-		return models.Session{}, "", &legacySendDomainError{domain: ErrSessionNotResumable, cause: err}
+	if snapshot.SessionStatus == models.SessionStatusIdle {
+		resumed, resumeErr := s.send.Legacy.ClaimResumeSessionInTx(ctx, tx, input.OrgID, input.SessionID)
+		if resumeErr != nil {
+			return models.Session{}, "", &legacySendDomainError{domain: ErrSessionNotResumable, cause: resumeErr}
+		}
+		return resumed, existing.Status, nil
 	}
-	return resumed, existing.Status, nil
+	return models.Session{}, "", &legacySendDomainError{domain: ErrSessionNotResumable, cause: err}
 }
 
 func (s *Service) createLegacyMessageInTx(ctx context.Context, tx pgx.Tx, message *models.SessionMessage, input SendMessageInput, claimedSession models.Session, answerQuestion, answerHumanInput, incrementPending bool) (legacyMessageWrites, error) {
@@ -355,16 +408,12 @@ func (s *Service) validateLegacyInboxAdmissionInTx(ctx context.Context, tx pgx.T
 	if s.inboxStore == nil {
 		return nil
 	}
-	threadCount, err := s.send.Legacy.CountPendingInboxByThreadInTx(ctx, tx, input.OrgID, input.ThreadID)
+	threadCount, sessionCount, err := s.send.Legacy.CountPendingInboxInTx(ctx, tx, input.OrgID, input.SessionID, input.ThreadID)
 	if err != nil {
-		return fmt.Errorf("count pending thread inbox entries: %w", err)
+		return fmt.Errorf("count pending send inbox entries: %w", err)
 	}
 	if threadCount >= maxThreadInboxPending {
 		return fmt.Errorf("%w: thread has %d undelivered messages", ErrThreadInboxBackpressure, threadCount)
-	}
-	sessionCount, err := s.send.Legacy.CountPendingInboxBySessionInTx(ctx, tx, input.OrgID, input.SessionID)
-	if err != nil {
-		return fmt.Errorf("count pending session inbox entries: %w", err)
 	}
 	if sessionCount >= maxSessionInboxPending {
 		return fmt.Errorf("%w: session has %d undelivered messages", ErrThreadInboxBackpressure, sessionCount)

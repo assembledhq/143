@@ -54,7 +54,7 @@ func TestLegacyThreadSendScopeFullSchemaPostgresLocksAndComposition(t *testing.T
 				}
 			}
 			require.NoError(t, RequireLegacyThreadSendScopeInTx(ctx, tx, f.orgID, f.sessionID, f.targetID), "the legacy guard must lock raw exact scope without deciding visibility, status, claim capacity or admission")
-			require.Equal(t, threadSendScopeTrace{modeReads: 1, parentReads: 1, discoveryReads: 1, laneBatches: 1, steps: []string{"mode", "parent", "discovery", "lanes"}, laneIDs: f.selected}, tx.trace(), "one fresh mode observation must precede parent-first discovery and one complete sorted lane batch")
+			require.Equal(t, threadSendScopeTrace{modeReads: 1, parentReads: 1, discoveryReads: 1, laneBatches: 1, steps: []string{"mode", "parent", "discovery"}}, tx.trace(), "one fresh mode observation must precede parent-first discovery and one complete sorted lane batch")
 			require.Equal(t, before, lifecycleProtocolRows(t, ctx, owner, f.orgID, f.sessionID), "successful locking alone must not change any parent, cutover, visible lane or retained hidden-lane field")
 			probeThreadSendCutoverExclusive(t, ctx, f, false)
 			probeLifecycleScopeRowLock(t, ctx, f.pool, f.orgID, f.sessionID, nil, true)
@@ -125,12 +125,12 @@ func TestLegacyThreadSendScopeFullSchemaPostgresRejectsForeignOrMissingLane(t *t
 			tx := newThreadSendScopeObservedTx(owner)
 			err := RequireLegacyThreadSendScopeInTx(ctx, tx, f.orgID, f.sessionID, requestedID)
 			require.ErrorIs(t, err, pgx.ErrNoRows, "an absent exact scoped target must fail without substituting the primary lane or querying a foreign scope")
-			require.Equal(t, threadSendScopeTrace{modeReads: 1, parentReads: 1, discoveryReads: 1, steps: []string{"mode", "parent", "discovery"}}, tx.trace(), "a missing scoped target must be rejected before any lane batch is locked")
+			require.Equal(t, threadSendScopeTrace{modeReads: 1, parentReads: 1, discoveryReads: 1, laneBatches: 1, steps: []string{"mode", "parent", "discovery"}}, tx.trace(), "a missing scoped target must be rejected after bounded scoped acquisition without a foreign-row lock")
 			require.Equal(t, before, lifecycleProtocolRows(t, ctx, owner, f.orgID, f.sessionID), "scope rejection must leave every raw local row unchanged while the parent lock remains owned")
 			probeThreadSendCutoverExclusive(t, ctx, f, false)
 			probeLifecycleScopeRowLock(t, ctx, f.pool, f.orgID, f.sessionID, nil, true)
 			for _, id := range f.selected {
-				probeLifecycleScopeRowLock(t, ctx, f.pool, f.orgID, f.sessionID, &id, false)
+				probeLifecycleScopeRowLock(t, ctx, f.pool, f.orgID, f.sessionID, &id, true)
 			}
 			if otherSessionID != uuid.Nil {
 				probeLifecycleScopeRowLock(t, ctx, f.pool, otherOrgID, otherSessionID, &requestedID, false)
@@ -316,14 +316,15 @@ func (tx *threadSendScopeObservedTx) Query(ctx context.Context, sql string, args
 	if sql == lifecycleThreadScopeLockQuery {
 		tx.steps = append(tx.steps, "lanes")
 	}
-	if sql == threadSendVisibleLaneKeysQuery {
+	if sql == threadSendVisibleLaneLockQuery {
+		tx.laneQueries++
 		tx.discoveryReads++
 		tx.steps = append(tx.steps, "discovery")
 		if tx.beforeDiscovery != nil {
 			tx.beforeDiscovery()
 		}
 	}
-	return tx.lifecycleScopeConcurrencyTx.Query(ctx, sql, args...)
+	return tx.lifecycleScopeConcurrencyTx.Tx.Query(ctx, sql, args...)
 }
 
 func (tx *threadSendScopeObservedTx) trace() threadSendScopeTrace {

@@ -225,7 +225,7 @@ func TestLockLifecycleScopeInTxReturnsExactRawScope(t *testing.T) {
 				}
 			}
 			expectLifecycleScopePolicy(mock)
-			mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(fixture.orgID, fixture.sessionID).
+			mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(pgx.QueryExecModeExec, fixture.orgID, fixture.sessionID).
 				WillReturnRows(lifecycleScopeSessionRows(fixture.session))
 			if len(want.threads) != 0 {
 				ids := make([]uuid.UUID, len(want.threads))
@@ -276,7 +276,7 @@ func TestLockLifecycleScopeInTxFailuresDiscardAllSnapshots(t *testing.T) {
 			fixture := newLifecycleScopeMockFixture()
 			queryErr := errors.New("scope row lookup unavailable")
 			expectLifecycleScopePolicy(mock)
-			parentQuery := mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(fixture.orgID, fixture.sessionID)
+			parentQuery := mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(pgx.QueryExecModeExec, fixture.orgID, fixture.sessionID)
 			parentRows := lifecycleScopeSessionRows(fixture.session)
 			switch tt.stage {
 			case "parent query":
@@ -344,7 +344,7 @@ func TestLockLifecycleScopeInTxLeavesCallerTransactionOpen(t *testing.T) {
 	tx, err := mock.Begin(ctx)
 	require.NoError(t, err, "caller should own the transaction before requesting its locks")
 	expectLifecycleScopePolicy(mock)
-	mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(fixture.orgID, fixture.sessionID).
+	mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(pgx.QueryExecModeExec, fixture.orgID, fixture.sessionID).
 		WillReturnRows(lifecycleScopeSessionRows(fixture.session))
 	mock.ExpectExec("SELECT 42").WillReturnResult(pgxmock.NewResult("SELECT", 1))
 	mock.ExpectRollback()
@@ -376,7 +376,7 @@ func TestLockLifecycleScopeInTxCancellationDiscardsReadSnapshots(t *testing.T) {
 			fixture := newLifecycleScopeMockFixture()
 			expectLifecycleScopePolicy(mock)
 			if tt.query != lifecycleTransactionPolicyQuery {
-				mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(fixture.orgID, fixture.sessionID).
+				mock.ExpectQuery(lifecycleSessionScopeLockQuery).WithArgs(pgx.QueryExecModeExec, fixture.orgID, fixture.sessionID).
 					WillReturnRows(lifecycleScopeSessionRows(fixture.session))
 			}
 			if tt.query == lifecycleThreadScopeLockQuery {
