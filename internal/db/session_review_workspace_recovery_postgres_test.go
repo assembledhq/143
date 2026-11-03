@@ -90,8 +90,7 @@ func newIncompleteReviewWorkspaceFixture(t *testing.T) incompleteReviewWorkspace
 	t.Helper()
 	f := incompleteReviewWorkspaceFixture{reviewWorkspaceFixture: newReviewWorkspaceFixture(t), ownerExecutor: uuid.New(), ownerRuntime: uuid.New(), ownerThread: uuid.New()}
 	ctx := context.Background()
-	_, err := f.pool.Exec(ctx, `ALTER TABLE jobs ADD COLUMN run_at timestamptz,ADD COLUMN last_error text;
- CREATE TABLE session_threads(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL REFERENCES sessions(id),
+	_, err := f.pool.Exec(ctx, `CREATE TABLE session_threads(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL REFERENCES sessions(id),
  status text NOT NULL,current_turn int NOT NULL DEFAULT 0,execution_mode text NOT NULL DEFAULT 'work',
  filesystem_mode text NOT NULL DEFAULT 'read_write',created_by_source text NOT NULL DEFAULT 'user',
  cancel_requested_at timestamptz,archived_at timestamptz);
