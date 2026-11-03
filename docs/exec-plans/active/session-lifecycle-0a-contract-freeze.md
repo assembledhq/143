@@ -31,12 +31,19 @@ Consumer states have one canonical encoding per phase. `none` has neither
 consumer pointer or allocation. `job` has only its exact job, no runtime or
 allocation. `runtime` requires both exact job and runtime plus immutable
 allocation evidence for that same tenant/lane and containing this dispatch ID.
+The runtime stores its own `allocation_expected_turn` alongside the allocation
+digest and input set. Current claim turns and mutable parent turns cannot
+substitute for that immutable recorded attempt turn.
 The two runtime-phase pointers identify one logical consumer, not two. Threadless
 execution needs a separate explicitly defined session-executor variant; it cannot
 masquerade as a lane runtime. The transition from job-only to its allocated runtime
 never changes the input set or makes the prior allocation disposable.
 Replacement is a later explicit reclaim/replay operation, never an input-set
 setter; it preserves every prior allocation and possible-acceptance receipt.
+
+An own-consumer exception verifies the actual request's tenant, session and lane,
+not just its stored request ID. Current job/runtime lease checks use fresh database
+statement time; application clocks cannot establish current lease authority.
 
 Current execution and historical own-result settlement have different sealed
 input types. Historical allocation does not imply a current lease or current
@@ -95,6 +102,58 @@ and their jobs/runtimes. That owner deletes resolved dependent receipts first,
 then dispatch/control references, then otherwise eligible jobs/runtimes. This
 freeze does not add an unbounded deletion worker or silently relax an FK.
 
+A.2's preparation representation has one current
+`session_runtime_start_preparations` row per `(org_id,job_id)`. It retains the
+fixed input set and recorded epochs, current preparation/claim tokens, exact
+target and resume-identity snapshots, and a separate physical-operation slot.
+Execution state is `preparing`, `authorized` or `closed`. Physical state is
+`none`, `reserved`, `in_progress`, `unknown`, `settled` or `fenced_drained`.
+Closing execution or revoking its token preserves unresolved operation identity
+and its restore-source association, including after the job becomes terminal.
+The scope/due/source indexes include unresolved physical work after closure.
+Whole-session physical scope conflicts with every lane; B/E must validate that a
+`target_only` operation cannot mutate shared workspace resources before using
+that narrower scope. A missing source projection cannot prove an object unused.
+
+The current whole-workspace recovery slot lives on `sessions` as
+`workspace_recovery_id`, `workspace_recovery_token`, `workspace_recovery` and
+`workspace_recovery_next_attempt_at`. Its versioned envelope retains the recorded
+session epoch, complete reservation spec, finite execution/physical disposition
+and physical observation. It cannot carry a lane fence. Any present slot blocks
+workspace execution until its owner releases it; deadlines and revoked execution
+do not release physical exclusion. The passive retention guard has no clear or
+replacement path. F must install the exact immutable accepted/outcome/isolation
+receipt check before adding conditional release. This current slot does not
+replace F's durable recovery history. Its identity and due indexes are built by
+separate concurrent migrations, not while the column installer holds the parent
+lock. F must verify both indexes are valid before installing its first writer.
+
+These SQL checks establish shape and retention. B/E/F must decode full typed
+targets and observations and verify authoritative settlement at their locked
+writer seams. A parsed JSON object or a stored settled label supplies no host
+proof or provider-start permission.
+
+The retained dispatch control uses an explicit `schema_version=1` snapshot.
+It repeats the scalar receipt, version, state, due time and optional refund
+reference; retains the complete dedicated answer/denial binding and logical
+claim token/turn; and captures the exact resume identity, selected target and
+historical resumability outcome. Its full job-payload digest hashes the actual
+PostgreSQL `payload::text` representation, not a decoded and re-encoded map.
+That digest is distinct from the input dispatch digest. Finite no-launch and
+delivery-uncertain variants retain receipt/revocation/allocation references;
+decoding those references establishes no physical or no-launch proof.
+
+Control validity does not expire with an execution lease, preparation row or
+target observation. Row matching compares the complete actual dispatch/job
+association and requires an `awaiting_control` job to be parked with all lease
+and completion slots clear. The mirrored due time is captured at UTC microsecond
+precision before persisting snapshot and scalar; stored version-1 JSON with
+sub-microsecond due precision is refused. Checkpoint publication times are not
+normalized by this rule. The later E writers still own current actor and
+generation eligibility, revocation, the shared claim-keyed refund CAS and the
+ALL-allocation possible-acceptance check. A matching parked logical consumer
+does not grant execution or remove its competing-control exclusion.
+
 ## Retained activation provenance and the common fixture
 
 G.1 owns the protocol core before the first production router. Reuse the parent
@@ -151,26 +210,45 @@ and a shape-valid replacement still proves no provider conformance or target aut
 Bulk maintenance also retains provenance. TRUNCATE takes nonwaiting SHARE locks
 on both evidence tables before its fresh READ COMMITTED assertion, including the
 table other than its target. A relation-lock conflict remains a real PostgreSQL
-lock error, without the advisory-busy label. Each down migration locks both
-evidence tables with a bounded acquisition before checking for positive/active
-evidence and removing guards in that same transaction. REPEATABLE READ and
+lock error, without the advisory-busy label. Guarded column/table removals and
+the preflight before concurrent index removal lock both evidence tables with a
+bounded acquisition before checking for positive/active evidence. The
+column/table guards remove their schema in that same transaction; standalone
+concurrent index steps cannot retain those locks. REPEATABLE READ and
 SERIALIZABLE are rejected because an old transaction snapshot cannot establish
 that activation evidence is absent.
 
 An inactive rollback still requires withdrawing readers and inhibiting activation.
+It must also inhibit and naturally drain lifecycle, recovery and relevant
+operator writers before preflight, and keep them inhibited throughout the
+separate concurrent index-removal phase, including any failure, interruption or
+partial rollback until forward repair. Re-enable them only after verifying the
+restored supported floor. H owns and must test this durable maintenance
+inhibition; preflight success alone does not establish it. Before the first
+such down migration, a fresh bounded-lock
+preflight refuses positive protocol stamps, retained recovery/preparation,
+dispatch/runtime bindings and parked or unresolved resource jobs. Its locks end
+with the preflight transaction; it is not a cross-migration inhibition mechanism.
 The future H controller must acquire schema-protecting relation locks and then
-freshly validate its required installed schema/guard floor before normalization
-or stamping. An activator waiting behind a successful down migration must fail
-that post-lock validation. The retention core supplies no activation controller
+freshly validate its required installed schema/guard/index floor before
+normalization or stamping. An activator waiting behind a successful down
+migration must fail that post-lock validation. The retention core supplies no
+activation controller
 and does not prove this later H integration gate. Once positive/active evidence
 exists, these down migrations refuse removal rather than reopening legacy mode.
 
 H must bound the distinct scope locks held by each bulk statement and measure
 shared lock-table pressure and forward progress. Row-level advisory acquisition
 does not provide an unbounded bulk-operation guarantee. H must also measure the
-rollback availability window: the retained-evidence check can scan the session
-table while the rollback holds exclusive relation locks. Neither capacity nor a
-table-size-independent rollback duration is established by this component.
+rollback availability window: the first index-removal preflight (380 down)
+can scan both sessions and retained jobs while holding exclusive locks on six
+evidence tables. Its combined parked/resource-job predicate is not covered by
+the admission lookup's partial index. Later retained-evidence checks can scan
+sessions, and migration 356's resource-job-kind absence check can scan retained
+jobs under exclusive relation locks too. Migration 352 restores the legacy
+status check without validation; 351 down validates it in a separate weaker-lock
+transaction. Neither capacity nor a table-size-independent rollback duration is
+established by this component.
 
 The decision matrix also fixes these error boundaries: missing exact parent is
 not-found, while a soft-deleted parent still retains provenance and is not hidden
@@ -212,9 +290,63 @@ invariants after validating durable release/normalization/provider evidence.
 - A.1: prove the actual ordinary non-answer `SendMessage` call-through for both
   versions, compatible legacy ordering/boundaries, atomic new admission,
   replay/conflict/rollback, sibling independence and capacity/wait outcomes.
+  Sibling admission checks lane scope, nonterminal session-wide/legacy consumers
+  and exclusive reservations; any recovery slot or unresolved whole-session
+  physical operation blocks it. A sibling's pending job or request certificate
+  cannot veto another lane. Ordinary input binds no workspace target and reads
+  no availability, generation, snapshot or holder-liveness fact as permission.
+  Physical availability is mandatory at B.2/E.1 runtime start, so a bound job may
+  defer before launch. Answer admission separately retains C.2's own-request
+  Ready requirement. The supported three-slot concurrency is unchanged.
 
 Whole-root conversion, answer admission, provider starts, full status-site joins,
 activation and production acceptance are not established by these component exits.
+
+G's remaining child-table guard exit must also cover bulk `TRUNCATE ... CASCADE`
+of jobs, dispatches and runtimes. The provenance and preparation/recovery guards
+installed so far are not complete child-evidence protection: without that later
+guard, a cascade can erase parked jobs, bound controls and allocation rows. The
+legacy inactive-fixture reset test proves only the preparation/recovery retention
+boundary. It is not evidence that maintenance of an active scope is safe. H must
+require this child-table guard coverage before any activation.
+
+The private lifecycle enqueue path requires concrete `run_at` and `max_attempts`
+options frozen with its command. Exact replay compares both values; omitted
+options cannot act as wildcards. Legacy enqueue retains its database defaults.
+
+Consumer discovery also bounds scope-key reads and exact generation probes.
+It observes archived lanes and retained generations without treating those keys
+as ownership proof. At most 32 retained target/generation pairs are probed in
+one operation, within the existing transaction budget. More pairs return
+discovery-incomplete before a partial clear result is possible. This is a
+conservative availability limit, not a complete census above that size. Indexed
+scope probes constrain logical membership. The separate legacy-job
+lookup first selects an ordered, capped set of IDs using a concurrent partial
+index on `(eligible_tenant,id)`. The expression `eligible_tenant` equals `org_id`
+only for `run_agent` and `continue_session` jobs in `pending`, `running` or
+`awaiting_start_control`, and the index excludes its NULL results. Selection
+constrains that expression alone; a dependent same-tenant exact-ID probe then
+reads payloads in the same statement and snapshot. On the tested PostgreSQL 17
+planner, partial-index expression statistics are not used, avoiding skewed
+base-column estimates that favored ordered tenant-history or global-status
+paths. ID-only selection keeps payloads out of ordering work. The resource
+tests exercise the actual statement with both tenant-key orderings, default
+cached mixed bindings and explicit custom/generic plans, terminal rows inserted
+directly in terminal states, foreign-live cohorts, and both unvacuumed and
+all-visible heaps. The unvacuumed phase proves visibility-map absence, not
+eligible-to-terminal or lease-update churn: dead eligible index versions can
+remain until maintenance removes them. PostgreSQL upgrades, optimizer hooks,
+extended statistics and materially different distributions require revalidation.
+
+The reader collects at most 512 raw payload rows within its existing 8 MiB
+aggregate budget, rejecting an overflow row before retaining it, and finishes
+and checks the result stream before decoding routes. SQL, context and drain
+errors take precedence over a semantic incomplete result. Closing unread rows
+drains the statement; the decoder budget is not a global wire-transfer cap.
+The existing row and byte limits do not promise table-size-independent work in
+a heavily populated target scope or tenant nonterminal cohort. H must measure
+vacuum lag, dead-version churn and large-cohort stream/decoder costs before
+activation.
 
 Before their first consumers, C.1p owns certificate transition policy (fresh
 operation, no-op/idempotent handling and generation-change dispositions), E.1/C.2

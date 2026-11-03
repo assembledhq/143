@@ -277,12 +277,17 @@ level, same lane, or a whole-workspace holder. Recheck job/runtime/executor/hold
 and drain receipts under the canonical locks. Otherwise retain durable pending
 admission without a job; answers and grants remain uncommitted. A predecessor's
 last drain scan or idle status does not prove it released its consumer. Independent
-sibling lanes retain supported concurrency when their positive scope/holder proof
-establishes compatibility: distinct lane and current physical generation, a
-positively usable workspace, and no exclusive wholeworkspace holder/recovery
-reservation. Ordinary shared sibling activity is not an exclusive holder. The
-same-session trust model and pre-launch verification are specified in the M0
-contract; this refactor does not require provider-private storage.
+sibling lanes retain supported concurrency when they have distinct lane scopes,
+no session-wide/threadless/legacy-unattributed nonterminal consumer and no
+exclusive wholeworkspace holder or reservation. Any workspace recovery slot or
+unresolved whole-session physical operation blocks admission. Ordinary shared
+sibling activity, a pending sibling job and an unprovable request certificate
+create no exclusive holder. Ordinary non-answer admission binds no physical
+target and requires no positive availability proof; a bound job must defer
+before launch if B.2/E.1 cannot establish current target availability. Answer
+admission retains C.2's own-request Ready requirement. The same-session trust
+model and mandatory pre-launch verification are specified in the M0 contract;
+this refactor does not require provider-private storage.
 Never displace another message/request; preserve the one-request-ID-per-resume
 limit. `attempts = 0` is not a never-claimed marker: the three
 `RetryWithoutConsumingAttempt*` methods decrement it and clear ownership after an

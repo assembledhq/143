@@ -239,6 +239,14 @@ Reviewable increments:
    Version 0 uses characterized policy with the selected compatible order and old
    transaction boundaries; the complete canonical version-1 branch stays dark.
    Preserve its existing running, queue/capacity, source, actor and target semantics.
+   Ordinary non-answer sibling admission checks scope, capacity and exclusive
+   reservations, including session-wide/legacy consumers, any workspace recovery
+   slot and unresolved whole-session physical work. It binds no physical target
+   and requires no availability certificate at admission. B.2/E.1 must check the
+   current descriptor and fresh exact-target evidence before every launch; missing
+   availability can defer the bound job. A.3/C.2 retains exact answer readiness.
+   Prove three independently bound sibling jobs, fourth-lane waiting, and no veto
+   from a sibling's pending job or pending/unprovable request certificate.
 2. A.2 has two review exits, not a second admission engine:
 
    - **Core, before A.1:** under A.0's frozen contract, solely install the shared
@@ -363,6 +371,11 @@ query or a caller-supplied ready/drained boolean.
    Convert checkpoint, revision, changeset/materialization, preview, holder and
    publication-lease owners here, retaining their physical ownership contracts and
    recovery-reservation checks. Their routing/order proof belongs to this increment.
+   Define physical-target generation separately from ordinary workspace revision
+   progress before comparing readiness or start targets: the legacy
+   `SessionStore.updateTurnCompleteRow` increments `workspace_generation` on every
+   turn completion. That counter alone cannot imply target replacement or make
+   every sibling completion invalidate a pending request's native context.
    C.1p owns the sole `AdvanceInputWorkspaceCompatibilityInTx` bounded set-based
    fanout and readiness-classification primitive; C.1w owns workspace/holder/
    materialization composition and C.1v owns preview composition. These are finite
