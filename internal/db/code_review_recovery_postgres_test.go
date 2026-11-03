@@ -43,7 +43,8 @@ func newReviewRecoveryPool(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err, "parse disposable database configuration")
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
 	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-	// Admission still races across goroutines, with a bounded connection budget.
+	// Lock/freshness probes need three independent connections. Keep one spare
+	// while queueing bursts locally instead of exhausting the shared test server.
 	cfg.MaxConns, cfg.MinConns, cfg.MinIdleConns = 4, 0, 0
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "create isolated recovery pool")
@@ -63,6 +64,29 @@ CREATE TABLE code_review_recheck_dispatches(job_id uuid,assessment_id uuid,org_i
 CREATE TABLE pending_intents(id uuid PRIMARY KEY,org_id uuid NOT NULL,status text DEFAULT 'pending');`)
 	require.NoError(t, err, "create synthetic capacity and ownership tables")
 	return pool
+}
+
+func TestReviewRecoveryPoolConnectionBudgetPostgres(t *testing.T) {
+	t.Parallel()
+	pool := newReviewRecoveryPool(t)
+	require.Equal(t, int32(4), pool.Config().MaxConns, "review fixtures must bound server-wide connection pressure while preserving independent lock observers")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	held := make([]pgx.Tx, 4)
+	for index := range held {
+		held[index] = beginSessionLifecycleProbe(t, ctx, pool)
+	}
+	require.Equal(t, int32(4), pool.Stat().AcquiredConns(), "the fixture must support four real simultaneous transactions rather than serialize the races")
+	waitCtx, stop := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer stop()
+	extra, err := pool.Acquire(waitCtx)
+	if extra != nil {
+		extra.Release()
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a fifth acquisition must wait within the existing pool instead of opening another server connection")
+	require.NoError(t, held[0].Rollback(ctx), "release one owned transaction without ending the other independent probes")
+	beginSessionLifecycleProbe(t, ctx, pool)
+	require.Equal(t, int32(4), pool.Stat().AcquiredConns(), "a later acquisition must reuse released capacity without expanding the connection budget")
 }
 
 func TestCodeReviewSandboxAdmissionConcurrentBurstPostgres(t *testing.T) {
