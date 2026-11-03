@@ -54,17 +54,21 @@ func main() {
 	// This read-only check must not initialize golang-migrate: opening its
 	// database driver can create the migration ledger. It never runs old-image SQL.
 	if os.Args[1] == "verify-inactive-rollback" {
-		if len(os.Args) != 3 || os.Args[2] != "392" {
-			fmt.Fprintln(os.Stderr, "inactive binary rollback supports only explicitly pinned schema 392")
+		if len(os.Args) != 3 || (os.Args[2] != "392" && os.Args[2] != "393") {
+			fmt.Fprintln(os.Stderr, "inactive binary rollback supports only explicitly pinned schema 392 or 393")
 			os.Exit(1)
+		}
+		schema := uint(392)
+		if os.Args[2] == "393" {
+			schema = 393
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := verifyInactiveBinaryRollback(ctx, dbURL); err != nil {
+		if err := verifyInactiveBinaryRollback(ctx, dbURL, schema); err != nil {
 			fmt.Fprintf(os.Stderr, "Inactive binary rollback refused: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("Inactive binary rollback preflight passed (schema 392)")
+		fmt.Printf("Inactive binary rollback preflight passed (schema %d)\n", schema)
 		return
 	}
 
@@ -164,11 +168,15 @@ func verifyRuntimeRevertBeforeUp(ctx context.Context, ledger interface{ Version(
 }
 
 // verifyInactiveBinaryRollback is deliberately limited to the unactivated 0a
-// schema. A later schema or any retained protocol history needs a new review.
+// schema and its additive package-credential table. The caller must pin the
+// exact retained schema; future schemas require a new compatibility review.
 // Operators must exclude activation and other deployments throughout rollback;
 // this bounded read-only snapshot is not a fleet-wide maintenance lock.
-func verifyInactiveBinaryRollback(ctx context.Context, rawURL string) (result error) {
-	return verifyInactiveRuntimeSchema(ctx, rawURL, 392)
+func verifyInactiveBinaryRollback(ctx context.Context, rawURL string, schema uint) error {
+	if schema != 392 && schema != 393 {
+		return errors.New("inactive binary rollback supports only explicitly pinned schema 392 or 393")
+	}
+	return verifyInactiveRuntimeSchema(ctx, rawURL, schema)
 }
 
 // verifyInactiveRuntimeSchema shares the retained-history proof with the pinned

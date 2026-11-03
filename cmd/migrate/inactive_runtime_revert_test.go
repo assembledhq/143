@@ -36,11 +36,11 @@ func TestRuntimeRevertSingleFileEntrypoint(t *testing.T) {
 	defer cancel()
 	// Make and CI invoke this single file. Package-only compilation would miss
 	// references to helpers that are accidentally moved into sibling files.
-	command := exec.CommandContext(ctx, "go", "run", "main.go", "verify-inactive-rollback", "393")
+	command := exec.CommandContext(ctx, "go", "run", "main.go", "verify-inactive-rollback", "394")
 	output, err := command.CombinedOutput()
-	require.Error(t, err, "the pinned binary rollback command must reject schema 393 without connecting")
+	require.Error(t, err, "the pinned binary rollback command must reject unreviewed schema 394 without connecting")
 	require.NoError(t, ctx.Err(), "the entry point must compile and return within the test budget")
-	require.Equal(t, "inactive binary rollback supports only explicitly pinned schema 392\nexit status 1\n", string(output), "the single-file entry point must reach its argument guard rather than fail compilation")
+	require.Equal(t, "inactive binary rollback supports only explicitly pinned schema 392 or 393\nexit status 1\n", string(output), "the single-file entry point must reach its argument guard rather than fail compilation")
 }
 
 func TestRuntimeRevertMigrationPreflight(t *testing.T) {
