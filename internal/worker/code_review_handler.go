@@ -2008,7 +2008,7 @@ func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.P
 	}))
 }
 
-func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, priorFindings []models.CodeReviewPriorFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
+func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, priorFindings []prompts.CodeReviewPriorFindingPromptData, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
 	return prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
 		RepositoryGuidance:         job.RepositoryGuidance,
 		Repository:                 pr.GitHubRepo,
@@ -2027,7 +2027,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 		RiskReasons:                models.CodeReviewRiskReasonMessages(codeReviewPromptRiskReasons(job, pr, health, cfg, changedFiles, agentResults, findings, priorFindings, visualEvidence)),
 		ReviewerOutputs:            codeReviewReviewerOutputsForPrompt(agentResults),
 		Findings:                   codeReviewFindingsForPrompt(findings),
-		PriorFindings:              codeReviewPriorFindingsForPrompt(priorFindings),
+		PriorFindings:              priorFindings,
 		ChangedFiles:               codeReviewChangedPaths(changedFiles),
 		RequestContextAuthor:       codeReviewRequestContextAuthor(job.RequestContext),
 		RequestContextBody:         codeReviewRequestContextBody(job.RequestContext),
@@ -2040,7 +2040,7 @@ func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullReques
 	})
 }
 
-func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, priorFindings []models.CodeReviewPriorFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) []models.CodeReviewRiskReason {
+func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, priorFindings []prompts.CodeReviewPriorFindingPromptData, visualEvidence models.CodeReviewVisualEvidenceSnapshot) []models.CodeReviewRiskReason {
 	reviewerQuorum, _ := codeReviewReviewerEvidence(agentResults)
 	additions, deletions := codeReviewLineChanges(changedFiles)
 	risk := models.EvaluateCodeReviewRisk(cfg, models.CodeReviewRiskInput{
@@ -2128,6 +2128,41 @@ func listCodeReviewPriorFindings(ctx context.Context, stores *Stores, job runCod
 		return nil, fmt.Errorf("list prior code review findings: %w", err)
 	}
 	return priorFindings, nil
+}
+
+// loadCodeReviewPriorFindingsSnapshot reuses the snapshot saved with the prompt
+// record because a retry cannot tell whether the agent already received it.
+func loadCodeReviewPriorFindingsSnapshot(ctx context.Context, stores *Stores, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata, recordKey string) ([]prompts.CodeReviewPriorFindingPromptData, error) {
+	if job.RequestContext == nil || !job.RequestContext.IncludePriorFindings || stores == nil || stores.CodeReviews == nil {
+		return nil, nil
+	}
+	record, err := stores.CodeReviews.GetPromptRecordByKey(ctx, job.OrgID, recordKey)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("load prior code review findings snapshot: %w", err)
+	}
+	if err == nil {
+		var saved struct {
+			PriorFindings *[]prompts.CodeReviewPriorFindingPromptData `json:"prior_findings"`
+		}
+		if err := json.Unmarshal(record.Metadata, &saved); err != nil {
+			return nil, fmt.Errorf("decode prior code review findings snapshot: %w", err)
+		}
+		if saved.PriorFindings != nil {
+			return *saved.PriorFindings, nil
+		}
+	}
+	priorFindings, err := listCodeReviewPriorFindings(ctx, stores, job, metadata)
+	if err != nil {
+		return nil, err
+	}
+	return codeReviewPriorFindingsForPrompt(priorFindings), nil
+}
+
+func withCodeReviewPriorFindingsSnapshot(metadata map[string]any, priorFindings []prompts.CodeReviewPriorFindingPromptData) map[string]any {
+	if priorFindings != nil {
+		metadata["prior_findings"] = priorFindings
+	}
+	return metadata
 }
 
 func codeReviewOutcomeProvenance(input liveCodeReviewOutcomeInput) string {
@@ -2270,8 +2305,8 @@ func codeReviewVisualEvidencePromptInjectionLikely(snapshot models.CodeReviewVis
 	return false
 }
 
-func codeReviewPriorRepliesPromptInjectionLikely(priorFindings []models.CodeReviewPriorFinding) bool {
-	for _, finding := range codeReviewPriorFindingsForPrompt(priorFindings) {
+func codeReviewPriorRepliesPromptInjectionLikely(priorFindings []prompts.CodeReviewPriorFindingPromptData) bool {
+	for _, finding := range priorFindings {
 		if codeReviewPromptInjectionLikely(finding.ReplyBody, nil) {
 			return true
 		}
@@ -3261,7 +3296,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	if attempt > 0 {
 		recordKey = fmt.Sprintf("%s/orchestrator-fallback-%02d-%s", rootKey, attempt, agentType)
 	}
-	priorFindings, err := listCodeReviewPriorFindings(ctx, stores, job, metadata)
+	priorFindings, err := loadCodeReviewPriorFindingsSnapshot(ctx, stores, job, metadata, recordKey)
 	if err != nil {
 		return err
 	}
@@ -3274,13 +3309,13 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 		Role:          string(models.CodeReviewAgentRoleOrchestrator),
 		AgentProvider: string(agentType),
 		Content:       promptText,
-		Metadata: mustMarshalCodeReviewJSON(map[string]any{
+		Metadata: mustMarshalCodeReviewJSON(withCodeReviewPriorFindingsSnapshot(map[string]any{
 			"head_sha":             job.HeadSHA,
 			"policy_version":       policy.Version,
 			"agent_model":          stringPtrValue(agentModel),
 			"input_hash":           descriptionInputHash,
 			"visual_evidence_hash": visualEvidence.CanonicalHash(),
-		}),
+		}, priorFindings)),
 	}); err != nil {
 		return err
 	}
