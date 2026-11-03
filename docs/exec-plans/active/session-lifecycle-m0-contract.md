@@ -6,11 +6,7 @@ implements the design-output portion of Milestone 0 in
 [the ownership plan](session-lifecycle-ownership.md). Proposed tables, methods,
 API outcomes, bounds, and deployment gates below do not exist merely because
 they are specified here. No production inspection or operational evidence is
-included. The original M0 characterization changed no runtime behavior or schema;
-subsequent passive 0a schema and persistence foundations are now implemented.
-[The 0a delivery plan](session-lifecycle-0a.md) records their current source baseline
-and remaining packages. Proposed authority and activation below remain unimplemented;
-this contract does not establish a compatible release.
+included. Milestone 0 changes no runtime behavior or schema.
 
 The executable writer inventory is produced by `cmd/lint-lifecycle`; its
 function-level manifest records reviewed syntax candidates, not a whole-program
@@ -184,15 +180,6 @@ reserved for session-wide execution that conflicts with every lane; it is not a
 shared pointer rewritten by independent siblings. The session running status
 remains a derived projection of active siblings, not logical claim ownership.
 
-Before typed repair composition supplies durable scope and exact owning-job/runtime
-proof, unresolved repair evidence keeps affected ordinary input waiting with
-`repair_reconciliation`, without a new job or claim. Comment-resolution commands
-still roll back if immediate new-job admission is unavailable. Released history
-alone is not a reservation; stale live work blocks dispatch even if the reservation
-is inactive or no longer matches the current head. A thread association alone
-cannot establish that repair work excludes only that lane. A.5 owns the missing
-repair scope/proof writers and their eventual reconciliation.
-
 The passive lane-claim representation uses an exact token-bound FK from
 `session_threads(org_id,session_id,id,admission_claim_dispatch_id,admission_claim_token)`
 to `session_input_dispatches(org_id,session_id,thread_id,id,admission_claim_token)`.
@@ -255,23 +242,11 @@ its durable parked control even without a lease, provider and uncertain
 predecessor, plus actual exclusive wholeworkspace holder/reservation. Real drain
 proof, not lease expiry or a different dedupe key, removes a predecessor blocker.
 Independently admitted sibling lanes retain the supported three-slot concurrency.
-Compatible sibling admission scope means a different lane, no session-wide,
-threadless or legacy-unattributed nonterminal consumer, and no exclusive
-wholeworkspace holder or reservation. Any present workspace recovery slot or
-unresolved whole-session physical operation blocks it. This preserves the
-same-session trusted workspace/HOME model. A pending sibling job or an unprovable
-request certificate creates no exclusive holder or veto over another lane's
-authorized workspace mutation. Dedupe collisions cannot answer/grant.
-
-Ordinary non-answer admission binds input to its exact logical consumer, not to
-a physical workspace target. Positive current-generation availability is checked
-at runtime start: B.2 establishes reservation/quiescence and E.1's final
-authorization consumes the current C.1 descriptor and fresh exact-target receipt
-before every launch. Unknown availability can therefore leave an input bound to
-a job that must return `StartDeferred`, rather than an unbound waiting input.
-No admission result permits provider work or bypasses this start gate. Answer
-admission still requires its own request's Ready disposition under C.2; a
-compatible sibling never supplies another request's availability or native state.
+Compatible sibling scope means a different lane, no exclusive wholeworkspace
+holder/recovery reservation, and positive current-generation workspace availability
+under the same-session trusted workspace/HOME model, not merely absence of a running job. Neither a
+pending nor unprovable request certificate creates an exclusive holder or vetoes
+another lane's authorized workspace mutation. Dedupe collisions cannot answer/grant.
 `JobStore.RetryWithoutConsumingAttempt*` can reset attempts and clear ownership
 after actual execution, so attempts=0 is not “never claimed”. Monotonic claim
 marker/payload rebinding is a separate future reviewed optimization, not this
@@ -816,17 +791,6 @@ eligible conflict cause. Cancellation or deadline expiry also forbids replay; th
 same whole-unit deadline covers all attempts rather than resetting on conflict.
 A rollback failure is not a confirmed abort; abandon connection and resolve
 command receipt.
-
-The 0a A.1 delivery contract permits one pre-floor transaction-overlap exception:
-the version-0 `thread.Service.SendMessage` database mutation becomes one guarded
-atomic unit, including enqueue. Preserve its characterized branch policy and the
-bounds above, use the supplied transaction for every in-unit read/write, roll
-back the whole graph on database failure and remove send compensation. Require
-full-schema adjacent-build coexistence and postcommit/unknown-settlement proof
-before shipping it. This is not a general legacy-boundary waiver, a compatibility
-floor or authority to activate version-1 semantics; other families retain their
-stated release gates.
-
 No provider/Slack/Redis effect inside any attempted transaction. Foreground lock
 retry exhaustion returns typed Contended without a claim/answer; already accepted
 async receipt stays pending for independent reconciliation, not ingress-job retry
@@ -918,13 +882,8 @@ finalization and actual drain anchor. Current B checkpoint producer/revision
 cannot replace A's identity. Parent running/idle from B is not A's readiness
 test; answer admission checks A plus current compatible capacity/holders, not
 fabricated parent awaiting_input. Compatible sibling scope is a different lane,
-no session-wide/threadless/legacy-unattributed nonterminal consumer, and no
-exclusive wholeworkspace holder or reservation, including any present workspace
-recovery slot or unresolved whole-session physical operation. It preserves the
-supported three lanes. This scope test supplies no answer readiness: A's own
-Ready disposition still requires positive usable target evidence under C.2, and
-E.1 verifies the selected target again before launch. Ordinary non-answer input
-does not need that availability proof at admission.
+no exclusive wholeworkspace holder/recovery reservation, and positive usable
+current-generation workspace evidence. It preserves the supported three lanes.
 Request identity has explicit ProviderRequest(exact native provider_request_id)
 and CapabilityRequest(internal request UUID, capability item and exact producing
 phase/runtime) variants. The latter has no fabricated provider request ID;
@@ -975,7 +934,7 @@ compatible flag or numeric >= test substitutes for real receipt joins.
 | Sibling checkpoint/diff, metadata revision/key update, ordinary publication promotion, preview metadata | Preserve exact-base A certification by default in this trusted same-session model; advance every watermark. Keep A native conversation/workdir/phase. Prior pending remains pending through both B checkpoint AND diff. No per-B filesystem hash/export fanout. |
 | Final pause metadata seal | Raw snapshot capture can precede final diff metadata; typed pause_metadata_seal binds final revision/time and unchanged selected image. Final proof follows finalization, without unnecessary image retake for metadata alone. This is identity/order evidence, not immutable HOME evidence. |
 | AcceptSplit / primary pointer update | Preserve by default only when A retains its recorded workdir/native scope. A scope-retarget operation marks A pending for exact selected verification; do not silently retarget its provider conversation or block B's authorized split. |
-| Physical snapshot restore/context-replacing installation or physical-target generation change | Unlike ordinary B checkpoint publication, this changes the target native scope: mark affected A pending, verify actual target/native identity; absence is unavailable. Raw unreceipted physical-generation drift is unprovable. C.1 must distinguish physical-target identity from the legacy per-turn counter, as specified in the 0a delivery plan. An accepted answer stays bound to its recorded generation, not implicitly rebound. End/reset/recovery epoch changes still supersede/fence old A. |
+| Physical snapshot restore/context-replacing installation or generation change | Unlike ordinary B checkpoint publication, this changes the target native scope: mark affected A pending, verify actual target/native identity; absence is unavailable. Raw unreceipted generation drift is unprovable. An accepted answer stays bound to its recorded generation, not implicitly rebound. End/reset/recovery epoch changes still supersede/fence old A. |
 | Expiry/delete / destroyed workspace | Tombstone exact key/availability before physical deletion. Mark affected restore-dependent requests unavailable; a positively usable live target may be selected explicitly, never inferred from missing key. Shared snapshot loss is not automatically native context loss on an independently verified live target. |
 | Same-lane successor/end or unauthorized mutation | Old request/answer cannot authorize successor work. Unauthorized workspace write rejects; unknown A evidence is unprovable and visible, not reset permission. |
 
@@ -1941,18 +1900,17 @@ An empty scan or green unit tests alone do not establish a deployed floor.
 
 ## 10. Evidence ledger and remaining proof
 
-This companion originated in source inspection; the parent plan records historical
-M0 and passive-foundation validation. The 0a delivery plan distinguishes implemented
-schema/persistence from missing canonical behavior. No new runtime/schema change,
-production query or migration accompanies this planning re-baseline. Keep source
-facts, historical validation, isolated query probes and implementation gates distinct:
+This companion originated in source inspection; the parent plan records the
+M0 validation commands and results. No runtime/schema change, production query
+or migration is included. Keep source facts, isolated query probes and proposed
+implementation gates distinct:
 
 | Evidence | State here | Required next proof |
 | --- | --- | --- |
 | Function/writer/producer inventory | Executable manifest owned by M0 inventory change; references above are source-derived | Run inventory/tests and review every expanded caller before its migration slice. |
 | Existing-entry behavior tests | Existing test names in parent plan; M0 adds characterization only | Record exact focused commands, exits, revisions and skips in parent. |
 | F1/F2 contract | Selected above, no unresolved lane-local reset or blanket rejection rule | 0a typed outcome/wholeworkspace acknowledgement tests, plus all terminal caller call-throughs. |
-| SQL/schema and readiness/discovery | Partial passive representation exists as itemized in the 0a baseline; behavioral fields and canonical consumers remain proposed. Minimal-schema readiness/workspace-state/start-control examples are synthetic (historical counts/results in the parent validation section) | Disposable migrated PG: production indexes/explain, atomic dispositions, cutoff/normalization, uniqueness, nonterminal parked exclusion versus runnable sets, exact consumer exclusion and set-based all-request metadata updates. |
+| SQL/schema and readiness/discovery | Proposed schema; canonical minimal-schema readiness/workspace-state/start-control examples in test source (case counts/results in the parent validation section) | Disposable migrated PG: production indexes/explain, atomic dispositions, cutoff/normalization, uniqueness, nonterminal parked exclusion versus runnable sets, exact consumer exclusion and set-based all-request metadata updates. |
 | Lock progress/activation/rollback | Minimal-schema lock-pattern probes (counts/results in the parent validation section); actual rolling callers not tested | Independent connection barriers for all baseline pairs, pre-floor/floor and floor/new; no effects on abort; unknown commit no automatic replay. |
 | Native resume / cleanup | Source confirms ID-based resume, reconstruction fallbacks, mutable ordinary key and delete-before-metadata cleanup; proposed trusted same-session checks/handshake and unique-publication-key discipline only | Tested exact provider/build/ResumeIdentity activation tuples; actual target/preparation/final authorization and sealed outcomes, bound-answer no-fallback; durable park/control beyond execution TTL, all-source FIRST/invocation fences and post-permit running effects; all named PR-upload/cleanup call-throughs, fresh-key receipt/GC and tombstone-before-delete proof. |
 | Recovery user journey | Proposed request/control/API/tool contract | Paused notice -> action -> blocked/safe restore -> fresh request -> new consent; checkpoint re-ask unsupported until proved, not a private-context program requirement. |

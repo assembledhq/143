@@ -407,14 +407,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	threadRuntimeStore := db.NewThreadRuntimeStore(pool)
 	sessionSandboxHolderStore := db.NewSessionSandboxHolderStore(pool)
 	reviewLoopStore := db.NewSessionReviewLoopStore(pool)
-	codeReviewTransactions, err := db.NewThreadSendTransactions(pool)
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("construct API code review terminal transactions: %w", err)
-	}
-	codeReviewStore, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, codeReviewTransactions)
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("construct API code review terminal store: %w", err)
-	}
+	codeReviewStore := db.NewCodeReviewStore(pool)
 	codeReviewStore.SetJobStore(jobStore)
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
 	codeReviewStore.SetStreams(codeReviewStreams)
@@ -609,22 +602,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	if prService != nil {
 		sessionHandler.SetPRTitleSyncer(prService)
 	}
-	threadSendDependencies, err := threadservice.NewSendDependencies(pool, sessionStore, sessionThreadStore, jobStore)
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("construct API thread send dependencies: %w", err)
-	}
-	threadSvc, err := threadservice.NewService(
+	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
 		sessionMessageStore,
 		sessionLogStore,
 		jobStore,
-		threadSendDependencies,
 		logger,
 	)
-	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("construct API thread service: %w", err)
-	}
 	threadSvc.SetThreadInboxStore(threadInboxStore, pool)
 	threadSvc.SetThreadRuntimeStore(threadRuntimeStore)
 	threadSvc.SetFileEventStore(sessionThreadFileEventStore)
@@ -668,7 +653,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	reviewLoopSvc := reviewloopservice.NewService(reviewLoopStore, reviewloopservice.RuntimeAdapter{
 		Sessions: sessionStore,
 		Threads:  threadSvc,
-	}, reviewloopservice.WithStartTransactions(threadSendDependencies.Transactions))
+	})
 	reviewLoopHandler := handlers.NewReviewLoopHandler(reviewLoopSvc, reviewLoopStore)
 	priorityHandler := handlers.NewPriorityHandler(priorityScoreStore, complexityEstimateStore, jobStore)
 	ingestionWebhookHandler := handlers.NewIngestionWebhookHandler(webhookDeliveryStore, integrationStore, credentialStore, ingestionSvc, logger)
@@ -1655,7 +1640,6 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/fork", sessionThreadHandler.ForkThread)
 				r.Post("/api/v1/sessions/{id}/threads/{tid}/revert", sessionThreadHandler.RevertThread)
 				r.Post("/api/v1/sessions/{id}/review-loops", reviewLoopHandler.Start)
-				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/recover", reviewLoopHandler.Recover)
 				r.Post("/api/v1/sessions/{id}/review-loops/{loop_id}/cancel", reviewLoopHandler.Cancel)
 				r.Post("/api/v1/sessions/{id}/review-comments", sessionReviewCommentHandler.Create)
 				r.Post("/api/v1/previews", branchPreviewHandler.Create)

@@ -241,14 +241,7 @@ func main() {
 	// changes here as it runs reviews; the API subscribes for the live code
 	// reviews list. nil-safe when redisClient is nil (publish becomes a no-op).
 	codeReviewStreams := cache.NewCodeReviewStreams(redisClient, logger)
-	codeReviewTransactions, err := db.NewThreadSendTransactions(pool)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("failed to construct worker code review terminal transactions")
-	}
-	codeReviewStore, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, codeReviewTransactions)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("failed to construct worker code review terminal store")
-	}
+	codeReviewStore := db.NewCodeReviewStore(pool)
 	codeReviewStore.SetStreams(codeReviewStreams)
 	codeReviewStore.SetLogger(logger)
 
@@ -504,10 +497,7 @@ func main() {
 
 		issueStore := db.NewIssueStore(pool)
 		sessionStore := db.NewSessionStore(pool)
-		jobStore, err = db.NewJobStoreWithCodeReviewTerminalTransactions(pool, codeReviewTransactions)
-		if err != nil {
-			logger.Fatal().Err(err).Msg("failed to construct worker code review retirement store")
-		}
+		jobStore = db.NewJobStore(pool)
 		codeReviewStore.SetJobStore(jobStore)
 		codeReviewRecheckStore := db.NewCodeReviewRecheckStore(pool)
 		codeReviewRecheckStore.SetJobStore(jobStore)
@@ -553,73 +543,68 @@ func main() {
 		workerCodeReviewDisputeStore := db.NewCodeReviewDisputeStore(pool)
 		workerCodeReviewDisputeStore.SetJobStore(jobStore)
 		workerCodeReviewInsightStore := db.NewCodeReviewInsightStore(pool)
-		threadSendDependencies, err := threadservice.NewSendDependencies(pool, sessionStore, sessionThreadStore, jobStore)
-		if err != nil {
-			logger.Fatal().Err(err).Msg("failed to construct worker thread send dependencies")
-		}
 		stores := &worker.Stores{
-			Issues:                 issueStore,
-			Users:                  db.NewUserStore(pool),
-			Sessions:               sessionStore,
-			SessionChangesets:      db.NewSessionChangesetStore(pool),
-			SessionPublications:    db.NewSessionPublicationStore(pool),
-			SessionPRIntents:       db.NewSessionPRIntentStore(pool),
-			TeamReviewRequests:     db.NewTeamReviewRequestStore(pool),
-			Jobs:                   jobStore,
-			Integrations:           integrationStore,
-			Memberships:            db.NewOrganizationMembershipStore(pool),
-			Webhooks:               db.NewWebhookDeliveryStore(pool),
-			PriorityScores:         priorityScoreStore,
-			ComplexityEstimates:    complexityEstimateStore,
-			Projects:               projectStore,
-			ProjectTasks:           projectTaskStore,
-			Credentials:            credentialStore,
-			AuditLogs:              auditLogStore,
-			Organizations:          orgStore,
-			SessionLogs:            sessionLogStore,
-			LifecycleWriters:       db.NewLifecycleWriterInstanceStore(pool),
-			EvalTasks:              db.NewEvalTaskStore(pool),
-			EvalRuns:               db.NewEvalRunStore(pool),
-			EvalBatches:            db.NewEvalBatchStore(pool),
-			EvalBootstraps:         evalBootstrapStore,
-			EvalReleaseGates:       db.NewEvalReleaseGateStore(pool),
-			Repositories:           repoStore,
-			GitHubInstallations:    db.NewGitHubInstallationStore(pool),
-			SessionMessages:        sessionMessageStore,
-			IssueSnapshots:         db.NewSessionTurnIssueSnapshotStore(pool),
-			SessionThreads:         sessionThreadStore,
-			ThreadInbox:            db.NewThreadInboxStore(pool),
-			ThreadSendTx:           pool,
-			ThreadSendDependencies: threadSendDependencies,
-			HumanInputRequests:     sessionHumanInputStore,
-			ThreadFileEvents:       db.NewSessionThreadFileEventStore(pool),
-			SandboxHolders:         db.NewSessionSandboxHolderStore(pool),
-			Automations:            automationStore,
-			AutomationRuns:         automationRunStore,
-			AutomationTargets:      db.NewAutomationTargetStore(pool),
-			ReviewLoops:            db.NewSessionReviewLoopStore(pool),
-			CodeReviews:            codeReviewStore,
-			CodeReviewAssessments:  db.NewCodeReviewAssessmentStore(pool),
-			CodeReviewRechecks:     codeReviewRecheckStore,
-			CodeReviewDisputes:     workerCodeReviewDisputeStore,
-			CodeReviewInsights:     workerCodeReviewInsightStore,
-			SessionIssueLinks:      db.NewSessionIssueLinkStore(pool),
-			Previews:               previewStore,
-			PullRequests:           pullRequestStore,
-			PullRequestFeedback:    workerPullRequestFeedbackStore,
-			SlackInstallations:     db.NewSlackInstallationStore(pool),
-			SlackOrgSelections:     db.NewSlackOrgSelectionStore(pool),
-			SlackBotSettings:       db.NewSlackBotSettingsStore(pool),
-			SlackUserLinks:         db.NewSlackUserLinkStore(pool),
-			LinearUserLinks:        db.NewLinearUserLinkStore(pool),
-			ExternalUserLinks:      db.NewExternalUserLinkStore(pool),
-			ExternalSuggestions:    db.NewExternalUserLinkSuggestionStore(pool),
-			SlackChannels:          db.NewSlackChannelSettingsStore(pool),
-			SlackSessionLinks:      db.NewSlackSessionLinkStore(pool),
-			SlackInboundEvents:     db.NewSlackInboundEventStore(pool),
-			SlackOutbound:          db.NewSlackOutboundMessageStore(pool),
-			SessionAttributions:    db.NewSessionAttributionStore(pool),
-			CodeReviewWorkspaces:   db.NewCodeReviewWorkspaceStore(pool),
+			Issues:                issueStore,
+			Users:                 db.NewUserStore(pool),
+			Sessions:              sessionStore,
+			SessionChangesets:     db.NewSessionChangesetStore(pool),
+			SessionPublications:   db.NewSessionPublicationStore(pool),
+			SessionPRIntents:      db.NewSessionPRIntentStore(pool),
+			TeamReviewRequests:    db.NewTeamReviewRequestStore(pool),
+			Jobs:                  jobStore,
+			Integrations:          integrationStore,
+			Memberships:           db.NewOrganizationMembershipStore(pool),
+			Webhooks:              db.NewWebhookDeliveryStore(pool),
+			PriorityScores:        priorityScoreStore,
+			ComplexityEstimates:   complexityEstimateStore,
+			Projects:              projectStore,
+			ProjectTasks:          projectTaskStore,
+			Credentials:           credentialStore,
+			AuditLogs:             auditLogStore,
+			Organizations:         orgStore,
+			SessionLogs:           sessionLogStore,
+			LifecycleWriters:      db.NewLifecycleWriterInstanceStore(pool),
+			EvalTasks:             db.NewEvalTaskStore(pool),
+			EvalRuns:              db.NewEvalRunStore(pool),
+			EvalBatches:           db.NewEvalBatchStore(pool),
+			EvalBootstraps:        evalBootstrapStore,
+			EvalReleaseGates:      db.NewEvalReleaseGateStore(pool),
+			Repositories:          repoStore,
+			GitHubInstallations:   db.NewGitHubInstallationStore(pool),
+			SessionMessages:       sessionMessageStore,
+			IssueSnapshots:        db.NewSessionTurnIssueSnapshotStore(pool),
+			SessionThreads:        sessionThreadStore,
+			ThreadInbox:           db.NewThreadInboxStore(pool),
+			ThreadSendTx:          pool,
+			HumanInputRequests:    sessionHumanInputStore,
+			ThreadFileEvents:      db.NewSessionThreadFileEventStore(pool),
+			SandboxHolders:        db.NewSessionSandboxHolderStore(pool),
+			Automations:           automationStore,
+			AutomationRuns:        automationRunStore,
+			AutomationTargets:     db.NewAutomationTargetStore(pool),
+			ReviewLoops:           db.NewSessionReviewLoopStore(pool),
+			CodeReviews:           codeReviewStore,
+			CodeReviewAssessments: db.NewCodeReviewAssessmentStore(pool),
+			CodeReviewRechecks:    codeReviewRecheckStore,
+			CodeReviewDisputes:    workerCodeReviewDisputeStore,
+			CodeReviewInsights:    workerCodeReviewInsightStore,
+			SessionIssueLinks:     db.NewSessionIssueLinkStore(pool),
+			Previews:              previewStore,
+			PullRequests:          pullRequestStore,
+			PullRequestFeedback:   workerPullRequestFeedbackStore,
+			SlackInstallations:    db.NewSlackInstallationStore(pool),
+			SlackOrgSelections:    db.NewSlackOrgSelectionStore(pool),
+			SlackBotSettings:      db.NewSlackBotSettingsStore(pool),
+			SlackUserLinks:        db.NewSlackUserLinkStore(pool),
+			LinearUserLinks:       db.NewLinearUserLinkStore(pool),
+			ExternalUserLinks:     db.NewExternalUserLinkStore(pool),
+			ExternalSuggestions:   db.NewExternalUserLinkSuggestionStore(pool),
+			SlackChannels:         db.NewSlackChannelSettingsStore(pool),
+			SlackSessionLinks:     db.NewSlackSessionLinkStore(pool),
+			SlackInboundEvents:    db.NewSlackInboundEventStore(pool),
+			SlackOutbound:         db.NewSlackOutboundMessageStore(pool),
+			SessionAttributions:   db.NewSessionAttributionStore(pool),
+			CodeReviewWorkspaces:  db.NewCodeReviewWorkspaceStore(pool),
 		}
 
 		// Build Phase 3+ services if runtime dependencies are available.
@@ -844,7 +829,6 @@ func main() {
 			agent.ResolveStaticEgressRuntimeConfig(cfg.StaticEgressPublicIP),
 			cfg.SandboxHostID(),
 			reviewAdmissionEvidence,
-			worker.WithCodeReviewTerminalStore(jobStore),
 			worker.WithLeaseRenewer(db.NewJobStore(controlPlaneDB)),
 		)
 		if workerPreviewStore != nil && cfg.NodeID != "" {
@@ -925,7 +909,6 @@ func main() {
 			cluster.NewAutomationTargetSweepLock(pool),
 		)
 		scheduler.SetCodeReviewScheduleReconciler(db.NewCodeReviewScheduleStore(pool))
-		scheduler.SetCallerSendWakeReconciler(db.NewCallerSendWakeStore(pool))
 		scheduler.SetCapabilityResolver(agentcapabilities.NewService(db.NewAgentCapabilityPolicyStore(pool)))
 		scheduler.SetSessionStore(sessionStore)
 		scheduler.SetDomainRecheck(
@@ -1778,22 +1761,14 @@ func buildServices(
 		issueStore, priorityScoreStore, complexityEstimateStore,
 		orgStore, llmClient, logger,
 	)
-	threadSendDependencies, err := threadservice.NewSendDependencies(pool, sessionStore, sessionThreadStore, jobStore)
-	if err != nil {
-		return nil, fmt.Errorf("construct worker-services thread send dependencies: %w", err)
-	}
-	threadSvc, err := threadservice.NewService(
+	threadSvc := threadservice.NewService(
 		sessionThreadStore,
 		sessionStore,
 		sessionMessageStore,
 		sessionLogStore,
 		jobStore,
-		threadSendDependencies,
 		logger,
 	)
-	if err != nil {
-		return nil, fmt.Errorf("construct worker-services thread service: %w", err)
-	}
 	threadSvc.SetCanceller(threadCancelRegistry)
 	threadSvc.SetOwnerLossOrchestrator(ownerloss.NewService(
 		sessionStore,
@@ -1810,7 +1785,6 @@ func buildServices(
 			Sessions: sessionStore,
 			Threads:  threadSvc,
 		},
-		reviewloopservice.WithStartTransactions(threadSendDependencies.Transactions),
 	)
 
 	logger.Info().
@@ -1925,10 +1899,7 @@ func buildServices(
 		}
 	}
 
-	codeReviewLifecycleStore, err := db.NewCodeReviewStoreWithTerminalTransactions(pool, threadSendDependencies.Transactions)
-	if err != nil {
-		return nil, fmt.Errorf("construct worker-services code review terminal store: %w", err)
-	}
+	codeReviewLifecycleStore := db.NewCodeReviewStore(pool)
 	codeReviewLifecycleStore.SetJobStore(jobStore)
 	codeReviewLifecycleStore.SetStreams(cache.NewCodeReviewStreams(redisClient, logger))
 	codeReviewLifecycleStore.SetLogger(logger)

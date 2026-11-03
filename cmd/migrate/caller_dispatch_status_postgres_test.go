@@ -143,7 +143,7 @@ func TestCallerDispatchStatusMigrationCommandPostgres(t *testing.T) {
 	var output bytes.Buffer
 	build.Stdout, build.Stderr = &output, &output
 	require.True(t, build.Run() == nil, "build the actual migration executable without publishing private captured diagnostics")
-	directory := callerIntentMigrationCommandSourceThrough(t, callerDispatchStatusHighestVersion)
+	directory := callerIntentMigrationCommandSourceThrough(t, 393)
 	migration, conn := newContentMigrationPostgres(t, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -152,6 +152,11 @@ func TestCallerDispatchStatusMigrationCommandPostgres(t *testing.T) {
 	metadata := seedCallerDispatchStatusMigrationMetadata(t, ctx, conn, f)
 	before := callerIntentMigrationRows(t, ctx, conn, f.org, true)
 	conn = runCallerIntentMigrationCommandWithRefusal(t, ctx, binary, directory, "up", false, conn, "", 0)
+	requireCallerIntentMigrationLedger(t, ctx, migration, conn, 393, false)
+	// Keep the historical down proof scoped to its original schema after
+	// exercising the supported full upgrade through the actual command.
+	require.NoError(t, migration.Migrate(392), "prepare only the isolated fixture at the historical status rollback boundary")
+	directory = callerIntentMigrationCommandSourceThrough(t, callerDispatchStatusHighestVersion)
 	requireCallerIntentMigrationLedger(t, ctx, migration, conn, 392, false)
 	requireCallerDispatchStatusMigrationCatalog(t, ctx, conn, 392, true, true)
 	require.True(t, callerIntentMigrationRowsEqual(before, callerIntentMigrationRows(t, ctx, conn, f.org, true)), "the real binary must preserve all original complete business rows while installing the passive prerequisite")

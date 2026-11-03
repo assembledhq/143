@@ -75,18 +75,6 @@ func (a RuntimeAdapter) CreateThread(ctx context.Context, input threadsvc.Create
 	return a.Threads.CreateThread(ctx, input)
 }
 
-// PreflightCreateThread forwards the same read-only creation checks used by E1.
-// Production adapters must provide them before a retained intent is prepared.
-func (a RuntimeAdapter) PreflightCreateThread(ctx context.Context, input threadsvc.CreateThreadInput) error {
-	preflight, ok := a.Threads.(interface {
-		PreflightCreateThread(context.Context, threadsvc.CreateThreadInput) error
-	})
-	if !ok {
-		return errors.New("retained thread creation preflight unavailable")
-	}
-	return preflight.PreflightCreateThread(ctx, input)
-}
-
 func (a RuntimeAdapter) SendMessage(ctx context.Context, input threadsvc.SendMessageInput) (*threadsvc.SendMessageResult, error) {
 	return a.Threads.SendMessage(ctx, input)
 }
@@ -94,7 +82,6 @@ func (a RuntimeAdapter) SendMessage(ctx context.Context, input threadsvc.SendMes
 type Service struct {
 	store             Store
 	runtime           Runtime
-	startTransactions threadsvc.SendTransactions
 	evidenceRefresher PublicationEvidenceRefresher
 	metrics           reviewLoopMetrics
 }
@@ -123,12 +110,8 @@ type strandedPublicationReviewStore interface {
 	RestartStrandedPublicationLoop(ctx context.Context, orgID, loopID uuid.UUID, inactiveBefore time.Time, summary string) (bool, error)
 }
 
-func NewService(store Store, runtime Runtime, options ...func(*Service)) *Service {
-	s := &Service{store: store, runtime: runtime, metrics: otelReviewLoopMetrics{}}
-	for _, option := range options {
-		option(s)
-	}
-	return s
+func NewService(store Store, runtime Runtime) *Service {
+	return &Service{store: store, runtime: runtime, metrics: otelReviewLoopMetrics{}}
 }
 
 func (s *Service) SetPublicationEvidenceRefresher(refresher PublicationEvidenceRefresher) {
@@ -185,9 +168,6 @@ type StartReviewLoopRequest struct {
 }
 
 func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req StartReviewLoopRequest) (*models.SessionReviewLoop, error) {
-	if loop, found, err := s.recoverCallerStart(ctx, orgID, sessionID, req); err != nil || found {
-		return loop, err
-	}
 	if req.MaxPasses < 1 || req.MaxPasses > MaxReviewPasses {
 		return nil, ErrInvalidPassCount
 	}
@@ -246,24 +226,6 @@ func (s *Service) Start(ctx context.Context, orgID, sessionID uuid.UUID, req Sta
 	}
 
 	threadLabel := reviewThreadLabel(agentType)
-	retained, err := s.retainedStartEnabled(ctx, orgID)
-	if err != nil {
-		return nil, err
-	}
-	if retained {
-		if preflight, ok := s.runtime.(interface {
-			PreflightCreateThread(context.Context, threadsvc.CreateThreadInput) error
-		}); ok {
-			if err := preflight.PreflightCreateThread(ctx, threadsvc.CreateThreadInput{OrgID: orgID, SessionID: sessionID,
-				AgentType: string(agentType), Model: req.Model, Label: threadLabel}); err != nil {
-				return nil, err
-			}
-		}
-		return s.startRetained(ctx, models.SessionReviewLoop{OrgID: orgID, SessionID: sessionID, AutomationRunID: req.AutomationRunID,
-			Source: source, ChangesetID: req.ChangesetID, WorkspaceRevision: req.WorkspaceRevision, DesiredHeadSHA: req.DesiredHeadSHA,
-			AgentType: agentType, MaxPasses: req.MaxPasses, FixMode: fixMode, ReviewRequired: req.ReviewRequired,
-			StartedByUserID: req.StartedByUserID, LoopStartCheckpointKey: session.SnapshotKey}, req.Model)
-	}
 	thread, err := s.runtime.CreateThread(ctx, threadsvc.CreateThreadInput{
 		SessionID: sessionID,
 		OrgID:     orgID,

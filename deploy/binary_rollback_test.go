@@ -20,6 +20,7 @@ func TestBinaryRollbackSchemaPhase(t *testing.T) {
 	function := source[start : start+end]
 	tests := []struct {
 		name, role, guard, fail string
+		schema                  string
 		expected                string
 		wantError               bool
 	}{
@@ -27,6 +28,9 @@ func TestBinaryRollbackSchemaPhase(t *testing.T) {
 		{name: "forward worker", role: "worker", expected: "replace\n"},
 		{name: "rollback app", role: "app", guard: "new-guard", expected: "new-guard|compose -f service.yml run --rm -T --pull never --no-deps api /bin/migrate verify-inactive-rollback 392\nreplace\n"},
 		{name: "rollback worker", role: "worker", guard: "new-guard", expected: "new-guard|compose -f service.yml run --rm -T --pull never --no-deps worker /bin/migrate verify-inactive-rollback 392\nreplace\n"},
+		{name: "rollback app retaining credentials", role: "app", guard: "new-guard", schema: "393", expected: "new-guard|compose -f service.yml run --rm -T --pull never --no-deps api /bin/migrate verify-inactive-rollback 393\nreplace\n"},
+		{name: "rollback worker retaining credentials", role: "worker", guard: "new-guard", schema: "393", expected: "new-guard|compose -f service.yml run --rm -T --pull never --no-deps worker /bin/migrate verify-inactive-rollback 393\nreplace\n"},
+		{name: "393 guard failure blocks worker replacement", role: "worker", guard: "new-guard", schema: "393", fail: "1", wantError: true, expected: "new-guard|compose -f service.yml run --rm -T --pull never --no-deps worker /bin/migrate verify-inactive-rollback 393\n"},
 		{name: "guard failure blocks replacement", role: "app", guard: "new-guard", fail: "1", wantError: true, expected: "new-guard|compose -f service.yml run --rm -T --pull never --no-deps api /bin/migrate verify-inactive-rollback 392\n"},
 		{name: "forward migration failure blocks replacement", role: "app", fail: "1", wantError: true, expected: "target|compose -f service.yml run --rm -T --no-deps api /bin/migrate repair-known-dirty\n"},
 	}
@@ -37,7 +41,11 @@ func TestBinaryRollbackSchemaPhase(t *testing.T) {
 			if service == "app" {
 				service = "api"
 			}
-			output, err := runWorkerShell(t, function, "\nROLE="+tt.role+"\nHEALTH_SERVICE="+service+"\nIMAGE_TAG=target\nCOMPOSE_FILE=service.yml\nBINARY_ROLLBACK_GUARD_TAG="+tt.guard+"\nBINARY_ROLLBACK_SCHEMA_VERSION=392\nFAIL="+tt.fail+`
+			schema := tt.schema
+			if schema == "" {
+				schema = "392"
+			}
+			output, err := runWorkerShell(t, function, "\nROLE="+tt.role+"\nHEALTH_SERVICE="+service+"\nIMAGE_TAG=target\nCOMPOSE_FILE=service.yml\nBINARY_ROLLBACK_GUARD_TAG="+tt.guard+"\nBINARY_ROLLBACK_SCHEMA_VERSION="+schema+"\nFAIL="+tt.fail+`
 docker() {
   # Deliberately consume stdin, as compose run does. The real phase must
   # detach stdin so a remote heredoc's remaining commands survive.
@@ -73,11 +81,14 @@ func TestBinaryRollbackRequiresPinnedInactiveMode(t *testing.T) {
 		wantError   bool
 	}{
 		{name: "pinned routine rollback"},
+		{name: "pinned schema393 rollback", extra: "BINARY_ROLLBACK_SCHEMA_VERSION=393"},
 		{name: "mutable target", extra: "TAG=latest", wantError: true},
 		{name: "mutable guard", extra: "BINARY_ROLLBACK_GUARD_TAG=latest", wantError: true},
 		{name: "missing guard", extra: "BINARY_ROLLBACK_GUARD_TAG=", wantError: true},
 		{name: "missing schema", extra: "BINARY_ROLLBACK_SCHEMA_VERSION=", wantError: true},
-		{name: "different schema", extra: "BINARY_ROLLBACK_SCHEMA_VERSION=393", wantError: true},
+		{name: "future schema", extra: "BINARY_ROLLBACK_SCHEMA_VERSION=394", wantError: true},
+		{name: "older schema", extra: "BINARY_ROLLBACK_SCHEMA_VERSION=391", wantError: true},
+		{name: "schema suffix", extra: "BINARY_ROLLBACK_SCHEMA_VERSION=393x", wantError: true},
 		{name: "same image", extra: "TAG=$BINARY_ROLLBACK_GUARD_TAG", wantError: true},
 		{name: "stateful role", extra: "ROLE=db", wantError: true},
 		{name: "maintenance", extra: "DEPLOY_MODE=maintenance", wantError: true},

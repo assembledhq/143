@@ -17,11 +17,6 @@ import (
 func seedConfirmedDrainReview(t *testing.T, pool *pgxpool.Pool, parent string) (strandedReviewFixture, json.RawMessage) {
 	t.Helper()
 	f := seedStrandedReview(t, pool, parent)
-	return f, stageConfirmedDrainReview(t, pool, f)
-}
-
-func stageConfirmedDrainReview(t *testing.T, pool *pgxpool.Pool, f strandedReviewFixture) json.RawMessage {
-	t.Helper()
 	reviewID := int64(9876)
 	reviewURL := "https://example.invalid/review/9876"
 	receipt, err := fullAssessmentPublicationReceipt(f.assessment, "all", "head", &reviewID, &reviewURL, nil, nil)
@@ -32,7 +27,7 @@ func stageConfirmedDrainReview(t *testing.T, pool *pgxpool.Pool, f strandedRevie
 	require.NoError(t, err, "seed terminal controller metadata with exact receipt")
 	_, err = pool.Exec(f.ctx(), `UPDATE code_review_pr_state SET active_assessment_id=$3 WHERE org_id=$1 AND pull_request_id=$2`, f.job.OrgID, f.job.PullRequestID, f.assessment)
 	require.NoError(t, err, "pin scheduler to original assessment")
-	return receipt
+	return f, receipt
 }
 
 func seedConfirmedDrainThread(t *testing.T, pool *pgxpool.Pool, f strandedReviewFixture) (uuid.UUID, uuid.UUID, string) {

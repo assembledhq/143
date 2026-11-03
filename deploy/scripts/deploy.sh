@@ -25,8 +25,8 @@ validate_binary_rollback() {
   [[ "${BINARY_ROLLBACK_GUARD_TAG:-}" =~ ^[0-9a-f]{40}$ ]] &&
     [[ "$TAG" =~ ^[0-9a-f]{40}$ ]] &&
     [ "$TAG" != "$BINARY_ROLLBACK_GUARD_TAG" ] &&
-    [ "${BINARY_ROLLBACK_SCHEMA_VERSION:-}" = 392 ] || {
-      echo "ERROR: binary rollback requires distinct full target/guard SHAs and schema 392." >&2
+    [[ "${BINARY_ROLLBACK_SCHEMA_VERSION:-}" =~ ^(392|393)$ ]] || {
+      echo "ERROR: binary rollback requires distinct full target/guard SHAs and explicitly pinned schema 392 or 393." >&2
       return 1
     }
   case "$ROLE" in app|worker) ;; *) echo "ERROR: binary rollback only supports app and worker roles." >&2; return 1 ;; esac

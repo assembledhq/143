@@ -96,11 +96,10 @@ type ThreadInboxDeliverySummary struct {
 }
 
 type SendThreadMessageResponse struct {
-	Message       SessionMessage                  `json:"message"`
-	InboxEntry    *ThreadInboxEntry               `json:"inbox_entry,omitempty"`
-	ThreadStatus  ThreadStatus                    `json:"thread_status"`
-	DeliveryState ThreadInboxDeliveryState        `json:"delivery_state"`
-	Admission     *SessionMessageAdmissionReceipt `json:"admission,omitempty"`
+	Message       SessionMessage           `json:"message"`
+	InboxEntry    *ThreadInboxEntry        `json:"inbox_entry,omitempty"`
+	ThreadStatus  ThreadStatus             `json:"thread_status"`
+	DeliveryState ThreadInboxDeliveryState `json:"delivery_state"`
 }
 
 func (s *ThreadInboxDeliverySummary) Normalize() {
