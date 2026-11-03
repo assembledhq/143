@@ -155,7 +155,7 @@ class SecurityGoBootstrapTests(unittest.TestCase):
 
     def test_actual_security_workflow_keeps_scan_contract(self):
         job = security_job()
-        self.assertIn("runs-on: ubuntu-latest", job)
+        self.assertIn("runs-on: blacksmith-4vcpu-ubuntu-2404", job)
         self.assertEqual(job.count("uses:"), 1, "only checkout remains an action dependency in Security Scan")
         self.assertNotIn("setup-go", job, "Security Scan must not download the optional setup action")
         self.assertNotIn("continue-on-error", job)

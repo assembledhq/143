@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_srl_startup_send_due;

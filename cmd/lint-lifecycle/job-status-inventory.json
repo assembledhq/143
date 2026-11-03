@@ -557,17 +557,6 @@
       ]
     },
     {
-      "id": "internal/db/code_review_scheduling.go:hasActiveCodeReview:sql:1",
-      "source_sha256": "1e318abe97d633010ce2a432147994bec6ace8e535bbc573f66243acd70e2dc4",
-      "classification": "nonterminal-consumer",
-      "action_0a": "Keep pending/running for the exact code_review:<output-key> starter/controller predicate, which is not first-release parkable. Add an independent exact current parked-control/nonterminal-input-consumer branch to the PR/session active-work decision so an old metadata row or controller absence cannot hide lawful parked input. Preserve assessment, thread, force-fresh and physical-drain identity.",
-      "reason": "The enclosing admission decision must preserve durable child input even though its existing jobs predicate names only a non-parkable starter controller.",
-      "evidence": [
-        "internal/db/code_review_scheduling.go:466",
-        "j . status in ( 'pending' , 'running' )"
-      ]
-    },
-    {
       "id": "internal/db/code_review_scheduling.go:UpsertCodeReviewWake:sql:1",
       "source_sha256": "63b6f950f0d3cd04aac0c880288becaf08979c0ee942bfd9175fb9e1e26e272c",
       "classification": "runnable",
@@ -576,6 +565,17 @@
       "evidence": [
         "internal/db/code_review_scheduling.go:156",
         "status = 'pending'"
+      ]
+    },
+    {
+      "id": "internal/db/code_review_scheduling.go:hasActiveCodeReview:sql:1",
+      "source_sha256": "1e318abe97d633010ce2a432147994bec6ace8e535bbc573f66243acd70e2dc4",
+      "classification": "nonterminal-consumer",
+      "action_0a": "Keep pending/running for the exact code_review:<output-key> starter/controller predicate, which is not first-release parkable. Add an independent exact current parked-control/nonterminal-input-consumer branch to the PR/session active-work decision so an old metadata row or controller absence cannot hide lawful parked input. Preserve assessment, thread, force-fresh and physical-drain identity.",
+      "reason": "The enclosing admission decision must preserve durable child input even though its existing jobs predicate names only a non-parkable starter controller.",
+      "evidence": [
+        "internal/db/code_review_scheduling.go:466",
+        "j . status in ( 'pending' , 'running' )"
       ]
     },
     {
@@ -749,71 +749,6 @@
       "evidence": [
         "internal/db/continuation_recovery.go:150",
         "j . status = 'running'"
-      ]
-    },
-    {
-      "id": "internal/db/jobs_pr_check_sync.go:JobStore.EnqueuePullRequestHealthWork:go:1",
-      "source_sha256": "0d79b1979c352b649911a0332b481d8acf1e5c02b135bc5e68e7b551f995be2f",
-      "classification": "unrelated-domain",
-      "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status.",
-      "reason": "PR-health predecessor sequencing does not own session input execution.",
-      "evidence": [
-        "internal/db/jobs_pr_check_sync.go:71",
-        "job.Status == models.JobStatusPending || job.AwaitingPredecessor"
-      ]
-    },
-    {
-      "id": "internal/db/jobs_pr_check_sync.go:JobStore.EnqueuePullRequestHealthWork:sql:1",
-      "source_sha256": "cd603f2710aa486b34531e3f4be788d81d89717380d3ff583e20898a94df7d9a",
-      "classification": "unrelated-domain",
-      "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status.",
-      "reason": "PR-health predecessor sequencing does not own session input execution.",
-      "evidence": [
-        "internal/db/jobs_pr_check_sync.go:44",
-        "j . status",
-        "j . status in ( 'pending' , 'running' )",
-        "predecessor . status in ( 'pending' , 'running' )"
-      ],
-      "predicate_policies": [
-        {
-          "fact": "j . status",
-          "classification": "unrelated-domain",
-          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
-        },
-        {
-          "fact": "j . status in ( 'pending' , 'running' )",
-          "classification": "unrelated-domain",
-          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
-        },
-        {
-          "fact": "predecessor . status in ( 'pending' , 'running' )",
-          "classification": "unrelated-domain",
-          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
-        }
-      ]
-    },
-    {
-      "id": "internal/db/jobs_pr_check_sync.go:JobStore.GetPullRequestCheckSyncPredecessor:sql:1",
-      "source_sha256": "229afc6e53b8929ada0225118e5c0e19e6b2442c772d220ab30b873f7c386ad6",
-      "classification": "unrelated-domain",
-      "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status.",
-      "reason": "PR-health predecessor sequencing does not own session input execution.",
-      "evidence": [
-        "internal/db/jobs_pr_check_sync.go:111",
-        "status",
-        "status in ( 'pending' , 'running' )"
-      ],
-      "predicate_policies": [
-        {
-          "fact": "status",
-          "classification": "unrelated-domain",
-          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
-        },
-        {
-          "fact": "status in ( 'pending' , 'running' )",
-          "classification": "unrelated-domain",
-          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
-        }
       ]
     },
     {
@@ -995,6 +930,17 @@
       "evidence": [
         "internal/db/jobs.go:281",
         "status in ( 'pending' , 'running' )"
+      ]
+    },
+    {
+      "id": "internal/db/jobs.go:JobStore.LatestJobOutcomeByDedupeKey:sql:1",
+      "source_sha256": "658466643ed8589b7c3d1323f7361e9a5ddf5704ff613f40876dc9eaf22412a1",
+      "classification": "observation",
+      "action_0a": "Keep the exact latest status and last_error observation from the same tenant/queue/dedupe job; downstream consumers must classify parked controls explicitly if initializer jobs become parkable. Do not infer readiness or mutation authority from this diagnostic read.",
+      "reason": "The generation-scoped read observes an initializer outcome without changing job eligibility or ownership.",
+      "evidence": [
+        "internal/db/jobs.go:378",
+        "status"
       ]
     },
     {
@@ -1305,30 +1251,6 @@
       ]
     },
     {
-      "id": "internal/db/jobs.go:JobStore.terminalizeIfReferencedSessionTerminal:sql:1",
-      "source_sha256": "26e301684207e4698d4d10001f9694c0d718f2c07c796cd49a3d3a65374097eb",
-      "classification": "lifecycle-cleanup",
-      "action_0a": "Retain the running execution-job update for its existing lease domain. In the same lifecycle end/delete transaction, invoke SupersedeUnlaunchedIntentInTx for each exact obsolete parked request under canonical session/thread locks; do not simply widen a bulk failure/cancellation UPDATE. Preserve audit/grants and uncertain physical drain blockers.",
-      "reason": "Logical end/delete must close now-invalid parked intent even though generic running-only cleanup cannot own that lease-free state.",
-      "evidence": [
-        "internal/db/jobs.go:1114",
-        "j . status = 'running'",
-        "status = 'failed'"
-      ],
-      "predicate_policies": [
-        {
-          "fact": "j . status = 'running'",
-          "classification": "lifecycle-cleanup",
-          "action_0a": "Retain the running execution-job update for its existing lease domain. In the same lifecycle end/delete transaction, invoke SupersedeUnlaunchedIntentInTx for each exact obsolete parked request under canonical session/thread locks; do not simply widen a bulk failure/cancellation UPDATE. Preserve audit/grants and uncertain physical drain blockers."
-        },
-        {
-          "fact": "status = 'failed'",
-          "classification": "lifecycle-cleanup",
-          "action_0a": "Retain the running execution-job update for its existing lease domain. In the same lifecycle end/delete transaction, invoke SupersedeUnlaunchedIntentInTx for each exact obsolete parked request under canonical session/thread locks; do not simply widen a bulk failure/cancellation UPDATE. Preserve audit/grants and uncertain physical drain blockers."
-        }
-      ]
-    },
-    {
       "id": "internal/db/jobs.go:JobStore.TerminalizeRunningSessionJobs:sql:1",
       "source_sha256": "107f151da8ff3c9a372a298a0df31b86ffc4122231291eb10c25bf25a0249713",
       "classification": "lifecycle-cleanup",
@@ -1364,6 +1286,95 @@
       ]
     },
     {
+      "id": "internal/db/jobs.go:JobStore.terminalizeIfReferencedSessionTerminal:sql:1",
+      "source_sha256": "26e301684207e4698d4d10001f9694c0d718f2c07c796cd49a3d3a65374097eb",
+      "classification": "lifecycle-cleanup",
+      "action_0a": "Retain the running execution-job update for its existing lease domain. In the same lifecycle end/delete transaction, invoke SupersedeUnlaunchedIntentInTx for each exact obsolete parked request under canonical session/thread locks; do not simply widen a bulk failure/cancellation UPDATE. Preserve audit/grants and uncertain physical drain blockers.",
+      "reason": "Logical end/delete must close now-invalid parked intent even though generic running-only cleanup cannot own that lease-free state.",
+      "evidence": [
+        "internal/db/jobs.go:1114",
+        "j . status = 'running'",
+        "status = 'failed'"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "j . status = 'running'",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "Retain the running execution-job update for its existing lease domain. In the same lifecycle end/delete transaction, invoke SupersedeUnlaunchedIntentInTx for each exact obsolete parked request under canonical session/thread locks; do not simply widen a bulk failure/cancellation UPDATE. Preserve audit/grants and uncertain physical drain blockers."
+        },
+        {
+          "fact": "status = 'failed'",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "Retain the running execution-job update for its existing lease domain. In the same lifecycle end/delete transaction, invoke SupersedeUnlaunchedIntentInTx for each exact obsolete parked request under canonical session/thread locks; do not simply widen a bulk failure/cancellation UPDATE. Preserve audit/grants and uncertain physical drain blockers."
+        }
+      ]
+    },
+    {
+      "id": "internal/db/jobs_pr_check_sync.go:JobStore.EnqueuePullRequestHealthWork:go:1",
+      "source_sha256": "0d79b1979c352b649911a0332b481d8acf1e5c02b135bc5e68e7b551f995be2f",
+      "classification": "unrelated-domain",
+      "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status.",
+      "reason": "PR-health predecessor sequencing does not own session input execution.",
+      "evidence": [
+        "internal/db/jobs_pr_check_sync.go:71",
+        "job.Status == models.JobStatusPending || job.AwaitingPredecessor"
+      ]
+    },
+    {
+      "id": "internal/db/jobs_pr_check_sync.go:JobStore.EnqueuePullRequestHealthWork:sql:1",
+      "source_sha256": "cd603f2710aa486b34531e3f4be788d81d89717380d3ff583e20898a94df7d9a",
+      "classification": "unrelated-domain",
+      "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status.",
+      "reason": "PR-health predecessor sequencing does not own session input execution.",
+      "evidence": [
+        "internal/db/jobs_pr_check_sync.go:44",
+        "j . status",
+        "j . status in ( 'pending' , 'running' )",
+        "predecessor . status in ( 'pending' , 'running' )"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "j . status",
+          "classification": "unrelated-domain",
+          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
+        },
+        {
+          "fact": "j . status in ( 'pending' , 'running' )",
+          "classification": "unrelated-domain",
+          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
+        },
+        {
+          "fact": "predecessor . status in ( 'pending' , 'running' )",
+          "classification": "unrelated-domain",
+          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
+        }
+      ]
+    },
+    {
+      "id": "internal/db/jobs_pr_check_sync.go:JobStore.GetPullRequestCheckSyncPredecessor:sql:1",
+      "source_sha256": "229afc6e53b8929ada0225118e5c0e19e6b2442c772d220ab30b873f7c386ad6",
+      "classification": "unrelated-domain",
+      "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status.",
+      "reason": "PR-health predecessor sequencing does not own session input execution.",
+      "evidence": [
+        "internal/db/jobs_pr_check_sync.go:111",
+        "status",
+        "status in ( 'pending' , 'running' )"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "status",
+          "classification": "unrelated-domain",
+          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
+        },
+        {
+          "fact": "status in ( 'pending' , 'running' )",
+          "classification": "unrelated-domain",
+          "action_0a": "Keep pending/running polling and dedupe sets for sync_pull_request_state/rebuild_pull_request_health jobs, which cannot enter the first-release parked request protocol. Preserve queue/job_type/pull_request identity; do not widen unrelated health jobs solely because jobs gained a status."
+        }
+      ]
+    },
+    {
       "id": "internal/db/node_store.go:NodeStore.WorkerDeployStatus:sql:1",
       "source_sha256": "6a2fc1e2a600ba89db6f72985822258c67e9e29f5446432f72e0ac35de6aaddb",
       "classification": "observation",
@@ -1394,6 +1405,17 @@
       "evidence": [
         "internal/db/review_loops.go:102",
         "jobs . status in ( 'pending' , 'running' )"
+      ]
+    },
+    {
+      "id": "internal/db/session_checkpoint_persistence.go:SessionStore.publishCheckpointWithProvenanceRow:sql:1",
+      "source_sha256": "13d8e35c90d3630c71144231026638b99f68be9f6885b2acd78b4b3f11d93e4b",
+      "classification": "lease-owned",
+      "action_0a": "Retain running plus the exact job/lock-token and required live-lease guard; convert lifecycle mutation to its named authority seam. awaiting_start_control has no execution lease and must never satisfy this predicate.",
+      "reason": "This operation spends current execution/publication authority, not logical input ownership.",
+      "evidence": [
+        "internal/db/session_checkpoint_persistence.go:75",
+        "j . status = 'running'"
       ]
     },
     {
@@ -1684,17 +1706,6 @@
       ]
     },
     {
-      "id": "internal/db/session_checkpoint_persistence.go:SessionStore.publishCheckpointWithProvenanceRow:sql:1",
-      "source_sha256": "13d8e35c90d3630c71144231026638b99f68be9f6885b2acd78b4b3f11d93e4b",
-      "classification": "lease-owned",
-      "action_0a": "Retain running plus the exact job/lock-token and required live-lease guard; convert lifecycle mutation to its named authority seam. awaiting_start_control has no execution lease and must never satisfy this predicate.",
-      "reason": "This operation spends current execution/publication authority, not logical input ownership.",
-      "evidence": [
-        "internal/db/session_checkpoint_persistence.go:75",
-        "j . status = 'running'"
-      ]
-    },
-    {
       "id": "internal/db/session_store.go:SessionStore.SoftDelete:sql:1",
       "source_sha256": "efacbcf258d8b9e935e0fc2b7f95dcf934d8a920fd49c840c6e516294d07aeb4",
       "classification": "lifecycle-cleanup",
@@ -1800,17 +1811,6 @@
       ]
     },
     {
-      "id": "internal/services/codereview/scheduling.go:Service.deferCapacitySchedule:sql:1",
-      "source_sha256": "97c503e1553e4802ae8679d3b9dbd8e5b8d20c51c36d437c3404ea565a9e9e32",
-      "classification": "lease-owned",
-      "action_0a": "Retain running plus the exact job/lock-token and required live-lease guard; convert lifecycle mutation to its named authority seam. awaiting_start_control has no execution lease and must never satisfy this predicate.",
-      "reason": "This operation spends current execution/publication authority, not logical input ownership.",
-      "evidence": [
-        "internal/services/codereview/scheduling.go:985",
-        "status = 'running'"
-      ]
-    },
-    {
       "id": "internal/services/codereview/scheduling.go:Service.ReconcileSchedule:sql:1",
       "source_sha256": "97c503e1553e4802ae8679d3b9dbd8e5b8d20c51c36d437c3404ea565a9e9e32",
       "classification": "lease-owned",
@@ -1822,13 +1822,57 @@
       ]
     },
     {
+      "id": "internal/services/codereview/scheduling.go:Service.deferCapacitySchedule:sql:1",
+      "source_sha256": "97c503e1553e4802ae8679d3b9dbd8e5b8d20c51c36d437c3404ea565a9e9e32",
+      "classification": "lease-owned",
+      "action_0a": "Retain running plus the exact job/lock-token and required live-lease guard; convert lifecycle mutation to its named authority seam. awaiting_start_control has no execution lease and must never satisfy this predicate.",
+      "reason": "This operation spends current execution/publication authority, not logical input ownership.",
+      "evidence": [
+        "internal/services/codereview/scheduling.go:985",
+        "status = 'running'"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_setup_failure.go:codeReviewPersistedSetupFailure:go:1",
+      "source_sha256": "d2e40f963692e22698ecc49faf821fa9bbb91eeb1b3fb6f86b80c9052a51cb5e",
+      "classification": "terminal-only",
+      "action_0a": "Retain dead_letter-only interpretation of the exact versioned, allowlisted setup-failure record; awaiting_start_control is not a terminal failure and must not stop a review through this classifier.",
+      "reason": "Only a committed terminal initializer failure can transport deterministic npm rejection to the controller; raw diagnostics and nonterminal statuses do not qualify.",
+      "evidence": [
+        "internal/worker/code_review_setup_failure.go:38",
+        "status != models.JobStatusDeadLetter || failure == nil || !strings.HasPrefix(*failure, codeReviewSetupFailurePrefix)"
+      ]
+    },
+    {
       "id": "internal/worker/code_review_workspace.go:ensureCodeReviewWorkspaceReadyWithFallback:go:1",
+      "source_sha256": "d976374544dcbb5d9c01bb2ba096f6e2bfd0f400a45abcb2cab13a187796d366",
+      "classification": "unrelated-domain",
+      "action_0a": "Keep prepare_code_review_workspace pending/running initializers waiting after preflight rather than launching duplicate reviewer setup. Initializers remain non-parkable; explicitly classify awaiting_start_control before permitting parked initializer jobs.",
+      "reason": "This fallback guard observes the physical workspace initializer, not an admitted resumable session input.",
+      "evidence": [
+        "internal/worker/code_review_workspace.go:159",
+        "afterPreflight && latestStatus != models.JobStatusPending && latestStatus != models.JobStatusRunning"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_workspace.go:ensureCodeReviewWorkspaceReadyWithFallback:go:2",
+      "source_sha256": "17de24ec57baf383ec23ca6f907470a5a177f16d504a6d5e7f3e505cf01edc42",
+      "classification": "unrelated-domain",
+      "action_0a": "Keep cancellation uncertainty and pending/running initializer outcomes blocking reviewer fallback. Initializers remain non-parkable; if parked controls are introduced, treat them as nonterminal ownership and require canonical closure before fallback.",
+      "reason": "The post-cancellation guard prevents concurrent initializer and reviewer setup; it does not authorize lifecycle parked-input cancellation.",
+      "evidence": [
+        "internal/worker/code_review_workspace.go:189",
+        "cancelErr != nil || status == models.JobStatusPending || status == models.JobStatusRunning"
+      ]
+    },
+    {
+      "id": "internal/worker/code_review_workspace.go:ensureCodeReviewWorkspaceReadyWithFallback:go:3",
       "source_sha256": "2012b2eda3b3e03036305d3f4fd2672bb242f2ab78fa24090525c0374063c83f",
       "classification": "unrelated-domain",
       "action_0a": "Keep prepare_code_review_workspace initializer pending/running handling separate from parked session inputs; explicitly reject an impossible parked initializer result instead of falling through to fresh/fallback execution. Review anew if initializer jobs ever gain parked controls.",
       "reason": "This switch consumes the workspace-initializer status lookup, not a resumable answered request.",
       "evidence": [
-        "internal/worker/code_review_workspace.go:171",
+        "internal/worker/code_review_workspace.go:196",
         "switch latestStatus;case(models.JobStatusFailed, models.JobStatusDeadLetter, models.JobStatusCancelled);case(models.JobStatusPending, models.JobStatusRunning);case()"
       ]
     },
@@ -2120,6 +2164,172 @@
       "evidence": [
         "migrations/000309_resume_bounded_retention.up.sql:1",
         "j . status in ( 'succeeded' , 'failed' )"
+      ]
+    },
+    {
+      "id": "migrations/000349_jobs_nonterminal_dedupe.up.sql:SQL",
+      "source_sha256": "57ca145ebec7cd977e854d210b77f0c2fd4735488995827903119b8c2b4390f8",
+      "classification": "nonterminal-consumer",
+      "action_0a": "Build the broader unique global queue/key index before permitting parked rows. Retain the older compatible index during the floor; collision never proves same-input binding.",
+      "reason": "Pending, running and parked intent share the existing global queue/key uniqueness scope without broadening runnable eligibility.",
+      "evidence": [
+        "migrations/000349_jobs_nonterminal_dedupe.up.sql:1",
+        "status in ( 'pending' , 'running' , 'awaiting_start_control' )",
+        "internal/db/job_status_policy_postgres_test.go:TestJobStatusNonterminalDedupePostgres"
+      ]
+    },
+    {
+      "id": "migrations/000350_jobs_start_control_checks.up.sql:SQL",
+      "source_sha256": "21ff879b5887229f22ec1d8b5fd043b0392d43a1c38952cf009a5198cf8809ab",
+      "classification": "lifecycle-cleanup",
+      "action_0a": "Install the exact seven-status model/schema set and reject all execution-lease/completion slots on parked rows. The retained legacy check still forbids parking until the broader index and new checks are validated.",
+      "reason": "Schema support and lease absence are coupled prerequisites, not permission for E to create parked rows before full caller-policy proof.",
+      "evidence": [
+        "migrations/000350_jobs_start_control_checks.up.sql:1",
+        "status <> 'awaiting_start_control'",
+        "status in ( 'pending' , 'running' , 'awaiting_start_control' , 'succeeded' , 'failed' , 'cancelled' , 'dead_letter' )",
+        "internal/db/job_status_policy_postgres_test.go:TestJobStatusParkedLeaseCheckPostgres"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "status <> 'awaiting_start_control'",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "A parked binding must have no execution lease or terminal completion timestamp."
+        },
+        {
+          "fact": "status in ( 'pending' , 'running' , 'awaiting_start_control' , 'succeeded' , 'failed' , 'cancelled' , 'dead_letter' )",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "Validate exactly the supported enum, without converting parked intent to runnable or terminal work."
+        }
+      ]
+    },
+    {
+      "id": "migrations/000352_jobs_start_control_status.down.sql:SQL",
+      "source_sha256": "8e61ad8a71b74e5553e9209b6f71919c4ecfac65bdf0cc49dadc553b474f3b15",
+      "classification": "lifecycle-cleanup",
+      "action_0a": "Under exclusive schema/evidence locks, refuse rollback if any parked intent or active protocol remains; only an inactive empty-parked rollback restores the legacy six-status check as NOT VALID. Migration 351 down validates it in a separate weaker-lock transaction.",
+      "reason": "Rollback cannot discard or reinterpret a durable parked consumer.",
+      "evidence": [
+        "migrations/000352_jobs_start_control_status.down.sql:1",
+        "status = 'awaiting_start_control'",
+        "status in ( 'pending' , 'running' , 'succeeded' , 'failed' , 'cancelled' , 'dead_letter' )",
+        "migrations/000351_jobs_start_control_checks_validate.down.sql:1",
+        "internal/db/job_status_policy_postgres_test.go:TestJobStatusParkedRollbackRefusalPostgres"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "status = 'awaiting_start_control'",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "Any retained parked job prevents removal of its status support."
+        },
+        {
+          "fact": "status in ( 'pending' , 'running' , 'succeeded' , 'failed' , 'cancelled' , 'dead_letter' )",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "Install the legacy set only after fresh absence and protocol rollback checks under retained locks; validate separately in migration 351 down."
+        }
+      ]
+    },
+    {
+      "id": "migrations/000356_runtime_consumer_job_reference.down.sql:SQL",
+      "source_sha256": "e4e2f42409305f98ca76b1f31bffdc0195370a33d00d6c4dd00920c01eb9ab4f",
+      "classification": "terminal-only",
+      "action_0a": "Restore the prior terminal-only retention function only after locked absence of every newer consumer reference and resource obligation. Refuse retained protocol or bindings rather than erase their guards.",
+      "reason": "Inactive rollback preserves the original succeeded/failed set and cannot reopen unsafe retention while newer evidence exists.",
+      "evidence": [
+        "migrations/000356_runtime_consumer_job_reference.down.sql:1",
+        "j . status in ( 'succeeded' , 'failed' )",
+        "internal/db/session_lifecycle_consumer_postgres_test.go:TestLifecycleConsumerReferenceRollbackRefusalPostgres"
+      ]
+    },
+    {
+      "id": "migrations/000356_runtime_consumer_job_reference.up.sql:SQL",
+      "source_sha256": "adae116ddce9f3bb2f8d4ba1da970349b046a4af49753aa92a448411f0726ba6",
+      "classification": "terminal-only",
+      "action_0a": "Keep succeeded/failed cleanup narrow and exclude dispatch/runtime references plus unresolved object obligations in the candidate query before LIMIT. Age and terminal status are not physical-settlement proof.",
+      "reason": "Referenced jobs remain durable without starving unrelated cleanup; parked jobs are never terminal retention candidates.",
+      "evidence": [
+        "migrations/000356_runtime_consumer_job_reference.up.sql:1",
+        "j . status in ( 'succeeded' , 'failed' )",
+        "internal/db/session_lifecycle_consumer_postgres_test.go:TestLifecycleConsumerRetainedJobsDoNotStarveBatchPostgres"
+      ]
+    },
+    {
+      "id": "migrations/000363_start_preparation_job_reference.down.sql:SQL",
+      "source_sha256": "90a4a7bd096bcd0f4247745112b123801d2c7af807fb1396b9427237a1cca470",
+      "classification": "terminal-only",
+      "action_0a": "Restore the previous consumer retention function only after locked absence of preparation rows and retained protocol. Never drop a preparation reference or restore cleanup across physical uncertainty.",
+      "reason": "Rollback preserves the existing succeeded/failed set and every older consumer/resource exclusion; parked status is never a terminal cleanup candidate.",
+      "evidence": [
+        "migrations/000363_start_preparation_job_reference.down.sql:1",
+        "j . status in ( 'succeeded' , 'failed' )",
+        "internal/db/session_lifecycle_preparation_postgres_test.go:TestLifecyclePreparationRetainedRollbackPostgres"
+      ]
+    },
+    {
+      "id": "migrations/000363_start_preparation_job_reference.up.sql:SQL",
+      "source_sha256": "993e30fad123d77826cb88cc190b6dacf66909e1326fb5022e18ad5d99668cf3",
+      "classification": "terminal-only",
+      "action_0a": "Retain the narrow succeeded/failed cleanup policy and exclude all current preparation references before LIMIT. Execution closure, expired deadlines and terminal job status do not settle a physical operation.",
+      "reason": "A closed preparation keeps its exact job and source evidence without starving unrelated cleanup; the preparation FK is a second retention backstop, not the candidate policy.",
+      "evidence": [
+        "migrations/000363_start_preparation_job_reference.up.sql:1",
+        "j . status in ( 'succeeded' , 'failed' )",
+        "internal/db/session_lifecycle_preparation_postgres_test.go:TestLifecyclePreparationRetainedJobsDoNotStarveBatchPostgres"
+      ]
+    },
+    {
+      "id": "migrations/000379_legacy_input_consumer_jobs_index.up.sql:SQL",
+      "source_sha256": "9ae25ccca01ef8bee5d640e933e26f88832c58cac7f42f0ed61c21ce020ab21b",
+      "classification": "nonterminal-consumer",
+      "action_0a": "Build one standalone concurrent eligible-tenant/id lookup whose CASE key equals org_id only for run_agent and continue_session in pending, running or awaiting_start_control, excluding NULL keys. Couple that exact key to production selection and the shared consumer policy; preserve the rollback floor before its separate concurrent down.",
+      "reason": "The measured fixture's insert-only terminal rows never entered this index; unvacuumed visibility-map absence does not prove bounded traversal of dead eligible versions after status/lease churn. H must measure vacuum lag, churn and large eligible cohorts. This access path neither makes parked jobs runnable nor supplies admission authority.",
+      "evidence": [
+        "migrations/000379_legacy_input_consumer_jobs_index.up.sql:1",
+        "status in ( 'pending' , 'running' , 'awaiting_start_control' )",
+        "internal/db/session_lifecycle_legacy_job_index_test.go:TestLifecycleLegacyJobIndexMatchesConsumerPolicy",
+        "internal/db/session_lifecycle_legacy_job_resource_postgres_test.go",
+        "internal/db/session_lifecycle_consumer_query_postgres_test.go"
+      ]
+    },
+    {
+      "id": "migrations/000380_lifecycle_consumer_index_rollback_floor.down.sql:SQL",
+      "source_sha256": "a5f57f4377287673f026598683d1afa30c41104972f70c339ba68ca919890a11",
+      "classification": "lifecycle-cleanup",
+      "action_0a": "Before any standalone consumer/recovery index down, take bounded schema/evidence locks and refuse positive protocol stamps or retained recovery, preparation, dispatch/runtime binding, parked or unresolved resource-job evidence. This preflight does not inhibit writers across later concurrent drops.",
+      "reason": "A refused rollback must leave the complete supporting index floor, including recovery identity uniqueness, installed rather than weaken it before a later column guard runs.",
+      "evidence": [
+        "migrations/000380_lifecycle_consumer_index_rollback_floor.down.sql:1",
+        "status = 'awaiting_start_control'",
+        "internal/db/session_lifecycle_index_rollback_postgres_test.go:TestLifecycleConsumerIndexRollbackFloorPostgres",
+        "docs/exec-plans/active/session-lifecycle-0a-contract-freeze.md"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "status = 'awaiting_start_control'",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "Any retained parked job prevents removal of consumer/recovery lookup indexes before its status and structural guards can be considered for inactive rollback."
+        }
+      ]
+    },
+    {
+      "id": "migrations/000383_admission_lookup_rollback_floor.down.sql:SQL",
+      "source_sha256": "8090ac748401b6795dcff3f24271bbb620297f70fd212156df448ec38f9c7fd9",
+      "classification": "lifecycle-cleanup",
+      "action_0a": "Before either standalone ordinary-admission lookup index down, perform the schema-wide inactive rollback preflight under bounded evidence-table locks. Refuse positive protocol/cutover provenance or retained recovery, preparation, dispatch/runtime binding, any awaiting_start_control job or any snapshot_object_cleanup job regardless of status. Withdraw readers and inhibit activation and lifecycle/recovery/domain writers throughout the maintenance operation; these preflight locks do not span later concurrent index drops.",
+      "reason": "The first supported down must refuse before weakening the ordinary-admission lookup floor. A refused preflight preserves retained evidence and all indexes while the migration ledger remains visibly dirty for deliberate repair-forward. This maintenance guard grants no admission, runtime or activation authority; later activation must independently revalidate its complete schema/index floor.",
+      "evidence": [
+        "migrations/000383_admission_lookup_rollback_floor.down.sql",
+        "status = 'awaiting_start_control'",
+        "migrations/000346_lifecycle_protocol_retention_functions.up.sql:lifecycle143_assert_protocol_rollback_safe",
+        "cmd/migrate/admission_lookup_indexes_postgres_test.go:TestAdmissionLookupHighestRollbackFloorLedgerPostgres",
+        "cmd/migrate/admission_lookup_indexes_postgres_test.go:TestAdmissionLookupInactiveMigrationRoundTripPostgres"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "status = 'awaiting_start_control'",
+          "classification": "lifecycle-cleanup",
+          "action_0a": "Any retained parked job, regardless of tenant or age, blocks the schema-wide inactive index rollback. This is maintenance-floor refusal, not a runnable, lease-expiry, physical-drain or input-consumption predicate."
+        }
       ]
     }
   ]

@@ -256,7 +256,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
 	threadCancelRegistry := agent.NewThreadCancelRegistry(logger)
-	services := buildServices(
+	services, err := buildServices(
 		cfg,
 		pool,
 		logger,
@@ -290,6 +290,9 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		sessionStreams,
 		fileReader,
 	)
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor services: %w", err)
+	}
 	if services == nil {
 		return nil, shutdown, fmt.Errorf("worker services unavailable")
 	}

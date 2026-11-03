@@ -142,6 +142,7 @@ type automationTurnState struct {
 	baseBranch        string
 	pullRequestNumber int
 	repository        string
+	repositoryID      uuid.UUID
 	pullRequestURL    string
 	baselineSHA       string
 	baseSHA           string
@@ -311,6 +312,10 @@ func (o *Orchestrator) beginAutomationTurn(ctx context.Context, session *models.
 		return ctx, nil, fmt.Errorf("automation run %s base branch %q is not a valid ref name", run.ID, baseBranch)
 	}
 	goal, eventContext := splitGoalSnapshot(run.GoalSnapshot)
+	repositoryID := uuid.Nil
+	if session.RepositoryID != nil {
+		repositoryID = *session.RepositoryID
+	}
 	state := &automationTurnState{
 		opts:              opts,
 		run:               run,
@@ -321,6 +326,7 @@ func (o *Orchestrator) beginAutomationTurn(ctx context.Context, session *models.
 		baseBranch:        baseBranch,
 		pullRequestNumber: number,
 		repository:        snapshot.GitHub.Repository,
+		repositoryID:      repositoryID,
 		pullRequestURL:    snapshot.GitHub.PullRequestURL,
 		isPush:            run.GitHubAction != nil && *run.GitHubAction == "synchronize",
 		event:             snapshot.Event,
@@ -985,7 +991,14 @@ func (o *Orchestrator) prepareAutomationTurnRestoredWorkspace(ctx context.Contex
 // applies, applies the repository's sandbox dependencies and bootstrap
 // commands accordingly, and records the workspace facts on the run.
 func (o *Orchestrator) prepareAutomationTurnRepository(ctx context.Context, sandbox *Sandbox, sandboxCfg SandboxConfig, state *automationTurnState, log zerolog.Logger) error {
-	cfg := readSandboxRepoConfig(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log)
+	cfg, err := o.readPackageSetupConfig(ctx, sandbox, sandboxCfg.WorkDir)
+	if err != nil {
+		return err
+	}
+	packageSetup, err := o.preparePackageRegistryDependencies(ctx, &models.Session{OrgID: state.run.OrgID, RepositoryID: &state.repositoryID, Origin: models.SessionOriginAutomation}, sandbox, cfg)
+	if err != nil {
+		return err
+	}
 	fingerprint, err := o.automationTurnDependencyFingerprint(ctx, sandbox, cfg.Dependencies, sandboxCfg.Image)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to fingerprint dependency inputs; treating the environment as cold")
@@ -994,6 +1007,9 @@ func (o *Orchestrator) prepareAutomationTurnRepository(ctx context.Context, sand
 	}
 	skip := false
 	if err == nil {
+		if packageSetup != "" {
+			fingerprint += ":npm:" + packageSetup
+		}
 		skip = state.applyDependencyFingerprint(fingerprint)
 	}
 	if _, err := prepareSandboxRepository(ctx, o.provider, sandbox, sandboxCfg.WorkDir, log, skip); err != nil {

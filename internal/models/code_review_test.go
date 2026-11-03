@@ -47,6 +47,7 @@ func TestCodeReviewEnumsValidate(t *testing.T) {
 		{name: "approval mode invalid", validate: CodeReviewApprovalMode("bogus").Validate, expectErr: true},
 		{name: "session status queued", validate: CodeReviewSessionStatusQueued.Validate},
 		{name: "session status invalid", validate: CodeReviewSessionStatus("bogus").Validate, expectErr: true},
+		{name: "phase preparing workspace", validate: CodeReviewPhasePreparingWorkspace.Validate},
 		{name: "phase waiting for GitHub", validate: CodeReviewPhaseWaitingGitHub.Validate},
 		{name: "phase invalid", validate: CodeReviewPhase("bogus").Validate, expectErr: true},
 		{name: "status code GitHub rate limited", validate: CodeReviewStatusCodeGitHubRateLimited.Validate},

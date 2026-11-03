@@ -73,16 +73,17 @@ func (s CodeReviewSessionStatus) Validate() error {
 type CodeReviewPhase string
 
 const (
-	CodeReviewPhaseSyncingGitHub CodeReviewPhase = "syncing_github"
-	CodeReviewPhaseWaitingGitHub CodeReviewPhase = "waiting_for_github"
-	CodeReviewPhaseReviewing     CodeReviewPhase = "reviewing"
-	CodeReviewPhaseSynthesizing  CodeReviewPhase = "synthesizing"
-	CodeReviewPhasePublishing    CodeReviewPhase = "publishing"
+	CodeReviewPhasePreparingWorkspace CodeReviewPhase = "preparing_workspace"
+	CodeReviewPhaseSyncingGitHub      CodeReviewPhase = "syncing_github"
+	CodeReviewPhaseWaitingGitHub      CodeReviewPhase = "waiting_for_github"
+	CodeReviewPhaseReviewing          CodeReviewPhase = "reviewing"
+	CodeReviewPhaseSynthesizing       CodeReviewPhase = "synthesizing"
+	CodeReviewPhasePublishing         CodeReviewPhase = "publishing"
 )
 
 func (p CodeReviewPhase) Validate() error {
 	switch p {
-	case CodeReviewPhaseSyncingGitHub, CodeReviewPhaseWaitingGitHub, CodeReviewPhaseReviewing,
+	case CodeReviewPhasePreparingWorkspace, CodeReviewPhaseSyncingGitHub, CodeReviewPhaseWaitingGitHub, CodeReviewPhaseReviewing,
 		CodeReviewPhaseSynthesizing, CodeReviewPhasePublishing:
 		return nil
 	default:

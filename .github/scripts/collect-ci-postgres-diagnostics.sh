@@ -8,6 +8,7 @@ set -euo pipefail
 case "${CI_POSTGRES_DIAGNOSTICS_SCOPE:-database}" in
   database) diagnostics="${RUNNER_TEMP:?}/ci-db-diagnostics" ;;
   command) diagnostics="${RUNNER_TEMP:?}/ci-command-diagnostics" ;;
+  demoseed) diagnostics="${RUNNER_TEMP:?}/ci-demoseed-diagnostics" ;;
   *) printf 'Unsupported CI PostgreSQL diagnostic scope\n' >&2; exit 1 ;;
 esac
 mkdir -p "$diagnostics"

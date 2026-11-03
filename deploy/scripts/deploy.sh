@@ -16,6 +16,30 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DISABLED_WARNING_WEBHOOK_URL="http://localhost:65535/disabled-warning"
 DISABLED_CRITICAL_WEBHOOK_URL="http://localhost:65535/disabled-critical"
 
+# A rollback is a reviewed old binary on an unchanged, newer schema. Never
+# turn this into a general skip-migrations switch or accept mutable image tags.
+validate_binary_rollback() {
+  if [ -z "${BINARY_ROLLBACK_GUARD_TAG:-}${BINARY_ROLLBACK_SCHEMA_VERSION:-}" ]; then
+    return 0
+  fi
+  [[ "${BINARY_ROLLBACK_GUARD_TAG:-}" =~ ^[0-9a-f]{40}$ ]] &&
+    [[ "$TAG" =~ ^[0-9a-f]{40}$ ]] &&
+    [ "$TAG" != "$BINARY_ROLLBACK_GUARD_TAG" ] &&
+    [[ "${BINARY_ROLLBACK_SCHEMA_VERSION:-}" =~ ^(392|393)$ ]] || {
+      echo "ERROR: binary rollback requires distinct full target/guard SHAs and explicitly pinned schema 392 or 393." >&2
+      return 1
+    }
+  case "$ROLE" in app|worker) ;; *) echo "ERROR: binary rollback only supports app and worker roles." >&2; return 1 ;; esac
+  if [ "${DEPLOY_MODE:-routine}" != routine ] ||
+    [ -n "${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}${FORCE_INTERRUPT_ACTIVE_RUNTIMES:-}${WORKER_DEPLOY_DETACH:-}" ]; then
+    echo "ERROR: binary rollback requires synchronous routine deployment without force overrides." >&2
+    return 1
+  fi
+}
+validate_binary_rollback
+readonly BINARY_ROLLBACK_GUARD_TAG="${BINARY_ROLLBACK_GUARD_TAG:-}"
+readonly BINARY_ROLLBACK_SCHEMA_VERSION="${BINARY_ROLLBACK_SCHEMA_VERSION:-}"
+
 # Shared worker bucket defaults and mapping logic.
 # shellcheck source=deploy/scripts/worker_buckets.sh
 source "$SCRIPT_DIR/worker_buckets.sh"
@@ -1105,6 +1129,8 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
   "$(remote_env_assignment IMAGE_TAG "$TAG")" \
   "$(remote_env_assignment WORKER_ROLLOUT_ATTEMPT "${WORKER_ROLLOUT_ATTEMPT:-}")" \
   "$(remote_env_assignment WORKER_EXPECTED_SCHEMA_VERSION "${WORKER_EXPECTED_SCHEMA_VERSION:-}")" \
+  "$(remote_env_assignment BINARY_ROLLBACK_GUARD_TAG "$BINARY_ROLLBACK_GUARD_TAG")" \
+  "$(remote_env_assignment BINARY_ROLLBACK_SCHEMA_VERSION "$BINARY_ROLLBACK_SCHEMA_VERSION")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_DISK_MB "${WORKER_BLUE_GREEN_MIN_FREE_DISK_MB:-10240}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_INODES "${WORKER_BLUE_GREEN_MIN_FREE_INODES:-100000}")" \
   "$(remote_env_assignment WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB "${WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB:-8192}")" \
@@ -2806,16 +2832,24 @@ SELECT COUNT(*) FROM endpoint_blockers;"
     fi
   fi
 
+  run_deploy_schema_phase() {
+    if [ -n "${BINARY_ROLLBACK_GUARD_TAG:-}" ]; then
+      # Use the reviewed NEW image's read-only inspector, never the old image's
+      # migrator. --pull never also refuses an unavailable guard image.
+      IMAGE_TAG="$BINARY_ROLLBACK_GUARD_TAG" docker compose -f "$COMPOSE_FILE" run --rm -T --pull never --no-deps "$HEALTH_SERVICE" \
+        /bin/migrate verify-inactive-rollback "$BINARY_ROLLBACK_SCHEMA_VERSION" < /dev/null
+    elif [ "$ROLE" = app ]; then
+      docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-known-dirty < /dev/null
+      docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
+    fi
+  }
+
   # Run migrations BEFORE restarting the app so the DB schema is ready when
   # the new code starts serving traffic. Uses `docker compose run` on the new
   # image (already pulled) to execute the migration binary without replacing
   # the running container. This prevents 500s from code referencing columns
   # that the old schema doesn't have yet.
-  if [ "$ROLE" = "app" ]; then
-    echo "Running database migrations..."
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate repair-known-dirty < /dev/null
-    docker compose -f "$COMPOSE_FILE" run --rm -T --no-deps api /bin/migrate up < /dev/null
-  fi
+  run_deploy_schema_phase
 
   # Recreate out-of-band containers (vector, etc.) BEFORE the rolling deploy.
   # Skip services that we roll explicitly (api, frontend) so they don't get

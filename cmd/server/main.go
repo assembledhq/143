@@ -52,6 +52,7 @@ import (
 	"github.com/assembledhq/143/internal/services/lifecyclewriter"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
+	"github.com/assembledhq/143/internal/services/packagecredentials"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
@@ -612,11 +613,14 @@ func main() {
 		// workerServices.PR.WaitForPostPRSnapshotUploads().
 		var services *worker.Services
 		if canBuildServices(cfg, logger) {
-			services = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
+			services, err = buildServices(cfg, pool, logger, codexAuthSvc, claudeCodeAuthSvc, credentialStore, userCredentialStore, codingCredentialStore, issueStore, sessionStore,
 				jobStore, orgStore, repoStore, pullRequestStore,
 				deployStore, priorityScoreStore, complexityEstimateStore,
 				projectStore, projectTaskStore, integrationStore,
 				sessionMessageStore, automationRunStore, evalBootstrapStore, snapshotStore, billingMetrics, cancelRegistry, threadCancelRegistry, orgSettingsCache, sandboxCapacity, redisClient, sessionStreams, fileReader, githubRateLimitController)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("failed to construct worker services")
+			}
 			if services != nil {
 				reviewAdmissionEvidence.ConfigureWorker(services.CodeReviewLifecycle)
 				wirePublicationCoordinator(cfg, services, stores, logger)
@@ -1445,12 +1449,12 @@ func buildServices(
 	sessionStreams *cache.SessionStreams,
 	fileReader sandbox.FileReader,
 	sharedGitHubControllers ...*githubratelimit.Controller,
-) *worker.Services {
+) (*worker.Services, error) {
 	// GitHub App service (for installation tokens, PR creation).
 	ghSvc, err := ghservice.NewService(cfg.GitHubAppID, cfg.GitHubAppPrivateKey, logger)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to initialize GitHub App service — all Phase 3+ services disabled")
-		return nil
+		return nil, nil
 	}
 	var sharedGitHubController *githubratelimit.Controller
 	if len(sharedGitHubControllers) > 0 {
@@ -1459,7 +1463,7 @@ func buildServices(
 	githubRateLimitController, err := api.ResolveGitHubRateLimitController(cfg, redisClient, logger, sharedGitHubController)
 	if err != nil {
 		logger.Error().Err(err).Msg("invalid GitHub rate-limit controller configuration")
-		return nil
+		return nil, nil
 	}
 	ghSvc.SetRateLimitController(githubRateLimitController, logger)
 
@@ -1467,7 +1471,7 @@ func buildServices(
 	dockerCli, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 	if err != nil {
 		logger.Error().Err(err).Msg("Docker not available — all Phase 3+ services disabled")
-		return nil
+		return nil, nil
 	}
 	sandboxProvider := providers.NewDockerProvider(
 		dockerCli,
@@ -1504,7 +1508,7 @@ func buildServices(
 		if healthErr != nil {
 			if errors.Is(healthErr, providers.ErrDiskQuotaUnsupported) {
 				logger.Error().Err(healthErr).Msg("sandbox disk quota is required but Docker storage cannot enforce it — all Phase 3+ services disabled")
-				return nil
+				return nil, nil
 			}
 			if cfg.SandboxRuntime == "runsc" && !cfg.SandboxRequireGVisor {
 				logger.Warn().Err(healthErr).Msg("gVisor not available, falling back to runc — NOT RECOMMENDED FOR PRODUCTION")
@@ -1522,11 +1526,11 @@ func buildServices(
 				healthCancel()
 				if fallbackErr != nil {
 					logger.Error().Err(fallbackErr).Msg("fallback runc sandbox health check failed — Phase 3+ services disabled")
-					return nil
+					return nil, nil
 				}
 			} else {
 				logger.Error().Err(healthErr).Msg("sandbox health check failed — Phase 3+ services disabled")
-				return nil
+				return nil, nil
 			}
 		}
 	}
@@ -1603,16 +1607,16 @@ func buildServices(
 	if cfg.SandboxAuthSocketDir != "" {
 		if executorID, ok, err := sessionExecutorIDFromEnv(); err != nil {
 			logger.Error().Err(err).Msg("sandbox auth: invalid session executor id — worker services disabled")
-			return nil
+			return nil, nil
 		} else if ok {
 			if strings.TrimSpace(cfg.PreviewInternalBaseURL) == "" {
 				logger.Error().Msg("sandbox auth: PREVIEW_INTERNAL_BASE_URL is required for session executor remote broker access")
-				return nil
+				return nil, nil
 			}
 			previewRPCKeyring, keyringErr := auth.NewPreviewTokenKeyring(cfg.PreviewRPCSecrets)
 			if keyringErr != nil {
 				logger.Error().Err(keyringErr).Msg("sandbox auth: preview RPC keyring is required for session executor remote broker access")
-				return nil
+				return nil, nil
 			}
 			orchestratorSandboxAuth = sandboxauth.NewRemoteBrokerClient(sandboxauth.RemoteBrokerClientConfig{
 				BaseURL:  cfg.PreviewInternalBaseURL,
@@ -1633,7 +1637,7 @@ func buildServices(
 						Err(err).
 						Str("socket_dir", cfg.SandboxAuthSocketDir).
 						Msg("sandbox auth: socket directory preflight failed — worker services disabled")
-					return nil
+					return nil, nil
 				}
 			}
 			sandboxAuthServer := sandboxauth.NewServer(identityResolver, cfg.SandboxAuthSocketDir, logger)
@@ -1653,8 +1657,16 @@ func buildServices(
 	uploadStore := buildUploadStore(context.Background(), cfg, logger)
 	codeReviewRoleStore := db.NewCodeReviewStore(pool)
 
+	var packageCrypto *crypto.Service
+	if cfg.EncryptionMasterKey != "" {
+		packageCrypto, err = crypto.NewService(cfg.EncryptionMasterKey)
+		if err != nil {
+			return nil, fmt.Errorf("initialize worker-services package credential encryption: %w", err)
+		}
+	}
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:                   sandboxProvider,
+		PackageCredentials:         packagecredentials.NewService(db.NewPackageRegistryCredentialStore(pool), packageCrypto),
 		Adapters:                   agentAdapters,
 		Env:                        agentEnv,
 		Sessions:                   sessionStore,
@@ -1712,6 +1724,7 @@ func buildServices(
 		deployStore, repoStore, jobStore, logger,
 	)
 	prService.SetRateLimitController(githubRateLimitController)
+	orchestrator.SetPackageSetupPullRequestTrust(prService)
 	workerFeedbackStore := db.NewPullRequestFeedbackStore(pool)
 	workerFeedbackStore.SetJobStore(jobStore)
 	prService.SetPullRequestFeedbackStore(workerFeedbackStore)
@@ -2089,7 +2102,7 @@ func buildServices(
 		b := sandboxAuthBroker
 		svc.SandboxAuthShutdown = b.Shutdown
 	}
-	return svc
+	return svc, nil
 }
 
 func buildUploadStore(ctx context.Context, cfg *config.Config, logger zerolog.Logger) storage.UploadStore {

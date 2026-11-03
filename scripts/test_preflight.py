@@ -12,6 +12,29 @@ preflight = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(preflight)
 
 
+def expected_ci_commands():
+    return [
+        (['python3', '-B', '-m', 'unittest', 'discover', '-s', '.github/scripts', '-p', 'test_*.py'], '.'),
+        (['python3', '-B', '-m', 'unittest', 'discover', '-s', 'scripts', '-p', 'test_preflight.py'], '.'),
+        (['go', 'test', './deploy', '-count=1', '-timeout=120s'], '.'),
+        (['go', 'vet', './deploy'], '.'),
+        (['make', 'test-deploy-scripts'], '.'),
+    ]
+
+
+def expected_frontend_commands():
+    return [
+        (['npm', 'run', 'typecheck'], 'frontend'),
+        (['npm', 'run', 'lint'], 'frontend'),
+        (['npm', 'run', 'build'], 'frontend'),
+        (['npx', '--no-install', 'vitest', 'run'], 'frontend'),
+    ]
+
+
+def expected_full_commands():
+    return [(['make', 'lint'], '.')] + expected_frontend_commands() + expected_ci_commands()
+
+
 class RoutingTests(unittest.TestCase):
     def test_change_routes(self):
         cases = [
@@ -33,12 +56,59 @@ class RoutingTests(unittest.TestCase):
                 self.assertFalse(any('--changed=' in arg for cmd, _ in commands for arg in cmd))
 
     def test_shared_inputs_expand_checks(self):
-        for path in ['Makefile', '.github/workflows/ci.yml', '.githooks/pre-push', 'scripts/preflight.py']:
+        for path in ['Makefile', 'go.mod', 'go.sum', '.golangci.yml', 'scripts/preflight.py', 'scripts/test_preflight.py', 'setup.sh']:
             with self.subTest(path=path):
-                commands, _ = preflight.plan({path}, ['base'])
-                commands = [' '.join(cmd) for cmd, _ in commands]
-                for required in ['make lint', 'npm run build', 'go test ./deploy -count=1 -timeout=120s', 'make test-deploy-scripts']:
-                    self.assertIn(required, commands)
+                commands, backend = preflight.plan({path}, ['base'])
+                self.assertEqual(commands, expected_full_commands())
+                self.assertTrue(backend)
+
+    def test_ci_only_changes_keep_configuration_checks(self):
+        for path in ['.github/workflows/ci.yml', '.github/scripts/test_select_security_go.py', '.githooks/pre-push']:
+            with self.subTest(path=path):
+                commands, backend = preflight.plan({path}, ['base'])
+                self.assertEqual(commands, expected_ci_commands())
+                self.assertFalse(backend)
+
+    def test_ci_mixed_changes_keep_application_checks(self):
+        cases = [
+            ('internal/cli/client.go', [(['make', 'lint'], '.')], True),
+            ('frontend/src/features/example.tsx', [
+                (['npm', 'run', 'typecheck'], 'frontend'),
+                (['npm', 'run', 'lint'], 'frontend'),
+                (['npx', '--no-install', 'vitest', 'run', '--changed=base', '--passWithNoTests'], 'frontend'),
+            ], False),
+            ('frontend/src/components/example.tsx', expected_frontend_commands(), False),
+        ]
+        for path, application_commands, expected_backend in cases:
+            for ci_path in ['.github/workflows/ci.yml', '.github/scripts/config.py', '.githooks/pre-push']:
+                with self.subTest(path=path, ci_path=ci_path):
+                    commands, backend = preflight.plan({ci_path, path}, ['base'])
+                    self.assertEqual(commands, application_commands + expected_ci_commands())
+                    self.assertEqual(backend, expected_backend)
+
+    def test_public_docs_keep_full_frontend_checks(self):
+        cases = [
+            ({'docs/public/guide.mdx'}, expected_frontend_commands()),
+            ({'docs/public/images/example.svg'}, expected_frontend_commands()),
+            ({'docs/public/guide.md', '.github/workflows/ci.yml'}, expected_frontend_commands() + expected_ci_commands()),
+        ]
+        for files, expected in cases:
+            with self.subTest(files=files):
+                commands, backend = preflight.plan(files, ['base'])
+                self.assertEqual(commands, expected)
+                self.assertFalse(backend)
+
+    def test_extended_ci_changes_include_the_full_application_plan(self):
+        expected = expected_full_commands() + [
+            (['make', 'security-check'], '.'),
+            (['make', 'test-pr'], '.'),
+            (['npm', 'run', 'test:session-transcript-e2e'], 'frontend'),
+        ]
+        for path in ['.github/workflows/ci.yml', '.github/scripts/test_select_security_go.py', '.githooks/pre-push']:
+            with self.subTest(path=path):
+                commands, backend = preflight.plan({path}, ['base'], extended=True)
+                self.assertEqual(commands, expected)
+                self.assertTrue(backend)
 
     def test_extended_is_explicit(self):
         for extended in [False, True]:
@@ -100,6 +170,31 @@ class GitTests(unittest.TestCase):
 
     def test_rename_routes_both_paths(self):
         self.assertEqual(preflight.changed(self.base, self.head), {'old.go', 'new.go'})
+
+    def test_removed_workflows_keep_configuration_checks(self):
+        workflow_path = '.github/workflows/ci.yml'
+        workflow = self.root / workflow_path
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text('name: fixture\n')
+        self.run_git('add', workflow_path)
+        self.run_git('commit', '-qm', 'add workflow')
+        base = self.run_git('rev-parse', 'HEAD')
+        for operation in ['delete', 'move']:
+            with self.subTest(operation=operation):
+                self.run_git('reset', '--hard', base)
+                expected_paths = {workflow_path}
+                if operation == 'delete':
+                    self.run_git('rm', workflow_path)
+                else:
+                    self.run_git('mv', workflow_path, 'archived-ci.yml')
+                    expected_paths.add('archived-ci.yml')
+                self.run_git('commit', '-qm', operation + ' workflow')
+                head = self.run_git('rev-parse', 'HEAD')
+                paths = preflight.changed(base, head)
+                self.assertEqual(paths, expected_paths)
+                commands, backend = preflight.plan(paths, [base])
+                self.assertEqual(commands, expected_ci_commands())
+                self.assertFalse(backend)
 
     def test_push_ranges(self):
         zero = '0' * 40

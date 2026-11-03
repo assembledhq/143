@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -73,6 +74,10 @@ type sharedInputCleanupJoinProvider struct {
 	delay    time.Duration
 }
 
+func (*sharedInputCleanupJoinProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, os.ErrNotExist
+}
+
 func (p *sharedInputCleanupJoinProvider) Exec(ctx context.Context, _ *Sandbox, _ string, _, _ io.Writer) (int, error) {
 	defer close(p.finished)
 	close(p.entered)
@@ -125,6 +130,10 @@ type reapedReviewInputCallbackDelayProvider struct {
 	SandboxProvider
 	entered chan int
 	reaped  atomic.Bool
+}
+
+func (*reapedReviewInputCallbackDelayProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, os.ErrNotExist
 }
 
 func (p *reapedReviewInputCallbackDelayProvider) Exec(ctx context.Context, sandbox *Sandbox, _ string, _, _ io.Writer) (int, error) {

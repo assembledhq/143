@@ -3,6 +3,7 @@ module github.com/assembledhq/143
 go 1.26.0
 
 require (
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/caarlos0/env/v11 v11.3.1
 	github.com/chromedp/cdproto v0.0.0-20260405000525-47a8ff65b46a
