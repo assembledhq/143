@@ -9,6 +9,7 @@ import { PageContainer } from "@/components/page-container";
 import { PageHeader } from "@/components/page-header";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { Input } from "@/components/ui/input";
@@ -121,22 +122,24 @@ function RepositoryCredentials({ repositoryId }: { repositoryId: string }) {
       {credentials.isPending ? <p role="status">Loading credentials…</p> : credentials.isError ? <p role="alert">Unable to load package credentials. Refresh the page to try again.</p> : !credentials.data?.data.length ? (
         <EmptyState icon={Package} title="No package credentials" description="Add a read-only token for an HTTPS npm registry and an explicit package scope." />
       ) : (
-        <div className="overflow-x-auto rounded-lg border bg-card shadow-sm">
-          <Table>
-            <TableHeader><TableRow><TableHead>Registry</TableHead><TableHead>Package scope</TableHead><TableHead className="text-right">Updated</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
-            <TableBody>{credentials.data.data.map((credential) => (
-              <TableRow key={credential.id}>
-                <TableCell className="font-mono text-xs">{credential.registry_url}</TableCell>
-                <TableCell className="font-mono text-xs">{credential.package_scope}</TableCell>
-                <TableCell className="text-right tabular-nums">{new Date(credential.updated_at).toLocaleDateString()}</TableCell>
-                <TableCell><div className="flex justify-end gap-3">
-                  <Button variant="outline" size="sm" aria-label={`Rotate ${credential.package_scope} credential`} onClick={() => setDialog({ credential })}>Rotate</Button>
-                  <Button variant="ghost" size="sm" className="text-destructive" aria-label={`Delete ${credential.package_scope} credential`} onClick={() => { setDeleteError(""); setDeleteTarget(credential); }}>Delete</Button>
-                </div></TableCell>
-              </TableRow>
-            ))}</TableBody>
-          </Table>
-        </div>
+        <Card>
+          <CardContent className="overflow-x-auto p-0">
+            <Table>
+              <TableHeader><TableRow><TableHead>Registry</TableHead><TableHead>Package scope</TableHead><TableHead className="text-right">Updated</TableHead><TableHead><span className="sr-only">Actions</span></TableHead></TableRow></TableHeader>
+              <TableBody>{credentials.data.data.map((credential) => (
+                <TableRow key={credential.id}>
+                  <TableCell className="font-mono text-xs">{credential.registry_url}</TableCell>
+                  <TableCell className="font-mono text-xs">{credential.package_scope}</TableCell>
+                  <TableCell className="text-right tabular-nums">{new Date(credential.updated_at).toLocaleDateString()}</TableCell>
+                  <TableCell><div className="flex justify-end gap-3">
+                    <Button variant="outline" size="sm" aria-label={`Rotate ${credential.package_scope} credential`} onClick={() => setDialog({ credential })}>Rotate</Button>
+                    <Button variant="ghost" size="sm" className="text-destructive" aria-label={`Delete ${credential.package_scope} credential`} onClick={() => { setDeleteError(""); setDeleteTarget(credential); }}>Delete</Button>
+                  </div></TableCell>
+                </TableRow>
+              ))}</TableBody>
+            </Table>
+          </CardContent>
+        </Card>
       )}
       {dialog && <CredentialDialog repositoryId={repositoryId} credential={dialog.credential} onClose={() => setDialog((current) => current === dialog ? null : current)} onSaved={refresh} />}
       <AlertDialog open={!!deleteTarget} onOpenChange={(open) => { if (!open && !deleting) setDeleteTarget(null); }}>
