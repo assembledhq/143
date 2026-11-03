@@ -135,7 +135,7 @@ func newNPMDockerFixture(t *testing.T, root, ca, port string) *npmDockerFixture 
 					ownedArgs += fmt.Sprintf("'--cafile='+%q,", fixture.ca)
 				}
 				script := strings.ReplaceAll(npmSetupInstallPython, "args=[node,npm,", ownedArgs)
-				versionStub := "def version(command):\n return 'v'+node_version if len(command)==2 else npm_version\n"
+				versionStub := "def version(command):\n pathlib.Path(environment['TMPDIR']).mkdir(parents=True,exist_ok=True)\n (pathlib.Path(environment['TMPDIR'])/'node-compile-cache').mkdir(exist_ok=True)\n return 'v'+node_version if len(command)==2 else npm_version\n"
 				if fixture.versionMismatch {
 					versionStub = "def version(command):\n return '0.0.0'\n"
 				}

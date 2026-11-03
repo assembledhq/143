@@ -1691,7 +1691,7 @@ func (o *Orchestrator) warmMentionIndexFromSandboxAsync(ctx context.Context, ses
 }
 
 func defaultSandboxPATH() string {
-	return "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	return DefaultSandboxPATH
 }
 
 func prependSandboxBinDir(env map[string]string, homeDir string) {

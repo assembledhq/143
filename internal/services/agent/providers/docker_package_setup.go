@@ -148,10 +148,9 @@ func applyNPMToolchain(sb *agent.Sandbox, toolchain nodetoolchain.Toolchain) {
 	for key, value := range sb.Env {
 		env[key] = value
 	}
-	sb.NPMToolchainIdentity = "node@" + toolchain.NodeVersion + "/npm@" + toolchain.NPMVersion
 	existing := sb.Env["PATH"]
 	if existing == "" {
-		existing = "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+		existing = agent.DefaultSandboxPATH
 	}
 	paths := []string{toolchain.BinDir()}
 	for _, entry := range strings.Split(existing, ":") {
@@ -177,6 +176,9 @@ func (d *DockerProvider) npmSetupProbe(ctx context.Context, sb *agent.Sandbox, c
 	var out bytes.Buffer
 	code, execErr := d.npmSetupMainExec(ctx, sb, npmSetupProbePython, string(raw), nil, &out)
 	if execErr != nil || code != 0 {
+		if diagnostic := parseNPMSetupFailure(out.Bytes()); agent.IsTerminalNPMSetupError(diagnostic) {
+			return npmSetupManifest{}, diagnostic
+		}
 		return npmSetupManifest{}, errors.New("npm setup requires safe manifest files, package-lock v2 or v3, and registry or workspace dependencies")
 	}
 	if out.Len() > 24*1024*1024 {
@@ -437,6 +439,8 @@ for directory in sorted(set(['.']+[t['directory'] for t in p['targets']])):
  for name in ('.nvmrc','.node-version','package.json'):
   f=root/directory/name;relative=f.relative_to(root).as_posix()
   if relative in files or not os.path.lexists(f): continue
+  if name in ('.nvmrc','.node-version') and f.is_symlink():
+   print(json.dumps({'code':'EBADENGINE','category':'permanent'}));sys.exit(1)
   fd=os.open(f,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
   with os.fdopen(fd,'rb') as stream:
    info=os.fstat(stream.fileno());limit=4096 if name!='package.json' else 4*1024*1024
@@ -517,6 +521,7 @@ if any(not isinstance(v,str) or not re.fullmatch(r'[0-9]{1,4}\.[0-9]{1,4}\.[0-9]
 node_version,npm_version=pair
 bin_dir='/opt/143/node/'+node_version+'/bin'
 node=bin_dir+'/node';npm='/opt/143/node/'+node_version+'/lib/node_modules/npm/bin/npm-cli.js'
+private=pathlib.Path('/private');(private/'home').mkdir();(private/'tmp').mkdir()
 environment={'PATH':bin_dir+':/usr/bin:/bin','HOME':'/private/home','TMPDIR':'/private/tmp'}
 def version(command):
  try:
@@ -524,8 +529,8 @@ def version(command):
   return value if re.fullmatch(r'v?[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}',value) else ''
  except Exception: return ''
 if version([node,'--version'])!='v'+node_version or version([node,npm,'--version'])!=npm_version:
- print(json.dumps({'code':'EBADENGINE','category':'permanent'}),flush=True);sys.exit(1)
-private=pathlib.Path('/private');(private/'home').mkdir();(private/'tmp').mkdir()
+ print(json.dumps({'code':'RUNTIME_UNAVAILABLE','category':'infrastructure'}),flush=True);sys.exit(1)
+
 config=private/'npmrc';lines=[];registries=set();scopes=set()
 for credential in p.pop('credentials') or []:
  registry=credential['registry'];scope=credential['scope'];token=credential['token'];url=urlparse(registry)
