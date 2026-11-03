@@ -1,8 +1,14 @@
 "use client";
 
-import { StatusLabel } from "@/components/status-label";
+import { StatusLabel, type StatusTone } from "@/components/status-label";
 import { Card, CardContent } from "@/components/ui/card";
 import type { ReviewLoopAdmissionState } from "@/lib/types";
+
+function startupTone(state?: ReviewLoopAdmissionState | null): StatusTone {
+  if (state === "attention" || state === "refused") return "attention";
+  if (state === "cancelled") return "neutral";
+  return "info";
+}
 
 export function ReviewLoopStartupNotice({ state }: { state?: ReviewLoopAdmissionState | null }) {
   const title = state === "accepted"
@@ -28,7 +34,7 @@ export function ReviewLoopStartupNotice({ state }: { state?: ReviewLoopAdmission
   return (
     <Card>
       <CardContent className="space-y-2 py-3">
-        <StatusLabel label={title} tone={state === "attention" || state === "refused" ? "attention" : "info"} announcement="polite" />
+        <StatusLabel label={title} tone={startupTone(state)} announcement="polite" />
         <p className="text-xs text-muted-foreground">{detail}</p>
       </CardContent>
     </Card>

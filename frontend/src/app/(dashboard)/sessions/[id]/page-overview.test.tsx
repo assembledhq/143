@@ -896,6 +896,7 @@ describe('SessionDetailPage overview and review loop', () => {
     const loopID = '9ea975a4-12ba-4931-9cad-98dc317ff118';
     let starts = 0;
     const recoveries: string[] = [];
+    let releaseRecovery: (() => void) | undefined;
     const onUrlUpdate = vi.fn();
     const loop: SessionReviewLoop = {
       id: loopID, org_id: 'org-1', session_id: sessionID, source: 'manual', status: 'running',
@@ -914,11 +915,14 @@ describe('SessionDetailPage overview and review loop', () => {
           code: 'REVIEW_LOOP_START_PENDING_CONFIRMATION', message: 'Awaiting confirmation', details: { loop_id: loopID },
         } }, { status: 503 });
       }),
-      http.post('/api/v1/sessions/:id/review-loops/:loopId/recover', ({ params }) => {
+      http.post('/api/v1/sessions/:id/review-loops/:loopId/recover', async ({ params }) => {
         recoveries.push(params.loopId as string);
-        if (recoveries.length === 1) return HttpResponse.json({ error: {
-          code: 'REVIEW_LOOP_START_PENDING_CONFIRMATION', message: 'Awaiting confirmation', details: { loop_id: loopID },
-        } }, { status: 503 });
+        if (recoveries.length === 1) {
+          await new Promise<void>((resolve) => { releaseRecovery = resolve; });
+          return HttpResponse.json({ error: {
+            code: 'REVIEW_LOOP_START_PENDING_CONFIRMATION', message: 'Awaiting confirmation', details: { loop_id: loopID },
+          } }, { status: 503 });
+        }
         return HttpResponse.json({ data: { ...loop, admission_state: 'accepted' } });
       }),
     );
@@ -936,6 +940,8 @@ describe('SessionDetailPage overview and review loop', () => {
     await waitFor(() => expect(onUrlUpdate).toHaveBeenCalledWith(expect.objectContaining({ searchParams: expect.any(URLSearchParams) })));
     expect(onUrlUpdate.mock.calls.at(-1)?.[0].searchParams.get('review_start')).toBe(loopID);
     await user.click(within(dialog).getByRole('button', { name: 'Check review status' }));
+    expect(within(dialog).getByRole('button', { name: 'Checking review status' })).toBeDisabled();
+    releaseRecovery?.();
     await waitFor(() => expect(recoveries).toEqual([loopID]));
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Check review status' })).toBeEnabled());
     await user.click(within(dialog).getByRole('button', { name: 'Check review status' }));

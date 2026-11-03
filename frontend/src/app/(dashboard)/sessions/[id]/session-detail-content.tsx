@@ -7696,8 +7696,8 @@ export function SessionDetailContent({ id }: { id: string }) {
               disabled={!canManageSession || (followupReviewID ? recoverReviewLoopMutation.isPending : !canStartReviewLoop || startReviewLoopMutation.isPending)}
               onClick={() => followupReviewID ? recoverReviewLoopMutation.mutate({ loopID: followupReviewID, sessionID: id, queryClient }) : startReviewLoopMutation.mutate({ sessionID: id, queryClient })}
             >
-              {startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              {followupReviewID ? "Check review status" : "Start review"}
+              {recoverReviewLoopMutation.isPending || startReviewLoopMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              {followupReviewID ? recoverReviewLoopMutation.isPending ? "Checking review status" : "Check review status" : "Start review"}
             </Button>
             </DisabledTooltip>
           </DialogFooter>
