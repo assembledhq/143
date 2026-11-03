@@ -1,13 +1,15 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { StatusLabel } from "@/components/status-label";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { DisabledTooltip } from "@/components/ui/disabled-tooltip";
 import { ErrorNotice } from "@/components/ui/error-notice";
+import { Label } from "@/components/ui/label";
 import { api, ApiError } from "@/lib/api";
 import type { CodeReviewRequestResponse } from "@/lib/types";
 
@@ -27,6 +29,8 @@ interface ReviewRequestDialogProps {
   error?: string;
   unavailable?: string;
   assessmentID?: string;
+  allowSizeLimitOverride?: boolean;
+  defaultOverrideSizeLimits?: boolean;
 }
 
 function resultCopy(result: CodeReviewRequestResponse, mode: RequestMode) {
@@ -46,14 +50,15 @@ function resultCopy(result: CodeReviewRequestResponse, mode: RequestMode) {
 }
 
 /** Shared confirmation and receipt for the read-only GitHub action links. */
-export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID }: ReviewRequestDialogProps) {
+export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID, allowSizeLimitOverride = false, defaultOverrideSizeLimits = false }: ReviewRequestDialogProps) {
   const client = useQueryClient();
   const requestID = useRef<string | null>(null);
+  const [overrideSizeLimits, setOverrideSizeLimits] = useState(defaultOverrideSizeLimits);
   const mutation = useMutation({
     mutationFn: () => {
       if (!target) throw new Error("The pull request is not available.");
       requestID.current ??= crypto.randomUUID();
-      return api.codeReviews.requestReview(target.pull_request_id, { request_id: requestID.current, mode });
+      return api.codeReviews.requestReview(target.pull_request_id, { request_id: requestID.current, mode, ...(allowSizeLimitOverride && overrideSizeLimits && mode === "review_now" ? { override_size_limits: true } : {}) });
     },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["code-reviews"] });
@@ -98,6 +103,13 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
           {target && !loading && !error ? <p className="text-sm text-muted-foreground">{isRecheck
             ? "Previous findings stay in place. Changes to code or review policy require a full review."
             : "A running or completed review may be reused if it already covers these changes."}</p> : null}
+          {allowSizeLimitOverride && mode === "review_now" && target && !loading && !error ? <div className="flex items-start gap-2">
+            <Checkbox id="override-size-limits" className="mt-0.5" checked={overrideSizeLimits} onCheckedChange={(checked) => { setOverrideSizeLimits(checked === true); requestID.current = null; }} />
+            <div className="space-y-1">
+              <Label htmlFor="override-size-limits">Override size limits for this review</Label>
+              <p className="text-xs text-muted-foreground">143 can approve this pull request even if it exceeds the policy&apos;s files, additions, or deletions limits. Every other safeguard still applies, and the review names the exceeded limits. A later push applies the limits again.</p>
+            </div>
+          </div> : null}
           {unavailable && !loading && !error ? <p role="status" className="text-sm text-muted-foreground">{unavailable}</p> : null}
           {assessmentID && target ? <Button variant="link" size="sm" className="h-auto p-0" asChild><Link href={`/code-reviews?assessment=${assessmentID}`}>View previous assessment</Link></Button> : null}
           {mutation.isError ? <ErrorNotice title="Request could not be confirmed" description={mutation.error.message} /> : null}

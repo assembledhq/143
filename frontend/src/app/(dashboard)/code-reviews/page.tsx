@@ -201,6 +201,7 @@ const QUALITY_GATE_DESCRIPTIONS = {
   disagreementBlocks:
     "Blocks approval when reviewer agents disagree. When off, disagreement is still visible but does not independently veto approval unless another safeguard does.",
   allowForks: "Allows approval decisions for PRs opened from forks. The safer default is off, which keeps forked PRs comment-only.",
+  allowSizeLimitOverride: "Lets members and admins override the files, additions, and deletions limits when they request a review. Every other safeguard still applies, and the review names the exceeded limits.",
   stopAfterDeterministicFailure:
     "Skips reviewer agents when a commit already fails a stable size, path, fork, or author rule. The rolling comment publishes those blockers immediately; leave this off to continue the substantive review and collect findings.",
 } as const;
@@ -2551,6 +2552,17 @@ function AdvancedPolicySettings({
                         }
                       />
                       <PolicyToggle
+                        label="Allow size limit overrides"
+                        description={QUALITY_GATE_DESCRIPTIONS.allowSizeLimitOverride}
+                        checked={config?.risk_policy.allow_size_limit_override ?? false}
+                        disabled={!config}
+                onCheckedChange={(checked) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.allow_size_limit_override = checked;
+                  })
+                        }
+                      />
+                      <PolicyToggle
                         label="Stop after stable policy blockers"
                         description={QUALITY_GATE_DESCRIPTIONS.stopAfterDeterministicFailure}
                         checked={config?.risk_policy.stop_after_deterministic_failure ?? false}
@@ -2645,21 +2657,6 @@ function AdvancedPolicySettings({
                           })
                         }
                       />
-                      <div className="lg:col-span-2">
-                        <PolicyStringListEditor
-                          label="Size limit exempt authors"
-                          description="PRs by these exact GitHub logins skip the files, additions, and deletions limits. Every other safeguard still applies."
-                          placeholder="GitHub user or bot login"
-                          emptyText="No authors are exempt from size limits."
-                          serverValue={config?.risk_policy.size_limit_exempt_authors ?? []}
-                          disabled={!config}
-                          onCommitItems={(items) =>
-                            commitPolicy((next) => {
-                              next.risk_policy.size_limit_exempt_authors = items;
-                            })
-                          }
-                        />
-                      </div>
                     </div>
                   </FineTuningSection>
 

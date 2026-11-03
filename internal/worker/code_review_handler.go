@@ -2051,6 +2051,7 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		Author:               codeReviewAuthor(job, pr),
 		AuthorClass:          codeReviewAuthorClass(pr),
 		AuthorTeams:          job.PullRequestAuthorTeams,
+		OverrideSizeLimits:   codeReviewOverrideSizeLimits(job.RequestContext),
 		FromFork:             job.FromFork,
 		ContextFetchFailed:   health == nil,
 		HeadSHAChanged:       codeReviewHeadChanged(job.HeadSHA, pr, health),
@@ -3753,6 +3754,7 @@ func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job
 		Author:                codeReviewAuthor(job, pr),
 		AuthorClass:           codeReviewAuthorClass(pr),
 		AuthorTeams:           job.PullRequestAuthorTeams,
+		OverrideSizeLimits:    codeReviewOverrideSizeLimits(job.RequestContext),
 		FromFork:              job.FromFork,
 	})
 	stable := models.CodeReviewRiskEvaluation{Acceptable: true}
@@ -3804,6 +3806,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 		SessionURL:           codeReviewSessionURL(services.FrontendURL, job.SessionID),
 		PolicySettingsURL:    codeReviewPolicySettingsURL(services.FrontendURL),
 		ReviewNowURL:         codeReviewAvailableReviewNowURL(services, job.SessionID),
+		SizeLimitOverrideURL: codeReviewSizeLimitOverrideURL(policy, codeReviewAvailableReviewNowURL(services, job.SessionID)),
 		ChangeStatsAvailable: true,
 		FilesChanged:         len(changedFiles),
 		LinesChanged:         codeReviewLinesChanged(changedFiles),
@@ -3912,6 +3915,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		Author:                codeReviewAuthor(input.Job, input.PullRequest),
 		AuthorClass:           codeReviewAuthorClass(input.PullRequest),
 		AuthorTeams:           input.Job.PullRequestAuthorTeams,
+		OverrideSizeLimits:    codeReviewOverrideSizeLimits(input.Job.RequestContext),
 		FromFork:              input.Job.FromFork,
 		ContextFetchFailed:    input.Health == nil || !input.ChangedFilesAvailable,
 		HeadSHAChanged:        codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),
@@ -3954,6 +3958,12 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		len(input.Findings) == 0 {
 		generatedSummary = codeReviewOrchestratorReviewSummary(input.OrchestratorSynthesis)
 	}
+	overriddenSizeLimits := models.CodeReviewOverriddenSizeLimits(policy, models.CodeReviewRiskInput{
+		FilesChanged:       len(input.ChangedFiles),
+		Additions:          additions,
+		Deletions:          deletions,
+		OverrideSizeLimits: codeReviewOverrideSizeLimits(input.Job.RequestContext),
+	})
 	body := models.BuildCodeReviewFinalReviewBody(models.CodeReviewFinalReviewInput{
 		Decision:                  decision.Decision,
 		Acceptable:                decision.Acceptable,
@@ -3965,6 +3975,8 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		PolicySettingsURL:         input.PolicySettingsURL,
 		EvidenceRecheckURL:        input.EvidenceRecheckURL,
 		ReviewNowURL:              input.ReviewNowURL,
+		SizeLimitOverrideURL:      codeReviewSizeLimitOverrideURL(policy, input.ReviewNowURL),
+		OverriddenSizeLimits:      overriddenSizeLimits,
 		ReviewProvenance:          input.ReviewProvenance,
 		DescriptionPassed:         descriptionPassed,
 		DescriptionIssues:         codeReviewFailedDescriptionRequirements(descriptionEvaluation.RequirementSummaries),

@@ -223,6 +223,7 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 		}
 		if !codeReviewCommentNeedsNoAction(metadata) {
 			footer.EvidenceRecheckURL = savedFooter.EvidenceRecheckURL
+			footer.SizeLimitOverrideURL = savedFooter.SizeLimitOverrideURL
 			if footer.EvidenceRecheckURL == "" {
 				footer.ReviewNowURL = reviewNowURL
 			}
@@ -299,6 +300,24 @@ func codeReviewAvailableReviewNowURL(services *Services, sessionID uuid.UUID) st
 		return codeReviewNowURL(services.FrontendURL, sessionID)
 	}
 	return ""
+}
+
+func codeReviewOverrideSizeLimits(requestContext *codereviewsvc.ReviewRequestContext) bool {
+	return requestContext != nil && requestContext.OverrideSizeLimits
+}
+
+func codeReviewSizeLimitOverrideURL(policy models.CodeReviewPolicyConfig, reviewNowURL string) string {
+	if !policy.RiskPolicy.AllowSizeLimitOverride {
+		return ""
+	}
+	target, err := url.Parse(reviewNowURL)
+	if err != nil || target.Host == "" {
+		return ""
+	}
+	query := target.Query()
+	query.Set("override_size_limits", "true")
+	target.RawQuery = query.Encode()
+	return target.String()
 }
 
 // This is a read-only destination. The authenticated page requires a separate

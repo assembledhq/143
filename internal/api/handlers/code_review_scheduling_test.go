@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,6 +48,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name, mode          string
+		overrideSizeLimits  bool
 		disposition         models.CodeReviewRequestDisposition
 		disabled, anonymous bool
 		err                 error
@@ -55,6 +57,8 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 	}{
 		{name: "records authorized tenant request", mode: "review_now", status: 202},
 		{name: "supports ensure current", mode: "ensure_current", status: 202},
+		{name: "carries the size limit override", mode: "review_now", overrideSizeLimits: true, status: 202},
+		{name: "rejects the size limit override on other modes", mode: "ensure_current", overrideSizeLimits: true, status: 400, code: "CODE_REVIEW_REQUEST_INVALID"},
 		{name: "returns completed reuse", mode: "review_now", disposition: models.CodeReviewRequestReused, status: 200},
 		{name: "returns cancelled request redelivery", mode: "review_now", disposition: models.CodeReviewRequestCancelled, status: 200},
 		{name: "rejects force fresh until capability exists", mode: "force_fresh", status: 409, code: "CODE_REVIEW_CAPABILITY_UNAVAILABLE"},
@@ -71,7 +75,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 			t.Parallel()
 			org, pr, userID, requestID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			called := false
-			expected := codereviewsvc.ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequesterID: &userID, RequestID: requestID, Mode: models.CodeReviewRequestMode(tt.mode)}
+			expected := codereviewsvc.ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequesterID: &userID, RequestID: requestID, Mode: models.CodeReviewRequestMode(tt.mode), OverrideSizeLimits: tt.overrideSizeLimits}
 			result := codereviewsvc.ScheduleRequestResult{RequestID: requestID, Disposition: "queued", Schedule: models.CodeReviewPRState{PullRequestID: pr, State: models.CodeReviewScheduleWaiting}}
 			if tt.disposition != "" {
 				result.Disposition = tt.disposition
@@ -83,7 +87,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 			}}
 			handler := NewCodeReviewHandler(nil, nil)
 			handler.retryService = stub
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"request_id":"`+requestID.String()+`","mode":"`+tt.mode+`"}`))
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(fmt.Sprintf(`{"request_id":%q,"mode":%q,"override_size_limits":%t}`, requestID.String(), tt.mode, tt.overrideSizeLimits)))
 			ctx := middleware.WithOrgID(req.Context(), org)
 			if !tt.anonymous {
 				ctx = middleware.WithUser(ctx, &models.User{ID: userID, OrgID: org, Role: models.RoleMember})

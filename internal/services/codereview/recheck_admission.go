@@ -177,10 +177,11 @@ func assessmentRequestContext(req ScheduleRequestInput) *ReviewRequestContext {
 	if req.RequestContext != nil {
 		return normalizeReviewRequestContext(req.RequestContext)
 	}
-	if strings.TrimSpace(req.Reason) == "" {
+	overrideSizeLimits := req.Mode == models.CodeReviewReviewNow && req.OverrideSizeLimits
+	if strings.TrimSpace(req.Reason) == "" && !overrideSizeLimits {
 		return nil
 	}
-	return &ReviewRequestContext{Source: "ui", Body: strings.TrimSpace(req.Reason)}
+	return &ReviewRequestContext{Source: "ui", Body: strings.TrimSpace(req.Reason), OverrideSizeLimits: overrideSizeLimits}
 }
 
 func decodeAssessmentManifest(raw json.RawMessage) (ReviewInputManifest, error) {

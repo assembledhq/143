@@ -117,14 +117,15 @@ func reviewRequestHash(prID uuid.UUID, mode models.CodeReviewRequestMode, contex
 }
 
 type ScheduleRequestInput struct {
-	OrgID          uuid.UUID
-	PullRequestID  uuid.UUID
-	RequestID      uuid.UUID
-	RequesterID    *uuid.UUID
-	Mode           models.CodeReviewRequestMode
-	Reason         string
-	RequestContext *ReviewRequestContext
-	TriggerSource  models.CodeReviewTriggerSource
+	OrgID              uuid.UUID
+	PullRequestID      uuid.UUID
+	RequestID          uuid.UUID
+	RequesterID        *uuid.UUID
+	Mode               models.CodeReviewRequestMode
+	Reason             string
+	RequestContext     *ReviewRequestContext
+	TriggerSource      models.CodeReviewTriggerSource
+	OverrideSizeLimits bool
 }
 
 type ScheduleRequestResult struct {

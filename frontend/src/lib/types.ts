@@ -192,7 +192,6 @@ export interface CodeReviewPolicyConfig {
     max_files_changed: number;
     max_additions: number;
     max_deletions: number;
-    size_limit_exempt_authors?: string[];
     semantic_dedupe_cooldown_seconds: number;
     stop_after_deterministic_failure: boolean;
     require_passing_checks: boolean;
@@ -202,6 +201,7 @@ export interface CodeReviewPolicyConfig {
     blocked_path_patterns?: string[];
     require_up_to_date: boolean;
     allow_forks: boolean;
+    allow_size_limit_override?: boolean;
     eligible_authors?: string[];
     eligible_author_teams?: string[];
     required_checks?: string[];

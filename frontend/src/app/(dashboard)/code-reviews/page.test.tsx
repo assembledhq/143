@@ -3092,6 +3092,7 @@ describe("CodeReviewsPage", () => {
       "Require up-to-date branch",
       "Block reviewer disagreement",
       "Allow fork PRs",
+      "Allow size limit overrides",
       "Stop after stable policy blockers",
     ]) {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
@@ -4003,23 +4004,16 @@ describe("CodeReviewsPage", () => {
     expect(screen.queryByText("build-helper[bot]")).not.toBeInTheDocument();
   });
 
-  it("saves size limit exempt authors", async () => {
+  it("saves the size limit override setting", async () => {
     const user = userEvent.setup();
     const state = mockCodeReviewBaseHandlers();
     renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
-    await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
+    await user.click(await screen.findByRole("button", { name: /Quality gates/i }));
 
-    expect(screen.getByText("No authors are exempt from size limits.")).toBeInTheDocument();
-    await user.type(screen.getByRole("textbox", { name: "Size limit exempt authors" }), "anya{Enter}");
+    await user.click(await screen.findByRole("switch", { name: "Allow size limit overrides" }));
     await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
       ...policy.config.risk_policy,
-      size_limit_exempt_authors: ["anya"],
-    }));
-
-    await user.click(await screen.findByRole("button", { name: "Remove anya" }));
-    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
-      ...policy.config.risk_policy,
-      size_limit_exempt_authors: [],
+      allow_size_limit_override: true,
     }));
   });
 

@@ -68,9 +68,10 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		RequestID uuid.UUID                    `json:"request_id"`
-		Mode      models.CodeReviewRequestMode `json:"mode"`
-		Reason    string                       `json:"reason,omitempty"`
+		RequestID          uuid.UUID                    `json:"request_id"`
+		Mode               models.CodeReviewRequestMode `json:"mode"`
+		Reason             string                       `json:"reason,omitempty"`
+		OverrideSizeLimits bool                         `json:"override_size_limits,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RequestID == uuid.Nil {
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "request_id and mode are required")
@@ -90,7 +91,11 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "invalid request mode", err)
 		return
 	}
-	result, err := s.RequestScheduledReview(r.Context(), codereviewsvc.ScheduleRequestInput{OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id, RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode, Reason: strings.TrimSpace(req.Reason)})
+	if req.OverrideSizeLimits && req.Mode != models.CodeReviewReviewNow {
+		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "override_size_limits requires review_now")
+		return
+	}
+	result, err := s.RequestScheduledReview(r.Context(), codereviewsvc.ScheduleRequestInput{OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id, RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode, Reason: strings.TrimSpace(req.Reason), OverrideSizeLimits: req.OverrideSizeLimits})
 	if err != nil {
 		writeScheduleError(w, r, err)
 		return
@@ -101,7 +106,7 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, status, models.SingleResponse[codereviewsvc.ScheduleRequestResult]{Data: result})
 	resourceID := id.String()
-	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"request_id": req.RequestID, "mode": req.Mode, "disposition": result.Disposition})
+	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"request_id": req.RequestID, "mode": req.Mode, "disposition": result.Disposition, "override_size_limits": req.OverrideSizeLimits})
 	emitUserAudit(h.audit, r, models.AuditActionCodeReviewRequested, models.AuditResourcePullRequest, &resourceID, details)
 }
 func (h *CodeReviewHandler) PauseSchedule(w http.ResponseWriter, r *http.Request) {

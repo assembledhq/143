@@ -17,6 +17,8 @@ type CodeReviewFinalReviewInput struct {
 	PolicySettingsURL         string
 	EvidenceRecheckURL        string
 	ReviewNowURL              string
+	SizeLimitOverrideURL      string
+	OverriddenSizeLimits      []CodeReviewRiskReason
 	ReviewProvenance          string
 	DescriptionPassed         *bool
 	DescriptionIssues         []string
@@ -123,6 +125,12 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	}
 	if !input.Acceptable && input.Decision != CodeReviewDecisionApproved {
 		footer.ReviewNowURL = input.ReviewNowURL
+		for _, reason := range input.RiskReasons {
+			if IsCodeReviewSizeLimitRiskReason(reason.Code) {
+				footer.SizeLimitOverrideURL = input.SizeLimitOverrideURL
+				break
+			}
+		}
 		if codeReviewBlockerCount(input.RiskReasons, blockingFindings) == 1 {
 			if revision := codeReviewShortSHA(input.HeadSHA); revision != "" {
 				paragraphs = append(paragraphs, "This is the only blocker as of `"+revision+"`.")
@@ -136,6 +144,13 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 		} else {
 			paragraphs = append(paragraphs, "**Next steps:** Address any blockers, then request another review or ask a human reviewer to decide.")
 		}
+	}
+	if len(input.OverriddenSizeLimits) > 0 {
+		messages := make([]string, 0, len(input.OverriddenSizeLimits))
+		for _, reason := range input.OverriddenSizeLimits {
+			messages = append(messages, humanizeCodeReviewRiskReason(reason, nil))
+		}
+		paragraphs = append(paragraphs, "**Size limits overridden for this review:** "+strings.Join(messages, " "))
 	}
 	if provenance := strings.TrimSpace(input.ReviewProvenance); provenance != "" {
 		paragraphs = append(paragraphs, provenance)

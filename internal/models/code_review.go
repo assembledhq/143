@@ -495,7 +495,6 @@ type CodeReviewRiskPolicy struct {
 	MaxFilesChanged               int      `json:"max_files_changed"`
 	MaxAdditions                  int      `json:"max_additions"`
 	MaxDeletions                  int      `json:"max_deletions"`
-	SizeLimitExemptAuthors        []string `json:"size_limit_exempt_authors,omitempty"`
 	SemanticDedupeCooldownSeconds int      `json:"semantic_dedupe_cooldown_seconds"`
 	StopAfterDeterministicFailure bool     `json:"stop_after_deterministic_failure"`
 	RequirePassingChecks          bool     `json:"require_passing_checks"`
@@ -505,6 +504,7 @@ type CodeReviewRiskPolicy struct {
 	BlockedPathPatterns           []string `json:"blocked_path_patterns,omitempty"`
 	RequireUpToDate               bool     `json:"require_up_to_date"`
 	AllowForks                    bool     `json:"allow_forks"`
+	AllowSizeLimitOverride        bool     `json:"allow_size_limit_override,omitempty"`
 	EligibleAuthors               []string `json:"eligible_authors,omitempty"`
 	EligibleAuthorTeams           []string `json:"eligible_author_teams,omitempty"`
 	RequiredChecks                []string `json:"required_checks,omitempty"`
@@ -552,8 +552,6 @@ func (p *CodeReviewRiskPolicy) UnmarshalJSON(data []byte) error {
 	*p = result
 	return nil
 }
-
-var codeReviewGitHubLoginPattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\[bot\])?$`)
 
 const (
 	DefaultCodeReviewSemanticDedupeCooldownSeconds = 15 * 60
@@ -762,9 +760,7 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	}
 	defaults.RiskPolicy.RequireUpToDate = config.RiskPolicy.RequireUpToDate
 	defaults.RiskPolicy.AllowForks = config.RiskPolicy.AllowForks
-	if len(config.RiskPolicy.SizeLimitExemptAuthors) > 0 {
-		defaults.RiskPolicy.SizeLimitExemptAuthors = config.RiskPolicy.SizeLimitExemptAuthors
-	}
+	defaults.RiskPolicy.AllowSizeLimitOverride = config.RiskPolicy.AllowSizeLimitOverride
 	if len(config.RiskPolicy.EligibleAuthors) > 0 {
 		defaults.RiskPolicy.EligibleAuthors = config.RiskPolicy.EligibleAuthors
 	}
@@ -859,11 +855,6 @@ func (c CodeReviewPolicyConfig) Validate() error {
 	}
 	if c.RiskPolicy.MaxDeletions < 1 {
 		return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "max_deletions must be positive")
-	}
-	for _, author := range c.RiskPolicy.SizeLimitExemptAuthors {
-		if !codeReviewGitHubLoginPattern.MatchString(author) {
-			return codeReviewPolicyFieldError(CodeReviewPolicyFieldRiskPolicy, "size_limit_exempt_authors entries must be exact GitHub logins")
-		}
 	}
 	if c.RiskPolicy.SemanticDedupeCooldownSeconds < MinCodeReviewSemanticDedupeCooldownSeconds ||
 		c.RiskPolicy.SemanticDedupeCooldownSeconds > MaxCodeReviewSemanticDedupeCooldownSeconds {
@@ -1381,6 +1372,7 @@ func CodeReviewAutomatedApprovalExamples() []CodeReviewAutomatedApprovalExampleO
 }
 
 type CodeReviewRiskInput struct {
+	OverrideSizeLimits    bool
 	FilesChanged          int
 	Additions             int
 	Deletions             int
@@ -1747,15 +1739,9 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.HeadSHAChanged {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonHeadChanged})
 	}
-	if !codeReviewSizeLimitExempt(input.Author, policy.RiskPolicy.SizeLimitExemptAuthors) {
-		if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
-			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: input.FilesChanged, Limit: policy.RiskPolicy.MaxFilesChanged})
-		}
-		if input.Additions > policy.RiskPolicy.MaxAdditions {
-			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: input.Additions, Limit: policy.RiskPolicy.MaxAdditions})
-		}
-		if input.Deletions > policy.RiskPolicy.MaxDeletions {
-			risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: input.Deletions, Limit: policy.RiskPolicy.MaxDeletions})
+	if !codeReviewSizeLimitOverrideActive(policy, input) {
+		for _, reason := range codeReviewSizeLimitReasons(policy, input) {
+			risk.AddReason(reason)
 		}
 	}
 	if policy.RiskPolicy.RequirePassingChecks && !input.ChecksPassing {
@@ -1860,19 +1846,42 @@ func CodeReviewAuthorAllowed(author, authorClass string, allowed []string) bool 
 	return false
 }
 
-// codeReviewSizeLimitExempt matches exact logins only. Unlike eligible_authors,
-// it never honors wildcard or author-class entries such as "all" or "human".
-func codeReviewSizeLimitExempt(author string, exemptAuthors []string) bool {
-	author = strings.TrimSpace(author)
-	if author == "" {
+func codeReviewSizeLimitReasons(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) []CodeReviewRiskReason {
+	var reasons []CodeReviewRiskReason
+	if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
+		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: input.FilesChanged, Limit: policy.RiskPolicy.MaxFilesChanged})
+	}
+	if input.Additions > policy.RiskPolicy.MaxAdditions {
+		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: input.Additions, Limit: policy.RiskPolicy.MaxAdditions})
+	}
+	if input.Deletions > policy.RiskPolicy.MaxDeletions {
+		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: input.Deletions, Limit: policy.RiskPolicy.MaxDeletions})
+	}
+	return reasons
+}
+
+func codeReviewSizeLimitOverrideActive(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) bool {
+	return input.OverrideSizeLimits && policy.RiskPolicy.AllowSizeLimitOverride
+}
+
+// CodeReviewOverriddenSizeLimits returns the exceeded limits that an allowed
+// override removed from the risk evaluation, so the review can disclose them.
+func CodeReviewOverriddenSizeLimits(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) []CodeReviewRiskReason {
+	policy = ResolveCodeReviewPolicyConfig(&policy)
+	if !codeReviewSizeLimitOverrideActive(policy, input) {
+		return nil
+	}
+	return codeReviewSizeLimitReasons(policy, input)
+}
+
+// IsCodeReviewSizeLimitRiskReason reports whether a size override can clear the reason.
+func IsCodeReviewSizeLimitRiskReason(code CodeReviewRiskReasonCode) bool {
+	switch code {
+	case CodeReviewRiskReasonFilesLimitExceeded, CodeReviewRiskReasonLinesLimitExceeded, CodeReviewRiskReasonAdditionsLimitExceeded, CodeReviewRiskReasonDeletionsLimitExceeded:
+		return true
+	default:
 		return false
 	}
-	for _, exempt := range exemptAuthors {
-		if strings.EqualFold(author, strings.TrimSpace(exempt)) {
-			return true
-		}
-	}
-	return false
 }
 
 func codeReviewAuthorTeamAllowed(authorTeams, allowedTeams []string) bool {
