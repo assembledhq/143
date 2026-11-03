@@ -29,7 +29,7 @@ export function ReviewLoopStartupNotice({ state }: { state?: ReviewLoopAdmission
     <Card>
       <CardContent className="space-y-2 py-3">
         <StatusLabel label={title} tone={state === "attention" || state === "refused" ? "attention" : "info"} announcement="polite" />
-        <p className="text-xs text-muted-foreground">{detail}</p>
+        <p className="type-dense text-muted-foreground">{detail}</p>
       </CardContent>
     </Card>
   );
