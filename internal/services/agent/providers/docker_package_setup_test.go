@@ -59,6 +59,7 @@ type npmDockerFixture struct {
 	sequence, created, removed, resolves int
 	failInstall, failCleanup             bool
 	npmFailure                           string
+	versionMismatch                      bool
 	cancelInstall                        context.CancelFunc
 	privateInputs                        []byte
 	publishedBeforeRemoval               bool
@@ -103,6 +104,9 @@ func newNPMDockerFixture(t *testing.T, root, ca, port string) *npmDockerFixture 
 		if fixture.failCleanup {
 			return errors.New("fake cleanup failure synthetic-private-token")
 		}
+		if fixture.versionMismatch {
+			require.NoFileExists(t, filepath.Join(root, "private", "npmrc"), "runtime mismatch must fail before creating credential npmrc")
+		}
 		fixture.removed++
 		return errors.Join(os.RemoveAll(filepath.Join(root, "private")), os.RemoveAll(filepath.Join(root, "setup")))
 	}
@@ -125,9 +129,17 @@ func newNPMDockerFixture(t *testing.T, root, ca, port string) *npmDockerFixture 
 		if id == "isolated" {
 			options.Cmd[2] = strings.ReplaceAll(options.Cmd[2], "/private", filepath.Join(root, "private"))
 			options.Cmd[2] = strings.ReplaceAll(options.Cmd[2], "/setup/project", filepath.Join(root, "setup/project"))
-			if strings.Contains(options.Cmd[2], "/usr/bin/npm") {
-				ownedArgs := fmt.Sprintf("args=[%q,%q,'--fetch-retries=0','--strict-ssl=false','--cafile='+%q,", fixture.node, fixture.npm, fixture.ca)
-				script := strings.ReplaceAll(npmSetupInstallPython, "args=['/usr/bin/npm',", ownedArgs)
+			if strings.Contains(options.Cmd[2], "args=[node,npm,") {
+				ownedArgs := fmt.Sprintf("args=[%q,%q,'--fetch-retries=0','--strict-ssl=false',", fixture.node, fixture.npm)
+				if fixture.ca != "" {
+					ownedArgs += fmt.Sprintf("'--cafile='+%q,", fixture.ca)
+				}
+				script := strings.ReplaceAll(npmSetupInstallPython, "args=[node,npm,", ownedArgs)
+				versionStub := "def version(command):\n return 'v'+node_version if len(command)==2 else npm_version\n"
+				if fixture.versionMismatch {
+					versionStub = "def version(command):\n return '0.0.0'\n"
+				}
+				script = strings.ReplaceAll(script, "if version([node,'--version'])", versionStub+"if version([node,'--version'])")
 				script = strings.ReplaceAll(script, "url.port not in (None,443)", "url.port not in (None,443,"+fixture.port+")")
 				script = strings.ReplaceAll(script, "/private", filepath.Join(root, "private"))
 				script = strings.ReplaceAll(script, "/setup/project", filepath.Join(root, "setup/project"))

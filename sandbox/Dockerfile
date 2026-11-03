@@ -64,6 +64,12 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Repository setup uses pinned toolchains independently of the agent CLI runtime.
+COPY internal/nodetoolchain/catalog.json /tmp/node-toolchains.json
+COPY sandbox/install_node_toolchains.py /tmp/install_node_toolchains.py
+RUN python3 /tmp/install_node_toolchains.py /tmp/node-toolchains.json \
+    && rm /tmp/install_node_toolchains.py /tmp/node-toolchains.json
+
 # Install GitHub CLI (gh) at the version pinned in versions.json. We use the
 # upstream tarball rather than the apt repo to avoid an extra signing-key
 # rotation chore and to keep the version pin in exactly one place. gh reads
