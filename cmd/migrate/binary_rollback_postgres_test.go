@@ -33,7 +33,7 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 			m, conn := newContentMigrationPostgres(t, false)
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			require.NoError(t, m.Up(), "install the complete schema before rollback inspection")
+			require.NoError(t, m.Migrate(392), "install the historical inactive schema supported by binary rollback")
 			f := seedCallerIntentMigrationLegacy(t, ctx, conn)
 			seedCallerDispatchStatusMigrationMetadata(t, ctx, conn, f)
 			if tt.mutation != "" {

@@ -13,6 +13,7 @@ import {
   ScrollText,
   BarChart3,
   KeyRound,
+  Package,
   Globe,
   ChevronRight,
   type LucideIcon,
@@ -72,6 +73,7 @@ const settingsGroups: SettingsGroup[] = [
     label: "RUNTIME",
     items: [
       { label: "Sandboxes", icon: Activity, href: "/settings/runtime", adminOnly: true },
+      { label: "Package registries", icon: Package, href: "/settings/package-registries", adminOnly: true },
       { label: "Previews", icon: Globe, href: "/settings/previews", adminOnly: true },
     ],
   },

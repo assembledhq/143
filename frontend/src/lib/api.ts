@@ -255,6 +255,16 @@ export const api = {
         `/api/v1/repositories/${id}/branches${query ? `?query=${encodeURIComponent(query)}` : ''}`,
       ),
     detectPreview: (owner: string, repo: string) => get<import('./preview-types').PreviewDetectionResult>(`/api/v1/repos/${owner}/${repo}/preview/detect`),
+    packageRegistryCredentials: {
+      list: (repositoryId: string) =>
+        get<import('./types').ListResponse<import('./types').PackageRegistryCredentialSummary>>(`/api/v1/repositories/${repositoryId}/package-registry-credentials`),
+      create: (repositoryId: string, body: import('./types').PackageRegistryCredentialCreateRequest) =>
+        post<import('./types').SingleResponse<import('./types').PackageRegistryCredentialSummary>>(`/api/v1/repositories/${repositoryId}/package-registry-credentials`, body),
+      rotate: (repositoryId: string, credentialId: string, body: import('./types').PackageRegistryCredentialRotateRequest) =>
+        request<import('./types').SingleResponse<import('./types').PackageRegistryCredentialSummary>>(`/api/v1/repositories/${repositoryId}/package-registry-credentials/${credentialId}`, { method: 'PUT', body: JSON.stringify(body) }),
+      delete: (repositoryId: string, credentialId: string, expectedRevision: string) =>
+        del<void>(`/api/v1/repositories/${repositoryId}/package-registry-credentials/${credentialId}?expected_revision=${encodeURIComponent(expectedRevision)}`),
+    },
     previewSecretBundles: {
       list: (id: string) =>
         get<import('./types').ListResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`),

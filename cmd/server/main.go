@@ -52,6 +52,7 @@ import (
 	"github.com/assembledhq/143/internal/services/lifecyclewriter"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
+	"github.com/assembledhq/143/internal/services/packagecredentials"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
 	previewproviders "github.com/assembledhq/143/internal/services/preview/providers"
@@ -1673,8 +1674,16 @@ func buildServices(
 	uploadStore := buildUploadStore(context.Background(), cfg, logger)
 	codeReviewRoleStore := db.NewCodeReviewStore(pool)
 
+	var packageCrypto *crypto.Service
+	if cfg.EncryptionMasterKey != "" {
+		packageCrypto, err = crypto.NewService(cfg.EncryptionMasterKey)
+		if err != nil {
+			return nil, fmt.Errorf("initialize worker-services package credential encryption: %w", err)
+		}
+	}
 	orchestrator := agent.NewOrchestrator(agent.OrchestratorConfig{
 		Provider:                   sandboxProvider,
+		PackageCredentials:         packagecredentials.NewService(db.NewPackageRegistryCredentialStore(pool), packageCrypto),
 		Adapters:                   agentAdapters,
 		Env:                        agentEnv,
 		Sessions:                   sessionStore,
@@ -1732,6 +1741,7 @@ func buildServices(
 		deployStore, repoStore, jobStore, logger,
 	)
 	prService.SetRateLimitController(githubRateLimitController)
+	orchestrator.SetPackageSetupPullRequestTrust(prService)
 	workerFeedbackStore := db.NewPullRequestFeedbackStore(pool)
 	workerFeedbackStore.SetJobStore(jobStore)
 	prService.SetPullRequestFeedbackStore(workerFeedbackStore)

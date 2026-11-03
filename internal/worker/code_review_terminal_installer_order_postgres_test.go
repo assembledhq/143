@@ -160,7 +160,8 @@ func terminalInstallerOrderFixture(t *testing.T, ctx context.Context, pool *pgxp
 	var ledger int
 	var dirty bool
 	require.NoError(t, pool.QueryRow(ctx, `SELECT version,dirty FROM schema_migrations`).Scan(&ledger, &dirty), "read the actual appended schema ledger before synthetic intent enablement")
-	require.Equal(t, 392, ledger, "the new unresolved marker must use the fully migrated appended status schema")
+	// Migration 392 establishes readiness; later migrations may append to the full schema.
+	require.GreaterOrEqual(t, ledger, 392, "the unresolved marker requires the actual status-schema readiness migration or later")
 	require.False(t, dirty, "the installer-order proof cannot use a dirty schema ledger")
 	tag, err := pool.Exec(ctx, `UPDATE caller_send_intent_control SET intents_enabled=true WHERE singleton AND schema_ready AND dispatch_status_ready`)
 	require.NoError(t, err, "enable only this disposable synthetic database behind both real readiness gates")

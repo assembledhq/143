@@ -1,0 +1,67 @@
+---
+title: Private npm packages
+description: Install private npm dependencies with repository credentials kept outside coding-agent environments.
+section: Guides
+order: 12
+status: stable
+audience: engineer
+tags:
+  - npm
+  - credentials
+  - repo-config
+llm_summary: Add an admin-managed repository npm registry credential, declare setup.npm directories in .143/config.json, and run package scripts after controlled installation removes credentials.
+---
+
+Use this setup when a repository depends on private, scoped npm packages. You need an organization administrator to save a read-only registry token and permission to commit the repository configuration.
+
+## Add a registry credential
+
+1. Open **Settings → Package registries** under **Runtime**.
+2. Select the repository, then choose **Add credential**.
+3. Enter the registry's HTTPS origin, an explicit lowercase npm scope, and a read-only package token.
+
+For example, use `https://registry.example.test` with `@example`. The registry must use a DNS hostname on HTTPS port 443, without a path, query, fragment, or embedded credentials. Each repository can have one credential per registry origin and one per package scope. Distinct registry origins are supported.
+
+Scope the token to the packages this repository needs. Tokens cannot be revealed after saving. Use **Rotate** to replace a token for the same registry and scope. To change the registry or scope, delete the credential and create a new one. Deleting a credential affects future dependency installation; it does not remove dependencies already installed in a workspace.
+
+## Declare controlled installation
+
+Commit `.143/config.json` with the npm directories that require installation:
+
+```json
+{
+  "setup": {
+    "npm": [
+      { "directory": "." },
+      { "directory": "tools/example", "legacy_peer_deps": true }
+    ]
+  },
+  "bootstrap": {
+    "commands": ["npm rebuild", "npm run build"]
+  },
+  "validation": {
+    "commands": ["npm test", "npm run lint"]
+  }
+}
+```
+
+Each directory needs a committed `package.json` and npm lockfile version 2 or 3 in `package-lock.json`. Paths are relative to the repository root. `.` selects the root project. For an npm workspace, select the workspace root so its lockfile controls the installation. A standalone nested project, such as `tools/example`, needs its own manifest and lockfile. List the root installation first when a nested project relies on peers provided by the root. Use `legacy_peer_deps: true` only when that project's lockfile requires npm's legacy peer-dependency resolution.
+
+143 runs a platform-controlled `npm ci --ignore-scripts --no-audit` before repository bootstrap or review commands. It uses the saved credential only during this installation. Package lifecycle scripts are skipped while credentials are available. Repository `.npmrc` files are not copied into this isolated installation; use the typed `legacy_peer_deps` field when needed.
+
+If dependencies need lifecycle scripts, run `npm rebuild` or the specific required script in your bootstrap or review commands afterward. These commands run after credential removal. Remove duplicate `npm ci` commands from those recipes: the token is no longer available there, and reinstalling discards the dependencies already prepared.
+
+## Credential boundaries
+
+Package credentials belong to the selected repository. They are not injected as environment variables, exposed to coding agents, or available to arbitrary repository scripts. Preview applications and preview secret bundles use their existing configuration separately.
+
+Authenticated setup requires a trusted repository configuration. Reviews from forks or with unknown source trust cannot use repository package credentials. This initial setup supports scoped npm packages downloaded over HTTPS and npm workspace links. Git, SSH, HTTP, file dependencies, and direct tarball URL dependency specifications are rejected. Other package managers and registry credentials are not supported.
+
+## Troubleshooting
+
+- **Authentication fails:** check that the registry origin and package scope match the locked packages, and rotate an expired or insufficiently scoped token.
+- **A package needs an install script:** add the required script to bootstrap or review commands after controlled installation. Do not put the token in those commands.
+- **Credential storage is unavailable:** ask your instance administrator to configure package credential encryption, then try again. 143 does not save plaintext tokens as a fallback.
+- **A credential changed while you edited it:** refresh the page before rotating or deleting again.
+
+Keep tokens out of `.143/config.json`, `.npmrc`, repository history, session messages, and preview secret bundles used as a substitute for package setup.

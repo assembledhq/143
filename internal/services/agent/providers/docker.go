@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -124,6 +125,7 @@ type DockerClient interface {
 // with optional gVisor (runsc) runtime for enhanced isolation.
 type DockerProvider struct {
 	client                 DockerClient
+	packageSetupLocks      sync.Map
 	runtime                string // "runsc" (gVisor) or "runc" (standard Docker)
 	network                string // pre-created Docker network with egress restrictions
 	resolvConf             string // host path bind-mounted at /etc/resolv.conf in sandboxes

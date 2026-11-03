@@ -4075,3 +4075,24 @@ export interface CodeReviewSchedule {
 export interface CodeReviewScheduledTarget {
  schedule: CodeReviewSchedule; title: string; github_pr_url: string; github_pr_number: number; github_repo: string;
 }
+
+export interface PackageRegistryCredentialSummary {
+  id: string;
+  repository_id: string;
+  registry_url: string;
+  package_scope: string;
+  revision: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PackageRegistryCredentialCreateRequest {
+  registry_url: string;
+  package_scope: string;
+  token: string;
+}
+
+export interface PackageRegistryCredentialRotateRequest {
+  expected_revision: string;
+  token: string;
+}

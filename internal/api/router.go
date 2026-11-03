@@ -46,6 +46,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
+	"github.com/assembledhq/143/internal/services/packagecredentials"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/publicationintent"
@@ -741,6 +742,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
 	previewSecretBundleHandler := handlers.NewPreviewSecretBundleHandler(previewSecretBundleStore)
+	packageRegistryCredentialHandler := handlers.NewPackageRegistryCredentialHandler(packagecredentials.NewService(db.NewPackageRegistryCredentialStore(pool), cryptoSvc), auditEmitter)
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	// Unified coding-credentials handler — see docs/design/future/65-unified-coding-credentials.md.
 	codingCredentialHandler := handlers.NewCodingCredentialHandler(codingCredentialStore, orgStore)
@@ -1837,6 +1839,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)
 				r.Post("/api/v1/previews/api-tokens", branchPreviewHandler.CreateAPIToken)
 				r.Delete("/api/v1/previews/api-tokens/{token_id}", branchPreviewHandler.RevokeAPIToken)
+				r.Get("/api/v1/repositories/{id}/package-registry-credentials", packageRegistryCredentialHandler.List)
+				r.Post("/api/v1/repositories/{id}/package-registry-credentials", packageRegistryCredentialHandler.Create)
+				r.Put("/api/v1/repositories/{id}/package-registry-credentials/{credential_id}", packageRegistryCredentialHandler.Rotate)
+				r.Delete("/api/v1/repositories/{id}/package-registry-credentials/{credential_id}", packageRegistryCredentialHandler.Delete)
 				r.Post("/api/v1/repositories/{id}/preview-secret-bundles", previewSecretBundleHandler.Upsert)
 				r.Delete("/api/v1/repositories/{id}/preview-secret-bundles/{name}", previewSecretBundleHandler.Delete)
 				r.Patch("/api/v1/preview-secret-bundles/{id}", previewSecretBundleHandler.Patch)
