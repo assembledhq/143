@@ -11,6 +11,7 @@ set -euo pipefail
 #   ./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] all
 #   ./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] app,worker,redis
 #   DEPLOY_JOBS=1 ./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] app,worker
+#   WORKER_DEPLOY_JOBS=2 ./deploy/scripts/deploy-fleet.sh <ssh-key> [tag] app,worker
 #
 # Fleet hosts are read from (in priority order):
 #   1. FLEET_HOSTS env var             — comma-separated "role:IP" pairs
@@ -22,6 +23,7 @@ SSH_KEY="$1"
 TAG="${2:-latest}"
 REQUESTED_ROLES="${3:-app,worker}"
 DEPLOY_JOBS="${DEPLOY_JOBS:-4}"
+WORKER_DEPLOY_JOBS="${WORKER_DEPLOY_JOBS:-1}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
@@ -75,6 +77,19 @@ if ! [[ "$DEPLOY_JOBS" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: DEPLOY_JOBS must be a positive integer, got '$DEPLOY_JOBS'." >&2
   exit 1
 fi
+case "$WORKER_DEPLOY_JOBS" in
+  1|2) ;;
+  *) echo "ERROR: WORKER_DEPLOY_JOBS must be 1 or 2." >&2; exit 1 ;;
+esac
+# Only the routine app/worker path may overlap blue/green worker rollouts.
+if [ "$REQUESTED_ROLES" != app,worker ] || [ "${DEPLOY_MODE:-routine}" != routine ] ||
+   [ -n "${BINARY_ROLLBACK_GUARD_TAG:-}${BINARY_ROLLBACK_SCHEMA_VERSION:-}" ] ||
+   [ -n "${FORCE_DEPLOY_WITH_ACTIVE_SESSIONS:-}${FORCE_INTERRUPT_ACTIVE_RUNTIMES:-}" ]; then
+  if [ "$WORKER_DEPLOY_JOBS" -eq 2 ]; then
+    echo "Using one worker slot: parallel rollout requires routine app,worker deployment without rollback or force flags."
+  fi
+  WORKER_DEPLOY_JOBS=1
+fi
 
 # Read FLEET_HOSTS from env var, or decrypt from SOPS.
 if [ -z "${FLEET_HOSTS:-}" ]; then
@@ -95,7 +110,7 @@ fi
 
 echo "Reading fleet from FLEET_HOSTS..."
 echo "Deploying roles: $REQUESTED_ROLES"
-echo "Workers deploy as one completed canary followed by serial hosts; maintenance fan-out is bounded by $DEPLOY_JOBS."
+echo "Workers deploy as one completed canary followed by up to $WORKER_DEPLOY_JOBS concurrent hosts; maintenance fan-out is bounded by $DEPLOY_JOBS."
 # DEPLOY_FLEET_LOG_DIR pins private diagnostics for operator inspection.
 # Public CI must not print or upload raw production logs or host inventories.
 # A pinned dir can outlive a run (local use, non-ephemeral machines), so
@@ -259,23 +274,84 @@ for group_file in "${POST_APP_GROUP_FILES[@]}"; do
   fi
 done
 
-# One completed host is the canary. Each subsequent host must finish before
-# another starts. Keep co-located role groups together, as in maintenance.
-for i in "${!WORKER_GROUP_FILES[@]}"; do
-  if [ "$i" -eq 0 ]; then
-    echo "Deploying worker canary; remaining worker hosts are held."
-  else
-    echo "Deploying worker host $((i + 1)) of ${#WORKER_GROUP_FILES[@]} serially."
+# Preserve each host group and join every started rollout. Refill whichever
+# slot frees first. Poll child liveness for Bash versions without wait -n.
+deploy_remaining_workers() {
+  local next=1 active=0 failed=0 interrupted=0 slot pid live_pids
+  local -a pids=()
+  # Keep the original foreground signal behavior for manual serial deploys.
+  if [ "$WORKER_DEPLOY_JOBS" -eq 1 ]; then
+    for ((next = 1; next < ${#WORKER_GROUP_FILES[@]}; next++)); do
+      deploy_group "${WORKER_GROUP_FILES[$next]}" || return 1
+    done
+    return 0
   fi
-  if ! deploy_group "${WORKER_GROUP_FILES[$i]}"; then
+
+  # An interrupt closes admission, but already-started rollouts must finish
+  # under the fleet lock. Killing a host mid-retirement can leave it latched.
+  trap 'if [ "$interrupted" -eq 0 ]; then interrupted=130; fi' INT
+  trap 'if [ "$interrupted" -eq 0 ]; then interrupted=143; fi' TERM
+  while [ "$active" -gt 0 ] || { [ "$interrupted" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$next" -lt "${#WORKER_GROUP_FILES[@]}" ]; }; do
+    # Check Bash's job table so a reused PID cannot keep a completed slot busy.
+    live_pids="$(jobs -pr; jobs -ps)"
+    for slot in "${!pids[@]}"; do
+      pid="${pids[$slot]}"
+      case $'\n'"$live_pids"$'\n' in
+        *$'\n'"$pid"$'\n'*) continue ;;
+      esac
+      if ! wait "$pid"; then
+        failed=1
+      fi
+      unset 'pids[slot]'
+      active=$((active - 1))
+    done
+    for ((slot = 0; slot < WORKER_DEPLOY_JOBS; slot++)); do
+      [ "$interrupted" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$next" -lt "${#WORKER_GROUP_FILES[@]}" ] || break
+      [ -z "${pids[$slot]:-}" ] || continue
+      # A host can fail between reaping and admission. Its failure marker
+      # becomes visible before the child exits.
+      if compgen -G "$LOG_DIR/*.log.failed" >/dev/null; then
+        failed=1
+        break
+      fi
+      [ "$interrupted" -eq 0 ] || break
+      deploy_group "${WORKER_GROUP_FILES[$next]}" &
+      pids[$slot]=$!
+      active=$((active + 1))
+      next=$((next + 1))
+    done
+    if [ "$active" -gt 0 ]; then
+      sleep 1
+    fi
+  done
+  trap - INT TERM
+  if [ "$interrupted" -ne 0 ]; then
+    return "$interrupted"
+  fi
+  return "$failed"
+}
+
+if [ -n "${WORKER_GROUP_FILES[0]:-}" ]; then
+  echo "Deploying worker canary; remaining worker hosts are held."
+  if ! deploy_group "${WORKER_GROUP_FILES[0]}"; then
     dump_failed_logs
     echo "FAILED: worker rollout incomplete; remaining worker hosts were not started. See logs in $LOG_DIR." >&2
     exit 1
   fi
-  if [ "$i" -eq 0 ]; then
-    echo "Worker canary completed; advancing remaining worker hosts serially."
+  echo "Worker canary completed; advancing up to $WORKER_DEPLOY_JOBS worker hosts at a time."
+  if deploy_remaining_workers; then
+    :
+  else
+    rollout_status=$?
+    dump_failed_logs
+    if [ "$rollout_status" -ge 128 ]; then
+      echo "Interrupted worker rollout; joined all started hosts. See logs in $LOG_DIR." >&2
+    else
+      echo "FAILED: worker rollout incomplete; joined all started hosts. See logs in $LOG_DIR." >&2
+    fi
+    exit "$rollout_status"
   fi
-done
+fi
 
 if [ "${#MAINTENANCE_GROUP_FILES[@]}" -gt 0 ]; then
   echo "Deploying ${#MAINTENANCE_GROUP_FILES[@]} post-app node(s), $DEPLOY_JOBS at a time (logs: $LOG_DIR)."

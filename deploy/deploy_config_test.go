@@ -377,6 +377,7 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(workflow), `>"$RUNNER_TEMP/deploy-fleet.log" 2>&1`, "public CI should capture private deployment output without printing it")
 	require.Contains(t, string(workflow), `FLEET_HOSTS="$fleet_hosts" GITHUB_STEP_SUMMARY= ./deploy/scripts/deploy-fleet.sh`, "private failure logs must not leak through the public Actions summary")
 	require.Contains(t, string(workflow), `WORKER_DEPLOY_DETACH: ""`, "automatic fleet deployment should wait for synchronous worker completion")
+	require.Contains(t, string(workflow), `WORKER_DEPLOY_JOBS: "2"`, "automatic routine deployment should use two worker slots after the canary")
 	require.NotContains(t, string(workflow), `status_path="/var/log/143/deploy-worker-${short_sha}.status"`, "CI must not treat a stale short-SHA detached status as completion")
 
 	makefile, err := os.ReadFile("../Makefile")
