@@ -8094,23 +8094,25 @@
     },
     {
       "id": "internal/services/codereview/recheck_admission.go:Service.FallbackAssessmentToFull",
-      "source_sha256": "208824f37201a8505be112fd9c9fc5fdf73ad5fa22ea83094c30cdbeca4fc72a",
+      "source_sha256": "0a94c6851a3e943ae6431fbe7bae8470cd0a3896a0f2dd23491c435571ea0114",
       "operation": "Service.FallbackAssessmentToFull: indirect lifecycle caller",
       "owner": "Service in internal/services/codereview",
       "predicate": "AST-observed guard expressions: (a.ReviewScope != models.CodeReviewScopeEvidenceOnly && a.ReviewScope != models.CodeReviewScopeFull) || (a.Status != models.CodeReviewAssessmentFailed && a.Status != models.CodeReviewAssessmentCompleted && a.Status != models.CodeReviewAssessmentSuperseded)",
-      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: s.requestFullAssessmentReview -> internal/services/codereview/recheck_admission.go:Service.requestFullAssessmentReview; s.requestFullAssessmentReview(ctx, ScheduleRequestInput{OrgID: orgID, PullRequestID: a.PullRequestID, RequestID: requestID, Mode: models.CodeReviewForceFresh, Reason: reason}, a.RepositoryID, &ReviewRequestContext{Source: \"assessment_fallback\", Body: manifest.Request.SubstantiveText}, true, false) -> internal/services/codereview/recheck_admission.go:Service.requestFullAssessmentReview",
+      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: s.requestFullAssessmentReview -> internal/services/codereview/recheck_admission.go:Service.requestFullAssessmentReview; s.requestFullAssessmentReview(ctx, ScheduleRequestInput{OrgID: orgID, PullRequestID: a.PullRequestID, RequestID: requestID, Mode: models.CodeReviewForceFresh, Reason: reason}, a.RepositoryID, &ReviewRequestContext{Source: \"assessment_fallback\", Body: manifest.Request.SubstantiveText, UseReviewHistory: manifest.Request.UseReviewHistory}, true, false) -> internal/services/codereview/recheck_admission.go:Service.requestFullAssessmentReview",
       "stale_result": "Observed guard/error branches: (a.ReviewScope != models.CodeReviewScopeEvidenceOnly && a.ReviewScope != models.CodeReviewScopeFull) || (a.Status != models.CodeReviewAssessmentFailed && a.Status != models.CodeReviewAssessmentCompleted && a.Status != models.CodeReviewAssessmentSuperseded). These are syntax observations, not a proven stale-result contract.",
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/codereview/recheck_admission.go:959",
+        "internal/services/codereview/recheck_admission.go:973",
         "Discovered: indirect-caller",
-        "Boundary/call candidate: s.requestFullAssessmentReview -> internal/services/codereview/recheck_admission.go:Service.requestFullAssessmentReview"
+        "Boundary/call candidate: s.requestFullAssessmentReview -> internal/services/codereview/recheck_admission.go:Service.requestFullAssessmentReview",
+        "History opt-in is copied from the captured manifest; terminal-state checks, fallback loop limit and deterministic request identity are unchanged.",
+        "internal/services/codereview/scheduling_postgres_test.go:TestCodeReviewSchedulingLifecyclePostgres"
       ]
     },
     {
       "id": "internal/services/codereview/recheck_admission.go:Service.RefreshUnsentEvidenceAssessment",
-      "source_sha256": "73ed69eeb042f721cde5905b6af8082b26e0d904421c6fa4231121717562e1eb",
+      "source_sha256": "16f5093798fcaef1b17b1efc624c3d0be9157e49c53ed46a25708043f1e9d7be",
       "operation": "Service.RefreshUnsentEvidenceAssessment: indirect lifecycle caller",
       "owner": "Service in internal/services/codereview",
       "predicate": "AST-observed guard expressions: current.ReviewScope != models.CodeReviewScopeEvidenceOnly || current.Generation != a.Generation || current.InputDigest != a.InputDigest | current.Status == models.CodeReviewAssessmentSuperseded && current.FailureDetail != nil && (strings.HasPrefix(*current.FailureDetail, \"evidence_recheck_queued:\") || strings.HasPrefix(*current.FailureDetail, \"evidence_recheck_failed:\")) | current.Status == models.CodeReviewAssessmentSuperseded && current.FailureDetail != nil && strings.HasPrefix(*current.FailureDetail, detailPrefix) | replacement.PullRequestID != a.PullRequestID || replacement.Generation <= a.Generation",
@@ -8119,10 +8121,12 @@
       "classification": "unfenced-needs-conversion",
       "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
       "evidence": [
-        "internal/services/codereview/recheck_admission.go:870",
+        "internal/services/codereview/recheck_admission.go:884",
         "Discovered: indirect-caller",
         "Boundary/call candidate: s.requestAssessmentReview -> internal/services/codereview/recheck_admission.go:Service.requestAssessmentReview",
-        "Lock/transaction syntax: s.scheduling.store.WithLockedPR"
+        "Lock/transaction syntax: s.scheduling.store.WithLockedPR",
+        "History opt-in is copied from the captured manifest; PR locking, generation/input identity checks, unsent-publication gates and deterministic refresh identity are unchanged.",
+        "internal/services/codereview/scheduling_postgres_test.go:TestCodeReviewSchedulingLifecyclePostgres"
       ]
     },
     {
@@ -11009,10 +11013,10 @@
     },
     {
       "id": "internal/worker/code_review_handler.go:ensureCodeReviewOrchestratorThread",
-      "source_sha256": "ed0d0083c062a2480058fc1a870eef4b265479c83ac9d6ce067a3f4287cc1855",
+      "source_sha256": "f2dc44d83b6e2ffcf01d1052e0da751b2fcc3052bf4d74f874f185257807cfc1",
       "operation": "normalize poisoned review parent before synthesis",
       "owner": "ensureCodeReviewOrchestratorThread in internal/worker",
-      "predicate": "codeReviewSessionNeedsOrchestratorNormalization preflight treats pending/failed as idle after reviewers terminal; generic status write ignores current controller/assessment/epoch.",
+      "predicate": "codeReviewSessionNeedsOrchestratorNormalization preflight treats pending/failed as idle after reviewers terminal; generic status write ignores current controller/assessment/epoch. Opted-in retries recover an already-started bound turn before model selection and the dispatch deadline; changed unsent inputs terminate before new dispatch.",
       "lock": "Separate session read/reset before thread service dispatch; not one review transaction.",
       "stale_result": "Old controller can normalize successor/end; reset failure is logged and dispatch logic continues with old snapshot.",
       "classification": "unfenced-needs-conversion",
@@ -11022,14 +11026,16 @@
       "fence_outcome": "AuthorizationRejected aborts. ProjectTurnInTx/SettleLostAttemptInTx may return StaleSharedState only after immutable own-attempt proof: append that attempt's terminal/transcript receipt, skip ALL shared current status/result/diff/checkpoint, input acknowledgement, owner release, new execution and publication. Do not treat a reclaimed live predecessor as current RuntimeAuthority.",
       "prerequisite_0a": "0a: normalize only same owned controller admission under PR/session lock and bind synthesis dispatch; no generic reset if replacement/end won.",
       "evidence": [
-        "internal/worker/code_review_handler.go:3113",
+        "internal/worker/code_review_handler.go:3163",
         "Discovered: boundary-caller, indirect-caller",
         "Boundary/call candidate: ensureCodeReviewFallbackOrchestratorThread -> internal/worker/code_review_orchestrator_fallback.go:ensureCodeReviewFallbackOrchestratorThread",
         "Boundary/call candidate: ensureCodeReviewFallbackThread -> internal/worker/code_review_orchestrator_fallback.go:ensureCodeReviewFallbackThread",
         "Boundary/call candidate: stores.Sessions.UpdateStatus",
         "Boundary/call candidate: threads.SendMessage",
         "Boundary/call candidate: threads.UpdateThread -> internal/api/handlers/session_threads.go:SessionThreadHandler.UpdateThread",
-        "Boundary/call candidate: threads.UpdateThread -> internal/services/thread/service.go:Service.UpdateThread"
+        "Boundary/call candidate: threads.UpdateThread -> internal/services/thread/service.go:Service.UpdateThread",
+        "internal/worker/code_review_history_recovery_test.go:TestCodeReviewHistoryDispatchRecovery",
+        "History checkpoint recovery appends the bound attempt result and returns without normalizing, retargeting or sending another turn; it does not establish lifecycle ownership for the remaining generic normalization path."
       ]
     },
     {
