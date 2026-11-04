@@ -72,15 +72,22 @@ func TestReviewInputAttemptStageBoundaries(t *testing.T) {
 				require.Equal(t, tt.exit, exit, "incomplete evidence must retain its sentinel exit")
 			}
 			lines := strings.Split(strings.TrimSpace(output.String()), "\n")
-			require.Len(t, lines, 2, "every attempt must emit exactly one start and end")
+			require.Len(t, lines, 3, "every attempt must emit one start, executor profile, and end")
 			for index, line := range lines {
 				var event map[string]any
 				require.NoError(t, json.Unmarshal([]byte(line), &event), "boundary must be structured JSON")
-				require.Equal(t, tt.stage, event["stage"], "attempt must identify its bounded operation")
+				if index == 1 {
+					require.Equal(t, tt.stage, event["parent_stage"], "executor profile must identify its bounded operation")
+					require.Equal(t, "executor", event["profile_stage"], "the middle record must report executor time")
+					require.Equal(t, "orchestrator", event["profile_source"], "executor duration must be measured outside the sandbox")
+				} else {
+					require.Equal(t, tt.stage, event["stage"], "boundary must identify its bounded operation")
+				}
+				require.Equal(t, []string{"stage started", "review preparation profile", "stage ended"}[index], event["message"], "profile must preserve the ordered stage boundaries")
 				require.Equal(t, identity.OrgID.String(), event["org_id"], "boundary must include tenant scope")
 				require.Equal(t, identity.SessionID.String(), event["session_id"], "boundary must identify the review")
 				require.Equal(t, jobID.String(), event["job_id"], "boundary must identify the preparation job")
-				if index == 1 {
+				if index > 0 {
 					require.Equal(t, tt.outcome, event["outcome"], "end must distinguish incomplete, failed, and successful work")
 				}
 			}

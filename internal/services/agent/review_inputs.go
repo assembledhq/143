@@ -435,13 +435,14 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 		}
 	}
 	commandFor := func(hashOnly bool) string {
-		return fmt.Sprintf("cd '%s' && /usr/bin/python3 -I -S -c '%s' '%s' '%s' '%s' '%f' '%t' '%t' '%t'", shellEscapeSingleQuote(sandbox.WorkDir), shellEscapeSingleQuote(prepareCodeReviewInputsScript), shellEscapeSingleQuote(string(encoded)), shellEscapeSingleQuote(path.Dir(manifestPath)), shellEscapeSingleQuote(remote), deadline, verifyOnly, hashOnly, trusted || stdin)
+		return fmt.Sprintf("cd '%s' && /usr/bin/python3 -I -S -c '%s' '%s' '%s' '%s' '%f' '%t' '%t' '%t' 'profile'", shellEscapeSingleQuote(sandbox.WorkDir), shellEscapeSingleQuote(prepareCodeReviewInputsScript), shellEscapeSingleQuote(string(encoded)), shellEscapeSingleQuote(path.Dir(manifestPath)), shellEscapeSingleQuote(remote), deadline, verifyOnly, hashOnly, trusted || stdin)
 	}
 	command := commandFor(false)
 	if trusted || stdin {
 		payload := reviewWorkspacePreparationPayload{
 			WorkDir: sandbox.WorkDir, Standalone: true, PlatformCommand: true,
-			Prepare: command, DeadlineUnix: deadline, CancelPath: reviewPreparationMarkerPath(sandbox),
+			ProfileParent: stageName,
+			Prepare:       command, DeadlineUnix: deadline, CancelPath: reviewPreparationMarkerPath(sandbox),
 			AuthenticateGit: hydrate,
 		}
 		if !verifyOnly {
@@ -456,7 +457,7 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 		if hydrate {
 			auth = reviewGitAuthentication{repoURL, token}
 		}
-		err := o.execReviewPreparationPayload(ctx, sandbox, payload, auth, o.logger)
+		err := o.execReviewPreparationPayload(ctx, sandbox, payload, auth, log)
 		if errors.Is(err, errReviewHydrationRequired) && !errors.Is(err, ErrCodeReviewPreparationCleanup) && !hydrate {
 			return 42, nil
 		}
@@ -472,7 +473,16 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 		return -1, fmt.Errorf("review provider advertises managed preparation without private input support")
 	}
 	var stderr bytes.Buffer
-	exit, execErr := o.provider.Exec(ctx, reviewInputFetchSandbox(sandbox, token), command, io.Discard, &stderr)
+	profile := reviewPreparationProfile{log: log, parent: stageName}
+	start := time.Now()
+	defer func() {
+		outcome := observability.StageOutcome(ctx, returnErr)
+		if returnErr == nil && exitCode == 42 {
+			outcome = "incomplete"
+		}
+		profile.executor(start, outcome)
+	}()
+	exit, execErr := o.provider.Exec(ctx, reviewInputFetchSandbox(sandbox, token), command, &profile, &stderr)
 	if exit == 77 {
 		return exit, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, errors.Join(ErrCodeReviewPreparationCleanup, ctx.Err()))
 	}
@@ -483,51 +493,6 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 		return exit, fmt.Errorf("code review inputs incomplete: exit=%d %s", exit, redactGitToken(stderr.String(), token))
 	}
 	return exit, nil
-}
-
-func (o *Orchestrator) checkoutCodeReviewHead(ctx context.Context, sandbox *Sandbox, repoURL, token string, pullNumber int, branch, head string) error {
-	if !reviewCommitPattern.MatchString(head) || branch == "" {
-		return fmt.Errorf("code review checkout requires an exact captured head and working branch")
-	}
-	checkoutCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	command := fmt.Sprintf("git cat-file -e '%s^{commit}'", head)
-	exit, err := o.provider.Exec(checkoutCtx, sandbox, command, io.Discard, io.Discard)
-	if err != nil {
-		return fmt.Errorf("inspect captured review head: %w", err)
-	}
-	if exit != 0 {
-		command = codeReviewFetchCommand(repoURL, head)
-		var stderr bytes.Buffer
-		exit, err = o.provider.Exec(checkoutCtx, reviewInputFetchSandbox(sandbox, token), command, io.Discard, &stderr)
-		if err != nil {
-			return fmt.Errorf("fetch captured review head: %s", redactGitToken(err.Error(), token))
-		}
-		if exit != 0 {
-			stderr.Reset()
-			command = codeReviewFetchCommand(repoURL, fmt.Sprintf("pull/%d/head", pullNumber))
-			exit, err = o.provider.Exec(checkoutCtx, reviewInputFetchSandbox(sandbox, token), command, io.Discard, &stderr)
-			if err != nil || exit != 0 {
-				return fmt.Errorf("captured review head unavailable: exit=%d %s %s", exit, redactGitToken(fmt.Sprint(err), token), redactGitToken(stderr.String(), token))
-			}
-		}
-	}
-	command = fmt.Sprintf("git checkout -B '%s' '%s'", shellEscapeSingleQuote(branch), head)
-	var stderr bytes.Buffer
-	exit, err = o.provider.Exec(checkoutCtx, sandbox, command, io.Discard, &stderr)
-	if err != nil || exit != 0 {
-		return fmt.Errorf("checkout captured review head: exit=%d %v %s", exit, err, stderr.String())
-	}
-	var stdout bytes.Buffer
-	stderr.Reset()
-	exit, err = o.provider.Exec(checkoutCtx, sandbox, "git rev-parse HEAD", &stdout, &stderr)
-	if err != nil || exit != 0 {
-		return fmt.Errorf("verify captured review head: exit=%d %v %s", exit, err, stderr.String())
-	}
-	if actual := strings.TrimSpace(stdout.String()); actual != head {
-		return fmt.Errorf("%w: expected %s, got %s", ErrStalePullRequestHead, head, actual)
-	}
-	return nil
 }
 
 func reviewInputFetchSandbox(sandbox *Sandbox, token string) *Sandbox {
@@ -553,7 +518,7 @@ token = os.environ.get("GH143_REVIEW_FETCH_TOKEN", "")
 if token and remote.startswith("https://"):
     remote = "https://x-access-token:" + urllib.parse.quote(token, safe="") + "@" + remote[8:]
 try:
-    result = subprocess.run(["git", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, ref], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=35, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    result = subprocess.run(["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, ref], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=35, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     sys.exit(result.returncode)
 except subprocess.SubprocessError:
     print("captured review commit fetch timed out", file=sys.stderr)
@@ -561,6 +526,8 @@ except subprocess.SubprocessError:
 `
 
 const prepareCodeReviewInputsScript = `import fcntl, hashlib, json, os, pathlib, select, shutil, stat, subprocess, sys, tempfile, time, urllib.parse
+` + reviewPreparationProfilePython + `
+profile_enabled = len(sys.argv) == 9 and sys.argv[8] == "profile"
 identity = json.loads(sys.argv[1])
 directory = pathlib.Path(sys.argv[2])
 remote = sys.argv[3]
@@ -643,6 +610,8 @@ def verify_captured_objects(merge_base):
     if not isinstance(merge_base, str) or not valid_oid(merge_base.encode()):
         raise ValueError("captured review merge base is invalid")
     processes = []
+    count = 0
+    start = time.monotonic()
     try:
         objects = subprocess.Popen(git_command("rev-list", "--objects", "--no-object-names", "--missing=print", "--no-walk", identity["base_sha"], identity["head_sha"], merge_base), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_environment(), bufsize=0)
         processes.append(objects)
@@ -689,6 +658,7 @@ def verify_captured_objects(merge_base):
                     size -= len(data)
                 if contents.chunk(1) != b"\n" or digest.hexdigest().encode() != oid:
                     raise ValueError("captured review source object hash mismatch")
+            count += len(oids)
         if objects.wait(timeout=remaining()) != 0:
             raise ValueError("captured review object closure is incomplete")
         batch.stdin.close()
@@ -713,6 +683,7 @@ def verify_captured_objects(merge_base):
                         stream.close()
                 except Exception as error:
                     failures.append(error)
+        profile("captured_object_hashing", start, count)
         if failures:
             raise ObjectCleanupError(failures) from original
 
@@ -725,8 +696,11 @@ def digest(file):
         return digest.hexdigest()
 
 def missing_objects(merge_base):
+    start = time.monotonic()
     objects = git("rev-list", "--objects", "--no-object-names", "--missing=print", "--no-walk", identity["base_sha"], identity["head_sha"], merge_base).stdout.decode().splitlines()
-    return [line[1:] for line in objects if line.startswith("?")]
+    missing = [line[1:] for line in objects if line.startswith("?")]
+    profile("missing_enumeration", start, len(missing))
+    return missing
 
 def prepare():
     if verify_only and not os.path.lexists(directory):
@@ -738,31 +712,31 @@ def prepare():
         for file in [directory / "manifest.json", directory / "changes.patch"]:
             if not stat.S_ISREG(file.lstat().st_mode):
                 raise ValueError("prepared review input evidence must be regular")
-    if git("rev-parse", "HEAD").stdout.decode().strip() != identity["head_sha"]:
+    if measured("commit_check", git, "rev-parse", "HEAD").stdout.decode().strip() != identity["head_sha"]:
         raise ValueError("workspace HEAD differs from captured review head")
     if directory.exists():
         manifest = json.loads((directory / "manifest.json").read_text())
         if any(manifest.get(key) != value for key, value in identity.items()):
             raise ValueError("prepared review input identity mismatch")
-        merge_base = git("merge-base", identity["base_sha"], identity["head_sha"]).stdout.decode().strip()
-        if manifest.get("merge_base_sha") != merge_base or manifest.get("patch_sha256") != digest(directory / "changes.patch"):
+        merge_base = measured("merge_base", git, "merge-base", identity["base_sha"], identity["head_sha"]).stdout.decode().strip()
+        if manifest.get("merge_base_sha") != merge_base or manifest.get("patch_sha256") != measured("patch_hashing", digest, directory / "changes.patch"):
             raise ValueError("prepared review input digest or merge base mismatch")
         if verify_only and not managed_verification:
             verify_captured_objects(merge_base)
         return
     for sha in [identity["base_sha"], identity["head_sha"]]:
-        if git("cat-file", "-e", sha + "^{commit}", check=False).returncode != 0:
+        if measured("commit_check", git, "cat-file", "-e", sha + "^{commit}", check=False).returncode != 0:
             if not remote:
                 sys.exit(42)
-            git(*fetch, remote, sha)
-            git("cat-file", "-e", sha + "^{commit}")
-    merge = git("merge-base", identity["base_sha"], identity["head_sha"], check=False)
+            measured("commit_fetch", git, *fetch, remote, sha)
+            measured("commit_check", git, "cat-file", "-e", sha + "^{commit}")
+    merge = measured("merge_base", git, "merge-base", identity["base_sha"], identity["head_sha"], check=False)
     if merge.returncode != 0:
         if not remote:
             sys.exit(42)
         for deepen in [200, 1000]:
-            git(*fetch, "--deepen=" + str(deepen), remote, identity["base_sha"], identity["head_sha"])
-            merge = git("merge-base", identity["base_sha"], identity["head_sha"], check=False)
+            measured("history_fetch", git, *fetch, "--deepen=" + str(deepen), remote, identity["base_sha"], identity["head_sha"])
+            merge = measured("merge_base", git, "merge-base", identity["base_sha"], identity["head_sha"], check=False)
             if merge.returncode == 0:
                 break
     if merge.returncode != 0:
@@ -772,15 +746,19 @@ def prepare():
     if missing:
         if not remote:
             sys.exit(42)
-        git("-c", "fetch.negotiationAlgorithm=noop", *fetch, "--stdin", remote, input=("\n".join(missing) + "\n").encode())
+        start = time.monotonic()
+        try:
+            git("-c", "fetch.negotiationAlgorithm=noop", *fetch, "--stdin", remote, input=("\n".join(missing) + "\n").encode())
+        finally:
+            profile("object_fetch", start, len(missing))
         if missing_objects(merge_base):
             raise ValueError("captured review trees remain incomplete after authenticated hydration")
     temporary = pathlib.Path(tempfile.mkdtemp(prefix=directory.name + ".tmp-", dir=directory.parent))
     try:
         patch = temporary / "changes.patch"
         with patch.open("wb") as stream:
-            git("diff", "--no-ext-diff", "--no-textconv", "--binary", merge_base, identity["head_sha"], "--", stdout=stream)
-        manifest = {**identity, "merge_base_sha": merge_base, "patch_sha256": digest(patch)}
+            measured("patch_generation", git, "diff", "--no-ext-diff", "--no-textconv", "--binary", merge_base, identity["head_sha"], "--", stdout=stream)
+        manifest = {**identity, "merge_base_sha": merge_base, "patch_sha256": measured("patch_hashing", digest, patch)}
         (temporary / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
         for file in temporary.iterdir():
             file.chmod(0o444)
