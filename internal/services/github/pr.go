@@ -4160,14 +4160,19 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 }
 
 func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method, path string, body any, accept string) ([]byte, error) {
+	response, _, err := s.doGitHubRequestWithResponseHeaders(ctx, token, method, path, body, accept)
+	return response, err
+}
+
+func (s *PRService) doGitHubRequestWithResponseHeaders(ctx context.Context, token, method, path string, body any, accept string) ([]byte, http.Header, error) {
 	response, err := s.doGitHubRESTRequest(ctx, token, method, path, body, accept, "")
-	return response.body, err
+	return response.body, response.header, err
 }
 
 type githubRESTResponse struct {
 	body   []byte
 	status int
-	etag   string
+	header http.Header
 }
 
 func (s *PRService) doGitHubRESTRequest(ctx context.Context, token, method, path string, body any, accept, etag string) (githubRESTResponse, error) {
@@ -4232,7 +4237,7 @@ func (s *PRService) doGitHubRESTRequest(ctx context.Context, token, method, path
 			Header:     resp.Header.Clone(),
 		}
 	}
-	return githubRESTResponse{body: respBody, status: resp.StatusCode, etag: resp.Header.Get("ETag")}, decodeErr
+	return githubRESTResponse{body: respBody, status: resp.StatusCode, header: resp.Header}, decodeErr
 }
 
 // doGitHubGraphQL POSTs a GraphQL query to the GitHub GraphQL endpoint and
@@ -6994,11 +6999,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 			// is accepted so a prior enqueue failure can repair its durable work.
 			continue
 		}
-		requiresSync, err := s.checkStateRequiresAuthoritativeSync(ctx, pr, state)
-		if err != nil {
-			return err
-		}
-		if err := s.enqueuePullRequestCheckProjection(ctx, pr, requiresSync); err != nil {
+		if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
 			return err
 		}
 	}
@@ -7051,11 +7052,7 @@ func (s *PRService) HandleStatusEvent(ctx context.Context, event StatusEvent) er
 		if !applied {
 			continue
 		}
-		requiresSync, err := s.checkStateRequiresAuthoritativeSync(ctx, pr, state)
-		if err != nil {
-			return err
-		}
-		if err := s.enqueuePullRequestCheckProjection(ctx, pr, requiresSync); err != nil {
+		if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
 			return err
 		}
 	}
@@ -7064,44 +7061,6 @@ func (s *PRService) HandleStatusEvent(ctx context.Context, event StatusEvent) er
 
 func pullRequestHasHealthBaseline(pr models.PullRequest) bool {
 	return pr.GitHubStateSyncedAt != nil && pr.HealthVersion > 0 && pr.HeadSHA != nil && strings.TrimSpace(*pr.HeadSHA) != ""
-}
-
-func (s *PRService) checkStateRequiresAuthoritativeSync(ctx context.Context, pr models.PullRequest, state models.PullRequestCheckState) (bool, error) {
-	if !pullRequestHasHealthBaseline(pr) {
-		return true, nil
-	}
-	current, err := s.pullRequests.GetHealthCurrent(ctx, pr.OrgID, pr.ID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return true, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("load pull request health baseline for webhook check: %w", err)
-	}
-	if current.HeadSHA != state.HeadSHA {
-		return true, nil
-	}
-	var summary models.PullRequestHealthSummary
-	if err := json.Unmarshal(current.SummaryJSON, &summary); err != nil {
-		// Degrade to the authoritative readback rather than failing the webhook.
-		// Returning an error here would 500 the delivery, and every redelivery
-		// would decode the same bad row and fail identically — a poison pill for
-		// this PR's whole check stream. An unreadable baseline is precisely the
-		// case a full sync repairs, because it rewrites the snapshot.
-		s.logger.Warn().Err(err).
-			Str("pull_request_id", pr.ID.String()).
-			Msg("pull request health baseline is undecodable; forcing an authoritative sync")
-		return true, nil
-	}
-	if summary.CheckSetComplete == nil || !*summary.CheckSetComplete {
-		return true, nil
-	}
-	incomingKey := projectedCheckSummaryKey(state.CheckSummary())
-	for _, check := range summary.Checks {
-		if projectedCheckSummaryKey(check) == incomingKey {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 func checkRunEventState(pr models.PullRequest, event CheckRunEvent) models.PullRequestCheckState {
@@ -7128,7 +7087,7 @@ func checkRunEventState(pr models.PullRequest, event CheckRunEvent) models.PullR
 		PullRequestID:     pr.ID,
 		HeadSHA:           event.CheckRun.HeadSHA,
 		Source:            models.PullRequestCheckSourceCheckRun,
-		ExternalKey:       normalizedCheckExternalKey(name, strconv.FormatInt(event.CheckRun.ID, 10)),
+		ExternalKey:       checkRunExternalKey(event.CheckRun.App.Slug, name, event.CheckRun.ID),
 		Name:              name,
 		Category:          classifyCheckRunCategory(name),
 		Status:            normalizeCheckRunStatus(check),
@@ -7170,6 +7129,17 @@ func normalizedCheckExternalKey(name, fallback string) string {
 		return key
 	}
 	return fallback
+}
+
+func checkRunExternalKey(provider, name string, id int64) string {
+	key := normalizedCheckExternalKey(name, strconv.FormatInt(id, 10))
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return key
+	}
+	// Legacy name-only keys are trimmed, so this prefix cannot collide with
+	// an older key even if a check name contains the rest of the prefix.
+	return " check-run-v2:" + provider + ":" + key
 }
 
 func firstProviderTimestamp(values ...*time.Time) time.Time {

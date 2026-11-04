@@ -272,15 +272,20 @@ func IsDefinitiveResponse(status int) bool {
 }
 
 func (c *Controller) Observe(ctx context.Context, permit Permit, observation Observation) ObservationResult {
-	if !c.Participates(permit.Scope.InstallationID) {
+	installationID := permit.Scope.InstallationID
+	if c == nil || c.appID <= 0 || installationID <= 0 {
 		return ObservationResult{}
 	}
+	participates := c.Participates(installationID)
 	now := c.now().UTC()
 	classification := ClassifyResponse(ResponseInput{
 		StatusCode: observation.StatusCode, Header: observation.Header, Message: observation.Message,
 		GraphQLErrors: observation.GraphQLErrors, Now: now,
 	})
-	c.observeBackgroundQuota(ctx, permit.Scope.InstallationID, observation, classification, now)
+	c.observeBackgroundQuota(ctx, installationID, observation, classification, now, participates)
+	if !participates {
+		return ObservationResult{}
+	}
 	result := ObservationResult{Classification: classification}
 	key := c.key(permit.Scope.InstallationID)
 	if classification.RateLimited {

@@ -145,8 +145,8 @@ func readReviewGuidanceResource[T any](ctx context.Context, s *PRService, token,
 	if err != nil {
 		return zero, err
 	}
-	if s.redisClient != nil && response.etag != "" {
-		raw, err := json.Marshal(reviewGuidanceCacheEntry[T]{ETag: response.etag, Value: &value})
+	if etag := response.header.Get("ETag"); s.redisClient != nil && etag != "" {
+		raw, err := json.Marshal(reviewGuidanceCacheEntry[T]{ETag: etag, Value: &value})
 		if err != nil {
 			s.logger.Warn().Err(err).Msg("could not encode review guidance metadata for caching")
 		} else {
