@@ -649,29 +649,46 @@ def verify_captured_objects(merge_base):
         batch = subprocess.Popen(git_command("cat-file", "--batch"), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_environment(), bufsize=0)
         processes.append(batch)
         os.set_blocking(batch.stdin.fileno(), False)
+        # Keep each request within PIPE_BUF: an atomic enqueue cannot leave us
+        # writing more requests while Git is blocked on an unread object body.
+        batch_limit = min(32, os.fpathconf(batch.stdin.fileno(), "PC_PIPE_BUF") // 65)
+        if batch_limit < 1:
+            raise ValueError("captured review object request pipe is too small")
         names, contents = ObjectReader(objects.stdout), ObjectReader(batch.stdout)
         while (oid := names.line()) is not None:
-            if not valid_oid(oid):
+            oids = [oid]
+            # Consume only complete names already read from rev-list. Waiting
+            # for a full batch would delay validation if that producer stalls.
+            while len(oids) < batch_limit and b"\n" in names.buffer:
+                oids.append(names.line())
+            if any(not valid_oid(item) for item in oids):
                 raise ValueError("captured review object is missing or invalid")
-            request = oid + b"\n"
+            request = b"".join(item + b"\n" for item in oids)
             while request:
                 if not select.select([], [batch.stdin.fileno()], [], remaining())[1]:
                     raise TimeoutError("captured review object verification timed out")
-                request = request[os.write(batch.stdin.fileno(), request):]
-            header = contents.line()
-            fields = header.split() if header is not None else []
-            if len(fields) != 3 or fields[0] != oid or fields[1] not in (b"commit", b"tree", b"blob") or not fields[2].isdigit():
-                raise ValueError("captured review object is missing or invalid")
-            size = int(fields[2])
-            digest = hashlib.sha1() if len(oid) == 40 else hashlib.sha256()
-            digest.update(fields[1] + b" " + fields[2] + b"\0")
-            while size:
-                remaining()
-                data = contents.chunk(size)
-                digest.update(data)
-                size -= len(data)
-            if contents.chunk(1) != b"\n" or digest.hexdigest().encode() != oid:
-                raise ValueError("captured review source object hash mismatch")
+                try:
+                    written = os.write(batch.stdin.fileno(), request)
+                except BlockingIOError:
+                    continue
+                if written == 0:
+                    raise ValueError("captured review object request was not written")
+                request = request[written:]
+            for oid in oids:
+                header = contents.line()
+                fields = header.split() if header is not None else []
+                if len(fields) != 3 or fields[0] != oid or fields[1] not in (b"commit", b"tree", b"blob") or not fields[2].isdigit():
+                    raise ValueError("captured review object is missing or invalid")
+                size = int(fields[2])
+                digest = hashlib.sha1() if len(oid) == 40 else hashlib.sha256()
+                digest.update(fields[1] + b" " + fields[2] + b"\0")
+                while size:
+                    remaining()
+                    data = contents.chunk(size)
+                    digest.update(data)
+                    size -= len(data)
+                if contents.chunk(1) != b"\n" or digest.hexdigest().encode() != oid:
+                    raise ValueError("captured review source object hash mismatch")
         if objects.wait(timeout=remaining()) != 0:
             raise ValueError("captured review object closure is incomplete")
         batch.stdin.close()
