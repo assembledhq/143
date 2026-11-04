@@ -519,8 +519,10 @@ toolchain=p['toolchain']
 pair=(toolchain.get('node_version'),toolchain.get('npm_version'))
 if any(not isinstance(v,str) or not re.fullmatch(r'[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}',v) for v in pair): raise RuntimeError('unsupported toolchain')
 node_version,npm_version=pair
-bin_dir='/opt/143/node/'+node_version+'/bin'
-node=bin_dir+'/node';npm='/opt/143/node/'+node_version+'/lib/node_modules/npm/bin/npm-cli.js'
+directory=toolchain.get('directory') or node_version
+if directory not in {node_version,node_version+'-npm'+npm_version}: raise RuntimeError('unsupported toolchain directory')
+bin_dir='/opt/143/node/'+directory+'/bin'
+node=bin_dir+'/node';npm='/opt/143/node/'+directory+'/lib/node_modules/npm/bin/npm-cli.js'
 private=pathlib.Path('/private');(private/'home').mkdir();(private/'tmp').mkdir()
 environment={'PATH':bin_dir+':/usr/bin:/bin','HOME':'/private/home','TMPDIR':'/private/tmp'}
 def version(command):
