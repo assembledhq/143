@@ -70,7 +70,7 @@ func (p *reviewPreparationProfile) record(line []byte) {
 		return
 	}
 	p.records++
-	p.event(stage, elapsed).Str("profile_source", "sandbox_reported").Uint64("count", count).Msg("review preparation profile")
+	p.event(stage).Uint64("elapsed_ms", elapsed).Str("profile_source", "sandbox_reported").Uint64("count", count).Msg("review preparation profile")
 }
 
 func reviewProfileNumber(value []byte, limit uint64) (uint64, bool) {
@@ -86,13 +86,19 @@ func reviewProfileNumber(value []byte, limit uint64) (uint64, bool) {
 	return number, err == nil && number <= limit
 }
 
-func (p *reviewPreparationProfile) event(stage string, millis uint64) *zerolog.Event {
-	return p.log.Info().Str("parent_stage", p.parent).Str("profile_stage", stage).Uint64("elapsed_ms", millis)
+func (p *reviewPreparationProfile) event(stage string) *zerolog.Event {
+	return p.log.Info().Str("parent_stage", p.parent).Str("profile_stage", stage)
 }
 
 func (p *reviewPreparationProfile) executor(start time.Time, outcome string) {
 	millis := time.Since(start).Milliseconds()
-	p.event("executor", uint64(min(millis, reviewProfileMaxMillis))).Str("profile_source", "orchestrator").Str("outcome", outcome).Msg("review preparation profile")
+	if millis < 0 {
+		millis = 0
+	}
+	if millis > reviewProfileMaxMillis {
+		millis = reviewProfileMaxMillis
+	}
+	p.event("executor").Int64("elapsed_ms", millis).Str("profile_source", "orchestrator").Str("outcome", outcome).Msg("review preparation profile")
 }
 
 const reviewPreparationProfilePython = `

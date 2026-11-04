@@ -2,12 +2,43 @@ package agent
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestReviewPreparationProfileExecutorBounds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		offset time.Duration
+		millis uint64
+	}{
+		{name: "future start clamps to zero", offset: time.Hour},
+		{name: "long execution clamps to limit", offset: -time.Hour, millis: reviewProfileMaxMillis},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var output bytes.Buffer
+			profile := reviewPreparationProfile{log: zerolog.New(&output), parent: "review_inputs_verify"}
+			profile.executor(time.Now().Add(tt.offset), "succeeded")
+			var event struct {
+				Millis  uint64 `json:"elapsed_ms"`
+				Source  string `json:"profile_source"`
+				Outcome string `json:"outcome"`
+			}
+			require.NoError(t, json.Unmarshal(output.Bytes(), &event), "executor profile must remain valid structured output")
+			require.Equal(t, tt.millis, event.Millis, "elapsed time must stay within the inclusive profile bounds")
+			require.Equal(t, "orchestrator", event.Source, "executor timing must retain its source")
+			require.Equal(t, "succeeded", event.Outcome, "clamping must preserve the operation outcome")
+		})
+	}
+}
 
 func TestReviewPreparationProfileBoundedStream(t *testing.T) {
 	t.Parallel()
