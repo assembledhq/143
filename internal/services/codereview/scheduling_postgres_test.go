@@ -103,7 +103,10 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 	sourceErr, dbErr := migrations.Close()
 	require.NoError(t, sourceErr, "close migration source")
 	require.NoError(t, dbErr, "close migration database")
-	pool, err := pgxpool.New(ctx, parsed.String())
+	poolConfig, err := pgxpool.ParseConfig(parsed.String())
+	require.NoError(t, err, "configure the isolated lifecycle pool")
+	poolConfig.MaxConns = 8
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	require.NoError(t, err, "connect lifecycle pool")
 	t.Cleanup(pool.Close)
 	tests := []struct {
@@ -387,6 +390,8 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"ordinary review now preserves completed reuse", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingOrdinaryCompletedReuse(t, p, org, repo, pr, snapshot, false)
 		}},
+		{"history opt-in refreshes completed rounds and joins active work", testSchedulingReviewHistory},
+		{"history opt-in follows a new head", testSchedulingReviewHistoryNewHead},
 		{"mention preserves completed reuse", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingOrdinaryCompletedReuse(t, p, org, repo, pr, snapshot, true)
 		}},

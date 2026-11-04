@@ -565,6 +565,64 @@ Suppressed
 - all P2 and P3 findings
 ```
 
+### Opt-in retrieval of prior review rounds
+
+`POST /api/v1/pull-requests/{id}/code-review/requests` accepts
+`use_review_history: true` only with `mode: review_now`. The request dialog exposes
+an unchecked experimental option when the installation's
+`CODE_REVIEW_HISTORY_ENABLED` capability is enabled (default false). Enrollment
+belongs to the durable request context and assessment request fingerprint. It
+survives pending head changes and recovery, but does not enroll later automatic
+requests. An enrolled request after completion forces a fresh review; equivalent
+active requests join normally.
+
+Initial reviewers remain independent. Only the orchestrator prompt includes a
+compact index of ten earlier session/commit references and read-only CLI commands
+for paginated discovery, selected reports, and conversation excerpts. No earlier
+finding bodies are injected into the initial prompt. Synthesis must reconcile
+resolved, persistent, and reversed findings against current code and cite their
+source. This does not extend provider-native session continuation across commits.
+
+The history API authenticates the existing signed session/thread token and checks
+the current review's opt-in, active state, organization, repository, and a trusted
+orchestrator-thread binding in `code_review_prompt_records`. The worker persists
+that binding and the complete prompt with `CreatePromptRecordIfAbsent` before
+dispatch. Retries reuse the winner; a mismatched session or thread fails closed.
+If dispatch started but its result write was lost, recovery restores the result
+from the bound thread and saved prompt identity without sending another turn.
+If inputs changed while the checkpoint was still unsent, the attempt ends
+explicitly incomplete with a new-review action instead of exhausting job retries.
+No repository-wide history capability is granted to the session or its reviewers.
+
+Source rounds must belong to the same PR and have completed before the current
+session began. When assessments exist, the API selects the latest eligible
+immutable completed assessment and its full-review evidence. Reports label the
+selected assessment separately from original source findings and reviewer
+outputs, and include that assessment's finding reassessments so later resolutions
+remain visible. Legacy session results retain their completion cutoff.
+Message retrieval is bounded, paginated,
+and excludes post-start messages; long messages can be read in chunks. Successful
+report and message responses are saved as immutable `review_history` prompt
+records with source and calling-thread provenance. Retries return those bytes.
+History receipts are not recursively included in historical reports.
+
+When the saved index contains earlier rounds, synthesis requires at least one
+successful read of the latest referenced round's report by its own orchestrator
+thread. An index listing, empty transcript, or another fallback thread's receipt
+is insufficient. A missing read leaves an explicit incomplete synthesis;
+schema-only repair cannot invent the missing inspection. This check proves
+access, not semantic reconciliation quality. Empty
+history needs no read. Historical text remains untrusted, and existing approval
+and injection safeguards remain authoritative.
+
+Apply the database migrations, then deploy API, workers, and the sandbox
+`143-tools` binary before enabling the flag. The receipt role must be accepted by
+both current and retained legacy prompt-record tables.
+The flag controls new enrollment, not a rolling-deployment capability handshake.
+This is a limited opt-in experiment; it adds no automatic shadow sampling or wider
+rollout. Compare repeated findings, unexplained reversals, missed valid defects,
+latency, and cost before expansion.
+
 ## Prompt Versioning And Untrusted PR Content
 
 Editable prompts are approval policy and are versioned with that policy. A review session captures:

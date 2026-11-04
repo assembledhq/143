@@ -279,6 +279,12 @@ func cliPathForTool(name string) (CLINamespace, CLIAction, bool) {
 		return NamespaceSessionHistory, ActionMessages, true
 	case name == "code_review_history_list":
 		return NamespaceCodeReviewHistory, ActionList, true
+	case name == "code_review_history_prior_rounds":
+		return NamespaceCodeReviewHistory, CLIAction("prior-rounds"), true
+	case name == "code_review_history_prior_round":
+		return NamespaceCodeReviewHistory, CLIAction("prior-round"), true
+	case name == "code_review_history_prior_messages":
+		return NamespaceCodeReviewHistory, CLIAction("prior-messages"), true
 	case name == "code_review_history_get":
 		return NamespaceCodeReviewHistory, ActionGet, true
 	case name == "code_review_history_policy":

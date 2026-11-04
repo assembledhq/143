@@ -31,6 +31,8 @@ interface ReviewRequestDialogProps {
   assessmentID?: string;
   overrideReviewSessionID?: string;
   defaultOverrideSizeLimits?: boolean;
+  reviewHistoryAvailable?: boolean;
+  defaultUseReviewHistory?: boolean;
 }
 
 function resultCopy(result: CodeReviewRequestResponse, mode: RequestMode) {
@@ -50,10 +52,12 @@ function resultCopy(result: CodeReviewRequestResponse, mode: RequestMode) {
 }
 
 /** Shared confirmation and receipt for the read-only GitHub action links. */
-export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID, overrideReviewSessionID, defaultOverrideSizeLimits = false }: ReviewRequestDialogProps) {
+export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID, overrideReviewSessionID, defaultOverrideSizeLimits = false, reviewHistoryAvailable = false, defaultUseReviewHistory = false }: ReviewRequestDialogProps) {
   const client = useQueryClient();
   const requestID = useRef<string | null>(null);
   const [overrideSizeLimits, setOverrideSizeLimits] = useState(defaultOverrideSizeLimits);
+  const [reviewHistorySelected, setReviewHistorySelected] = useState(defaultUseReviewHistory);
+  const useReviewHistory = reviewHistoryAvailable && reviewHistorySelected && mode === "review_now";
   const overrideSessionID = mode === "review_now" ? overrideReviewSessionID : undefined;
   const mutation = useMutation({
     mutationFn: () => {
@@ -62,7 +66,7 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
       const override = overrideSizeLimits && overrideSessionID
         ? { override_size_limits: true, override_review_session_id: overrideSessionID }
         : {};
-      return api.codeReviews.requestReview(target.pull_request_id, { request_id: requestID.current, mode, ...override });
+      return api.codeReviews.requestReview(target.pull_request_id, { request_id: requestID.current, mode, ...override, ...(useReviewHistory ? { use_review_history: true } : {}) });
     },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["code-reviews"] });
@@ -109,7 +113,19 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
           {error ? <ErrorNotice title="Unable to load review" description={error} /> : null}
           {target && !loading && !error ? <p className="text-sm text-muted-foreground">{isRecheck
             ? "Previous findings stay in place. Changes to code or review policy require a full review."
+            : useReviewHistory ? "Starts a new full review unless one with this option is already running."
             : "A running or completed review may be reused if it already covers these changes."}</p> : null}
+          {!isRecheck && reviewHistoryAvailable && target && !loading && !error ? <div className="flex items-start gap-2">
+            <Checkbox id="use-review-history" className="mt-0.5" checked={reviewHistorySelected} disabled={mutation.isPending} onCheckedChange={(checked) => {
+              setReviewHistorySelected(checked === true);
+              requestID.current = null;
+              mutation.reset();
+            }} />
+            <div className="space-y-1">
+              <Label htmlFor="use-review-history">Use earlier review history (experimental)</Label>
+              <p className="text-xs text-muted-foreground">143 can retrieve earlier review reports and session excerpts for this pull request and reconcile them with the current code.</p>
+            </div>
+          </div> : null}
           {overrideSessionID && target && !loading && !error ? <div className="flex items-start gap-2">
             <Checkbox id="override-size-limits" className="mt-0.5" checked={overrideSizeLimits} disabled={mutation.isPending} onCheckedChange={(checked) => {
               setOverrideSizeLimits(checked === true);

@@ -127,6 +127,7 @@ type ScheduleRequestInput struct {
 	TriggerSource           models.CodeReviewTriggerSource
 	OverrideSizeLimits      bool
 	OverrideReviewSessionID *uuid.UUID
+	UseReviewHistory        bool
 }
 
 // ValidateSizeLimitOverride requires an override to identify its source review.
@@ -189,6 +190,9 @@ func (s *Service) RequestScheduledReview(ctx context.Context, req ScheduleReques
 	}
 	if err := req.ValidateSizeLimitOverride(); err != nil {
 		return ScheduleRequestResult{}, err
+	}
+	if req.UseReviewHistory && req.Mode != models.CodeReviewReviewNow {
+		return ScheduleRequestResult{}, errors.New("use_review_history requires review_now")
 	}
 	if req.RequestID == uuid.Nil {
 		return ScheduleRequestResult{}, fmt.Errorf("request_id is required")
@@ -548,6 +552,9 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		force = force || (requestID != uuid.Nil && input.ChangeReason == explicitReviewRequestChangeReason &&
 			input.TriggerSource == models.CodeReviewTriggerSourceTeamReviewer && latestErr == nil &&
 			latest.Status == models.CodeReviewSessionStatusCompleted)
+		// A new opt-in request must be able to retrieve the latest completed round.
+		force = force || (requestID != uuid.Nil && input.RequestContext != nil && input.RequestContext.UseReviewHistory &&
+			latestErr == nil && latest.Status == models.CodeReviewSessionStatusCompleted)
 		if input.ExplicitRequest && latestErr == nil && latest.HeadSHA == snapshot.HeadSHA {
 			var hasResults bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_agent_results WHERE org_id=$1 AND session_id=$2)`, input.OrgID, latest.SessionID).Scan(&hasResults); err != nil {

@@ -124,6 +124,7 @@ type ReviewRequestContext struct {
 	AuthorLogin               string     `json:"author_login,omitempty"`
 	Body                      string     `json:"body"`
 	URL                       string     `json:"url,omitempty"`
+	UseReviewHistory          bool       `json:"use_review_history,omitempty"`
 	OverrideSizeLimits        bool       `json:"override_size_limits,omitempty"`
 	OverrideReviewSessionID   *uuid.UUID `json:"override_review_session_id,omitempty"`
 	OverrideSizeLimitsHeadSHA string     `json:"override_size_limits_head_sha,omitempty"`
@@ -1491,7 +1492,7 @@ func reviewRequestContextForComparison(input *ReviewRequestContext, headSHA, bas
 		context.OverrideSizeLimitsBaseRef != "" && context.OverrideSizeLimitsBaseRef == strings.TrimSpace(baseRef) {
 		return context
 	}
-	if context.Body == "" {
+	if context.Body == "" && !context.UseReviewHistory {
 		return nil
 	}
 	context.OverrideSizeLimits = false
@@ -1510,13 +1511,14 @@ func normalizeReviewRequestContext(input *ReviewRequestContext) *ReviewRequestCo
 		AuthorLogin:               strings.TrimSpace(input.AuthorLogin),
 		Body:                      strings.TrimSpace(input.Body),
 		URL:                       strings.TrimSpace(input.URL),
+		UseReviewHistory:          input.UseReviewHistory,
 		OverrideSizeLimits:        input.OverrideSizeLimits,
 		OverrideReviewSessionID:   input.OverrideReviewSessionID,
 		OverrideSizeLimitsHeadSHA: strings.TrimSpace(input.OverrideSizeLimitsHeadSHA),
 		OverrideSizeLimitsBaseSHA: strings.TrimSpace(input.OverrideSizeLimitsBaseSHA),
 		OverrideSizeLimitsBaseRef: strings.TrimSpace(input.OverrideSizeLimitsBaseRef),
 	}
-	if normalized.Body == "" && !normalized.OverrideSizeLimits {
+	if normalized.Body == "" && !normalized.OverrideSizeLimits && !normalized.UseReviewHistory {
 		return nil
 	}
 	runes := []rune(normalized.Body)

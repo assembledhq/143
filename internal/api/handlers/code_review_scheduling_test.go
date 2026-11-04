@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/pashagolub/pgxmock/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,11 +44,45 @@ func (s *scheduleHandlerStub) RequestScheduledReview(_ context.Context, input co
 	return s.request(input)
 }
 
+func TestCodeReviewPolicyReportsHistoryCapability(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		enabled bool
+	}{
+		{name: "hidden until rollout is enabled"},
+		{name: "available when rollout is enabled", enabled: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID := uuid.New()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "initialize the policy store")
+			defer mock.Close()
+			expectCodeReviewResolvedPolicy(t, mock, orgID, models.DefaultCodeReviewPolicyConfig())
+			handler := NewCodeReviewHandler(db.NewCodeReviewStore(mock), nil)
+			handler.SetReviewHistoryCapability(tt.enabled)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/code-review-policies", nil)
+			req = req.WithContext(middleware.WithOrgID(req.Context(), orgID))
+			rr := httptest.NewRecorder()
+			handler.GetPolicy(rr, req)
+			require.Equal(t, http.StatusOK, rr.Code, "the policy response should expose available review actions")
+			var response models.SingleResponse[models.CodeReviewResolvedPolicy]
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "decode the policy response")
+			require.Equal(t, map[string]bool{"scheduling": false, "conditional_recheck": false, "automatic_evidence_recheck": false, "review_history": tt.enabled}, response.Data.Capabilities, "history availability should match the installation flag")
+			require.NoError(t, mock.ExpectationsWereMet(), "the capability response should only read the tenant policy")
+		})
+	}
+}
+
 func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name, mode            string
 		overrideSizeLimits    bool
+		useReviewHistory      bool
+		historyEnabled        bool
 		hasSource, zeroSource bool
 		disposition           models.CodeReviewRequestDisposition
 		disabled, anonymous   bool
@@ -57,6 +92,11 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 	}{
 		{name: "records authorized tenant request", mode: "review_now", status: 202},
 		{name: "supports ensure current", mode: "ensure_current", status: 202},
+		{name: "carries the review history opt-in", mode: "review_now", useReviewHistory: true, historyEnabled: true, status: 202},
+		{name: "rejects review history until enabled", mode: "review_now", useReviewHistory: true, status: 409, code: "CODE_REVIEW_CAPABILITY_UNAVAILABLE"},
+		{name: "rejects review history on ensure current", mode: "ensure_current", useReviewHistory: true, historyEnabled: true, status: 400, code: "CODE_REVIEW_REQUEST_INVALID"},
+		{name: "rejects review history on recheck", mode: "recheck", useReviewHistory: true, historyEnabled: true, status: 400, code: "CODE_REVIEW_REQUEST_INVALID"},
+		{name: "rejects review history on force fresh", mode: "force_fresh", useReviewHistory: true, historyEnabled: true, status: 400, code: "CODE_REVIEW_REQUEST_INVALID"},
 		{name: "carries the size limit override source", mode: "review_now", overrideSizeLimits: true, hasSource: true, status: 202},
 		{name: "rejects override without its source", mode: "review_now", overrideSizeLimits: true, status: 400, code: "CODE_REVIEW_REQUEST_INVALID"},
 		{name: "rejects override with a zero source", mode: "review_now", overrideSizeLimits: true, hasSource: true, zeroSource: true, status: 400, code: "CODE_REVIEW_REQUEST_INVALID"},
@@ -80,7 +120,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 			t.Parallel()
 			org, pr, userID, requestID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 			var sourceID *uuid.UUID
-			body := map[string]any{"request_id": requestID, "mode": tt.mode, "override_size_limits": tt.overrideSizeLimits}
+			body := map[string]any{"request_id": requestID, "mode": tt.mode, "override_size_limits": tt.overrideSizeLimits, "use_review_history": tt.useReviewHistory}
 			if tt.hasSource {
 				source := uuid.New()
 				if tt.zeroSource {
@@ -90,7 +130,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 				body["override_review_session_id"] = source
 			}
 			called := false
-			expected := codereviewsvc.ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequesterID: &userID, RequestID: requestID, Mode: models.CodeReviewRequestMode(tt.mode), OverrideSizeLimits: tt.overrideSizeLimits, OverrideReviewSessionID: sourceID}
+			expected := codereviewsvc.ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequesterID: &userID, RequestID: requestID, Mode: models.CodeReviewRequestMode(tt.mode), OverrideSizeLimits: tt.overrideSizeLimits, OverrideReviewSessionID: sourceID, UseReviewHistory: tt.useReviewHistory}
 			result := codereviewsvc.ScheduleRequestResult{RequestID: requestID, Disposition: "queued", Schedule: models.CodeReviewPRState{PullRequestID: pr, State: models.CodeReviewScheduleWaiting}}
 			if tt.disposition != "" {
 				result.Disposition = tt.disposition
@@ -102,6 +142,7 @@ func TestCodeReviewSchedulingRequestHandler(t *testing.T) {
 			}}
 			handler := NewCodeReviewHandler(nil, nil)
 			handler.retryService = stub
+			handler.SetReviewHistoryCapability(tt.historyEnabled)
 			payload, err := json.Marshal(body)
 			require.NoError(t, err, "encode the scheduling request")
 			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
