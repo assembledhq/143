@@ -8819,18 +8819,18 @@
     },
     {
       "id": "internal/services/github/pr_auto_repair.go:PRService.MaybeStartAutoRepair",
-      "source_sha256": "ce123a8f17f790f7e281b77238b12b1652a66f1d9005262098e92aeb9248c18c",
+      "source_sha256": "0a1f3b6a90923906c1226987a1646d4ee0d499423b9ad3746c70f5c6158d676f",
       "operation": "PRService.MaybeStartAutoRepair: indirect lifecycle caller",
       "owner": "PRService in internal/services/github",
-      "predicate": "AST-observed guard expressions: !autoRepairSessionCanStart(session.Status) | errors.Is(err, pgx.ErrNoRows) | health.SyncStatus == models.PullRequestHealthSyncStatusBlocked | pr.Status != models.PullRequestStatusOpen",
-      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: s.StartPullRequestRepair -> internal/services/github/pr_health_service.go:PRService.StartPullRequestRepair; s.StartPullRequestRepair(ctx, orgID, pr.ID, uuid.Nil, StartPullRequestRepairOptions{Action: action, ExpectedHeadSHA: health.HeadSHA, SystemAuthored: true, AutoAttempt: true, TriggerReason: reason, TriggeredBySource: models.PullRequestRepairTriggeredBySourceSystemAutoRepair}) -> internal/services/github/pr_health_service.go:PRService.StartPullRequestRepair; s.getPullRequestHealth -> internal/services/github/pr_health_service.go:PRService.getPullRequestHealth; s.getPullRequestHealth(ctx, o [excerpt; see symbol source]",
-      "stale_result": "Observed guard/error branches: !autoRepairSessionCanStart(session.Status); errors.Is(err, pgx.ErrNoRows); health.SyncStatus == models.PullRequestHealthSyncStatusBlocked; pr.Status != models.PullRequestStatusOpen. These are syntax observations, not a proven stale-result contract.",
+      "predicate": "The org-scoped session must be idle or resumable with an open linked PR, an enabled repair policy and an actionable blocker within the head-specific repair budget. A check projection reads stored health with sync disabled. Other sources retain the fixed auto-repair staleness interval.",
+      "lock": "No transaction spans the selection reads. StartPullRequestRepair owns repair admission and receives the expected head from health.",
+      "stale_result": "Closed or blocked PR health, exhausted budgets and already active repairs produce decisions without starting a repair. A busy session or a changed head at repair admission returns its corresponding decision.",
       "classification": "unfenced-needs-conversion",
-      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "migration": "Keep repair admission behind the delegated lifecycle boundary. Preserve the stored-health-only projection path and its separate budgeted verification so evaluating auto-repair does not trigger a second provider refresh.",
       "evidence": [
-        "internal/services/github/pr_auto_repair.go:62",
+        "internal/services/github/pr_auto_repair.go:65",
         "Discovered: indirect-caller",
-        "Behavior-preserving health-options extraction: autoRepairHealthBuildOptions retains skipAutoRepairAttemptState=true and the fixed prHealthStaleAfter budget; internal/services/github/pr_health_sweep_threshold_test.go:119 verifies the separate read budgets.",
+        "Check projection sets healthOptions.skipSync before calling getPullRequestHealth.",
         "Boundary/call candidate: s.StartPullRequestRepair -> internal/services/github/pr_health_service.go:PRService.StartPullRequestRepair",
         "Boundary/call candidate: s.getPullRequestHealth -> internal/services/github/pr_health_service.go:PRService.getPullRequestHealth"
       ]
@@ -8881,6 +8881,23 @@
         "internal/services/github/pr_health_budget.go:67",
         "Discovered: indirect-caller",
         "Boundary/call candidate: s.syncAdmittedPullRequestState -> internal/services/github/pr_health_budget.go:PRService.syncAdmittedPullRequestState"
+      ]
+    },
+    {
+      "id": "internal/services/github/pr_health_budget.go:PRService.syncWebhookPullRequestChecks",
+      "source_sha256": "b66a18bedaf37e22b2088b8b55bb06f80533ddd74863c1498b51d16acd92d715",
+      "operation": "budget admission for queued PR check verification",
+      "owner": "PRService in internal/services/github",
+      "predicate": "Recheck the exact org and PR for a current check coverage gap or pending mergeability, resolve the repository credential, then admit the resolved GitHub App installation before a full read.",
+      "lock": "The shared installation budget coordinates provider admission. The delegated health sync owns revision and projection ordering under the PR row lock.",
+      "stale_result": "Satisfied or obsolete demand returns without a provider read. Unavailable or denied admission defers the durable job without consuming its ordinary retry attempts.",
+      "classification": "unfenced-needs-conversion",
+      "migration": "Preserve this as a delegated check verification path. Admission limits provider traffic. Lifecycle effects continue through the existing PR health and lifecycle boundaries.",
+      "evidence": [
+        "internal/services/github/pr_health_budget.go:22",
+        "Discovered: indirect-caller",
+        "Boundary/call candidate: s.syncResolvedPullRequestState -> internal/services/github/pr_health_service.go:PRService.syncResolvedPullRequestState",
+        "The worker classifies ErrPullRequestCheckRefreshDeferred as retryable without spending an attempt."
       ]
     },
     {
@@ -8968,20 +8985,21 @@
     },
     {
       "id": "internal/services/github/pr_health_service.go:PRService.SyncPullRequestState",
-      "source_sha256": "e6d8346543b0db5dbfc148ac037ff4df24f8c538ee0638a55590ced429de0361",
+      "source_sha256": "7cb9d4a1d683e96dd91f2ef675b900da33bedcab77dfbd23416ce4ba89e34310",
       "operation": "PRService.SyncPullRequestState: indirect lifecycle caller",
       "owner": "PRService in internal/services/github",
-      "predicate": "Syntactic boundary/callee candidates: s.syncBudgetedPullRequestState -> internal/services/github/pr_health_budget.go:PRService.syncBudgetedPullRequestState; s.syncBudgetedPullRequestState(syncCtx, readKey, orgID, pullRequestID, resolved) -> internal/services/github/pr_health_budget.go:PRService.syncBudgetedPullRequestState; s.syncPullRequestState -> internal/services/github/pr_health_service.go:PRService.syncPullRequestState; s.syncPullRequestState(ctx, orgID, pullRequestID) -> internal/services/github/pr_health_service.go:PRService.syncPullRequestState; s.syncResolvedPullRequestState -> internal/services/github/pr_health_service.go:PRService.syncResolvedPullRequestState; s.syncResolvedPullRequestState(syncCtx, orgID, pullReques [excerpt; see symbol source]; no independent authorization proof inferred.",
-      "lock": "No local transaction/SQL lock syntax; delegated candidate boundaries: s.syncBudgetedPullRequestState -> internal/services/github/pr_health_budget.go:PRService.syncBudgetedPullRequestState; s.syncBudgetedPullRequestState(syncCtx, readKey, orgID, pullRequestID, resolved) -> internal/services/github/pr_health_budget.go:PRService.syncBudgetedPullRequestState; s.syncPullRequestState -> internal/services/github/pr_health_service.go:PRService.syncPullRequestState; s.syncPullRequestState(ctx, orgID, pullRequestID) -> internal/services/github/pr_health_service.go:PRService.syncPullRequestState; s.syncResolvedPullRequestState -> internal/services/github/pr_health_service. [excerpt; see symbol source]",
-      "stale_result": "No separately proven stale-result contract for this wrapper/candidate; inspect its listed callees. Status/resource identity alone must not be treated as authority.",
+      "predicate": "The sync reason routes incomplete check sets through queued check verification. Initial, stale reconciliation and mergeability wait can share reason-specific flights. Other callers delegate directly to the authoritative read.",
+      "lock": "Read flights share work within a process. Durable revision fencing and lifecycle effects belong to the delegated PR health sync and its store boundaries.",
+      "stale_result": "The check verification path may skip a satisfied coverage gap or defer for the installation budget. Other read outcomes and stale-write decisions remain with the delegated paths.",
       "classification": "unfenced-needs-conversion",
-      "migration": "M0 syntax-observation row, not reviewed mutation authority. Trace the listed boundary/callee contract before converting this adapter; preserve existing caller transaction/effects and operation-specific policy. This classification is not proof that the symbol needs an independent lifecycle writer.",
+      "migration": "Preserve check verification and sweep admission as distinct paths. Keep urgent and final merge reads separate from check admission, and retain the delegated lifecycle fencing.",
       "evidence": [
-        "internal/services/github/pr_health_service.go:633",
+        "internal/services/github/pr_health_service.go:640",
         "Discovered: indirect-caller",
         "Boundary/call candidate: s.syncBudgetedPullRequestState -> internal/services/github/pr_health_budget.go:PRService.syncBudgetedPullRequestState",
         "Boundary/call candidate: s.syncPullRequestState -> internal/services/github/pr_health_service.go:PRService.syncPullRequestState",
-        "Boundary/call candidate: s.syncResolvedPullRequestState -> internal/services/github/pr_health_service.go:PRService.syncResolvedPullRequestState"
+        "Boundary/call candidate: s.syncResolvedPullRequestState -> internal/services/github/pr_health_service.go:PRService.syncResolvedPullRequestState",
+        "Boundary/call candidate: s.syncWebhookPullRequestChecks -> internal/services/github/pr_health_budget.go:PRService.syncWebhookPullRequestChecks"
       ]
     },
     {
