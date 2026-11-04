@@ -24,12 +24,13 @@ import (
 // Only container lifecycle and the sandbox-only auth bootstrap are simulated.
 type coldReviewCloneProvider struct {
 	localReviewEvidenceProvider
-	home, destination       string
-	cloneEntries            []string
-	cloneIndexAbsent        bool
-	cloneMissingObjects     string
-	bootstrapCount          int
-	genericClones, destroys int
+	home, destination        string
+	cloneEntries             []string
+	cloneIndexAbsent         bool
+	cloneMissingObjects      string
+	bootstrapCount           int
+	genericClones, destroys  int
+	hydrationAuthentications []reviewGitAuthentication
 }
 
 func (p *coldReviewCloneProvider) Create(context.Context, SandboxConfig) (*Sandbox, error) {
@@ -60,10 +61,14 @@ func (p *coldReviewCloneProvider) ExecWithStdin(ctx context.Context, sandbox *Sa
 		return -1, err
 	}
 	var message struct {
-		Payload reviewWorkspacePreparationPayload `json:"payload"`
+		Payload        reviewWorkspacePreparationPayload `json:"payload"`
+		Authentication reviewGitAuthentication           `json:"authentication"`
 	}
 	if err := json.Unmarshal(encoded, &message); err != nil {
 		return -1, err
+	}
+	if message.Payload.Standalone && message.Payload.PlatformCommand && message.Payload.AuthenticateGit {
+		p.hydrationAuthentications = append(p.hydrationAuthentications, message.Authentication)
 	}
 	code, err := p.localReviewEvidenceProvider.ExecWithStdin(ctx, sandbox, command, bytes.NewReader(encoded), stdout, stderr)
 	if code != 0 || err != nil || message.Payload.CloneDestination == "" {
@@ -108,7 +113,12 @@ func TestPrepareCodeReviewWorkspaceColdCloneMaterializesOnlyCapturedHead(t *test
 		home:                        home, destination: destination,
 	}
 	var logs bytes.Buffer
-	tokens := &reviewConfigGitHubTokens{token: "synthetic-cold-review-token"}
+	tokens := &reviewConfigGitHubTokens{token: "synthetic-clone-token"}
+	tokens.onToken = func() {
+		if tokens.calls > 1 {
+			tokens.token = "synthetic-hydration-token"
+		}
+	}
 	o := &Orchestrator{
 		provider: provider, sandboxCapacity: NewSandboxCapacityGate(SandboxCapacityGateConfig{
 			Counter: reviewWorkspaceCapacityCounter{}, MaxActive: 2, Logger: zerolog.Nop(),
@@ -123,7 +133,8 @@ func TestPrepareCodeReviewWorkspaceColdCloneMaterializesOnlyCapturedHead(t *test
 	sandbox, err := o.PrepareCodeReviewWorkspace(jobctx.WithLockToken(context.Background(), uuid.New()), session, f.head)
 	require.NoError(t, err, "real cold preparation must finish checkout and immutable input preparation")
 	require.Equal(t, []string{"review_inputs_hydrate"}, reviewInputAttemptStages(t, logs.Bytes()), "new unpublished clones must prepare their inputs in one hydration-capable pass")
-	require.Equal(t, 1, tokens.calls, "clone, checkout, and cold hydration must reuse the same installation token")
+	require.Equal(t, 2, tokens.calls, "hydration must resolve current credentials after clone and checkout")
+	require.Equal(t, []reviewGitAuthentication{{RepoURL: f.remote, Token: "synthetic-hydration-token"}}, provider.hydrationAuthentications, "cold hydration must use the refreshed token instead of the earlier clone token")
 	require.Equal(t, "cold-review", sandbox.ID, "successful cold preparation should transfer its unpublished sandbox")
 	require.Equal(t, 0, provider.genericClones, "cold reviews must use the bounded clone transport")
 	require.Equal(t, []string{".git"}, provider.cloneEntries, "clone must not materialize target-branch worktree files")
@@ -159,5 +170,5 @@ func TestPrepareCodeReviewWorkspaceColdCloneMaterializesOnlyCapturedHead(t *test
 	logs.Reset()
 	require.NoError(t, o.ensureCodeReviewInputs(context.Background(), session, sandbox), "final captured inputs must verify and remain reusable offline")
 	require.Equal(t, []string{"review_inputs_verify"}, reviewInputAttemptStages(t, logs.Bytes()), "reused workspaces must retain complete warm verification without preparation or hydration")
-	require.Equal(t, 1, tokens.calls, "warm reuse must not reacquire the cold installation token")
+	require.Equal(t, 2, tokens.calls, "warm reuse must not acquire an installation token")
 }

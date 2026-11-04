@@ -118,7 +118,7 @@ func TestPackageRegistryBuiltinReviewPreparationLifecycle(t *testing.T) {
 			sandbox := &Sandbox{ID: "review-package-lifecycle", OrgID: session.OrgID.String(), WorkDir: directory}
 			expectedRevision, err := packageCredentialRevision(*session.RepositoryID, h.resolver.metadata)
 			require.NoError(t, err, "metadata fingerprint should be available before cold review preparation")
-			require.NoError(t, h.orchestrator.prepareColdCodeReviewInputs(context.Background(), session, sandbox, reviewGitAuthentication{}), "cold builtin review must publish captured inputs")
+			require.NoError(t, h.orchestrator.prepareColdCodeReviewInputs(context.Background(), session, sandbox), "cold builtin review must publish captured inputs")
 			require.Equal(t, tt.coldEvents, h.events, "cold package setup must require opt-in and verify live PR trust before resolving credentials")
 			if tt.review != nil && tt.review.InstallNPMDependencies {
 				require.Equal(t, []string{expectedRevision}, h.provider.revisions, "cold setup must receive the current repository credential revision")
