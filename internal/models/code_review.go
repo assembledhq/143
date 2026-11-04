@@ -1695,9 +1695,10 @@ func CodeReviewRiskReasonMessages(reasons []CodeReviewRiskReason) []string {
 }
 
 type CodeReviewRiskEvaluation struct {
-	Acceptable    bool                   `json:"acceptable"`
-	Reasons       []string               `json:"reasons"`
-	ReasonDetails []CodeReviewRiskReason `json:"reason_details,omitempty"`
+	Acceptable           bool                   `json:"acceptable"`
+	Reasons              []string               `json:"reasons"`
+	ReasonDetails        []CodeReviewRiskReason `json:"reason_details,omitempty"`
+	OverriddenSizeLimits []CodeReviewRiskReason `json:"-"`
 }
 
 func (e *CodeReviewRiskEvaluation) AddReason(reason CodeReviewRiskReason) {
@@ -1707,25 +1708,27 @@ func (e *CodeReviewRiskEvaluation) AddReason(reason CodeReviewRiskReason) {
 }
 
 type CodeReviewDecisionEvaluation struct {
-	Decision          CodeReviewDecision     `json:"decision"`
-	Acceptable        bool                   `json:"acceptable"`
-	RiskReasons       []string               `json:"risk_reasons,omitempty"`
-	RiskReasonDetails []CodeReviewRiskReason `json:"risk_reason_details,omitempty"`
+	Decision             CodeReviewDecision     `json:"decision"`
+	Acceptable           bool                   `json:"acceptable"`
+	RiskReasons          []string               `json:"risk_reasons,omitempty"`
+	RiskReasonDetails    []CodeReviewRiskReason `json:"risk_reason_details,omitempty"`
+	OverriddenSizeLimits []CodeReviewRiskReason `json:"-"`
 }
 
 func EvaluateCodeReviewDecision(policy CodeReviewPolicyConfig, risk CodeReviewRiskEvaluation) CodeReviewDecisionEvaluation {
+	decision := CodeReviewDecisionEvaluation{
+		Decision:             CodeReviewDecisionCommentOnly,
+		Acceptable:           risk.Acceptable,
+		OverriddenSizeLimits: append([]CodeReviewRiskReason(nil), risk.OverriddenSizeLimits...),
+	}
 	if !risk.Acceptable {
-		return CodeReviewDecisionEvaluation{
-			Decision:          CodeReviewDecisionNeedsHumanReview,
-			Acceptable:        false,
-			RiskReasons:       append([]string(nil), risk.Reasons...),
-			RiskReasonDetails: append([]CodeReviewRiskReason(nil), risk.ReasonDetails...),
-		}
+		decision.Decision = CodeReviewDecisionNeedsHumanReview
+		decision.RiskReasons = append([]string(nil), risk.Reasons...)
+		decision.RiskReasonDetails = append([]CodeReviewRiskReason(nil), risk.ReasonDetails...)
+	} else if policy.ApprovalMode == CodeReviewApprovalModeApproveAcceptable {
+		decision.Decision = CodeReviewDecisionApproved
 	}
-	if policy.ApprovalMode == CodeReviewApprovalModeApproveAcceptable {
-		return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionApproved, Acceptable: true}
-	}
-	return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionCommentOnly, Acceptable: true}
+	return decision
 }
 
 func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) CodeReviewRiskEvaluation {
@@ -1740,8 +1743,11 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.HeadSHAChanged {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonHeadChanged})
 	}
-	if !codeReviewSizeLimitOverrideActive(policy, input) {
-		for _, reason := range codeReviewSizeLimitReasons(policy, input) {
+	sizeLimitReasons := codeReviewSizeLimitReasons(policy, input)
+	if input.OverrideSizeLimits && policy.RiskPolicy.AllowSizeLimitOverride {
+		risk.OverriddenSizeLimits = sizeLimitReasons
+	} else {
+		for _, reason := range sizeLimitReasons {
 			risk.AddReason(reason)
 		}
 	}
@@ -1859,20 +1865,6 @@ func codeReviewSizeLimitReasons(policy CodeReviewPolicyConfig, input CodeReviewR
 		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: input.Deletions, Limit: policy.RiskPolicy.MaxDeletions})
 	}
 	return reasons
-}
-
-func codeReviewSizeLimitOverrideActive(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) bool {
-	return input.OverrideSizeLimits && policy.RiskPolicy.AllowSizeLimitOverride
-}
-
-// CodeReviewOverriddenSizeLimits returns the exceeded limits that an allowed
-// override removed from the risk evaluation, so the review can disclose them.
-func CodeReviewOverriddenSizeLimits(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) []CodeReviewRiskReason {
-	policy = ResolveCodeReviewPolicyConfig(&policy)
-	if !codeReviewSizeLimitOverrideActive(policy, input) {
-		return nil
-	}
-	return codeReviewSizeLimitReasons(policy, input)
 }
 
 // IsCodeReviewSizeLimitRiskReason reports whether a size override can clear the reason.

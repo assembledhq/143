@@ -97,7 +97,8 @@ func TestEvaluateCodeReviewSizeLimitOverride(t *testing.T) {
 			risk := EvaluateCodeReviewRisk(policy, input)
 			require.Equal(t, tt.expected, risk.ReasonDetails, "only an allowed opt-in should skip the size limits")
 			require.Equal(t, len(tt.expected) == 0, risk.Acceptable, "skipping the size limits should leave the diff eligible for approval")
-			require.Equal(t, tt.overridden, CodeReviewOverriddenSizeLimits(policy, input), "the review should disclose exactly the limits the override skipped")
+			require.Equal(t, tt.overridden, risk.OverriddenSizeLimits, "the risk result should record exactly the limits the override skipped")
+			require.Equal(t, tt.overridden, EvaluateCodeReviewDecision(policy, risk).OverriddenSizeLimits, "the decision should preserve skipped limits")
 		})
 	}
 }
@@ -116,7 +117,8 @@ func TestCodeReviewOverriddenSizeLimitsIgnoresDiffsWithinLimits(t *testing.T) {
 	t.Parallel()
 	policy := DefaultCodeReviewPolicyConfig()
 	policy.RiskPolicy.AllowSizeLimitOverride = true
-	require.Empty(t, CodeReviewOverriddenSizeLimits(policy, CodeReviewRiskInput{Additions: 1, OverrideSizeLimits: true}), "a diff within its limits has nothing to disclose")
+	risk := EvaluateCodeReviewRisk(policy, CodeReviewRiskInput{Additions: 1, OverrideSizeLimits: true})
+	require.Empty(t, risk.OverriddenSizeLimits, "a diff within its limits should not record an applied override")
 }
 
 func TestCodeReviewAllowSizeLimitOverridePolicyRoundTrip(t *testing.T) {

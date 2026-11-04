@@ -308,16 +308,6 @@ func codeReviewOverrideSizeLimits(job runCodeReviewPayload) bool {
 		requestContext.OverrideSizeLimitsHeadSHA != "" && strings.EqualFold(requestContext.OverrideSizeLimitsHeadSHA, strings.TrimSpace(job.HeadSHA))
 }
 
-func codeReviewOverriddenSizeLimits(policy models.CodeReviewPolicyConfig, job runCodeReviewPayload, changedFiles []codereviewsvc.PullRequestFile) []models.CodeReviewRiskReason {
-	additions, deletions := codeReviewLineChanges(changedFiles)
-	return models.CodeReviewOverriddenSizeLimits(policy, models.CodeReviewRiskInput{
-		FilesChanged:       len(changedFiles),
-		Additions:          additions,
-		Deletions:          deletions,
-		OverrideSizeLimits: codeReviewOverrideSizeLimits(job),
-	})
-}
-
 func codeReviewSizeLimitOverrideURL(policy models.CodeReviewPolicyConfig, reviewNowURL string) string {
 	if !policy.RiskPolicy.AllowSizeLimitOverride {
 		return ""

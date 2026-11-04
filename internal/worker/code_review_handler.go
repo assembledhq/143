@@ -563,7 +563,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			return fmt.Errorf("select code review inline findings: %w", err)
 		}
 		if assessment != nil {
-			assessmentOutcome, err = fullAssessmentOutcome(agentResults, decision.RiskReasonDetails, assessmentCoverage)
+			assessmentOutcome, err = fullAssessmentOutcome(agentResults, decision, assessmentCoverage)
 			if err != nil {
 				return fmt.Errorf("encode full assessment outcome: %w", err)
 			}
@@ -614,15 +614,16 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		}
 		removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 		completion := db.CompleteCodeReviewParams{
-			SessionID:         job.SessionID,
-			Decision:          decision.Decision,
-			Acceptable:        decision.Acceptable,
-			GitHubReviewID:    submission.GitHubReviewID,
-			GitHubReviewURL:   submission.GitHubReviewURL,
-			FinalReviewBody:   finalReviewBody,
-			Additions:         additions,
-			Deletions:         deletions,
-			RiskReasonDetails: decision.RiskReasonDetails,
+			SessionID:                job.SessionID,
+			Decision:                 decision.Decision,
+			Acceptable:               decision.Acceptable,
+			GitHubReviewID:           submission.GitHubReviewID,
+			GitHubReviewURL:          submission.GitHubReviewURL,
+			FinalReviewBody:          finalReviewBody,
+			Additions:                additions,
+			Deletions:                deletions,
+			RiskReasonDetails:        decision.RiskReasonDetails,
+			SizeLimitOverrideApplied: len(decision.OverriddenSizeLimits) > 0,
 		}
 		completionStage := observability.BeginStage(true, reviewLog, "review_completion_persist")
 		var completionErr error
@@ -3770,7 +3771,7 @@ func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job
 		OverrideSizeLimits:    codeReviewOverrideSizeLimits(job),
 		FromFork:              job.FromFork,
 	})
-	stable := models.CodeReviewRiskEvaluation{Acceptable: true}
+	stable := models.CodeReviewRiskEvaluation{Acceptable: true, OverriddenSizeLimits: evaluated.OverriddenSizeLimits}
 	for _, reason := range evaluated.ReasonDetails {
 		// Explicit usernames are stable for the captured policy, but GitHub team
 		// membership is live provider state and is rechecked before approval.
@@ -3800,7 +3801,7 @@ func codeReviewStableFailureReviewBody(services *Services, job runCodeReviewPayl
 		PolicySettingsURL:    codeReviewPolicySettingsURL(services.FrontendURL),
 		ReviewNowURL:         codeReviewAvailableReviewNowURL(services, job.SessionID),
 		SizeLimitOverrideURL: codeReviewSizeLimitOverrideURL(policy, codeReviewAvailableReviewNowURL(services, job.SessionID)),
-		OverriddenSizeLimits: codeReviewOverriddenSizeLimits(policy, job, changedFiles),
+		OverriddenSizeLimits: decision.OverriddenSizeLimits,
 		ChangeStatsAvailable: true,
 		FilesChanged:         len(changedFiles),
 		LinesChanged:         codeReviewLinesChanged(changedFiles),
@@ -3837,7 +3838,7 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	var assessmentOutcome json.RawMessage
 	if assessment != nil {
 		var outcomeErr error
-		assessmentOutcome, outcomeErr = fullAssessmentOutcome(nil, decision.RiskReasonDetails, false)
+		assessmentOutcome, outcomeErr = fullAssessmentOutcome(nil, decision, false)
 		if outcomeErr != nil {
 			return fmt.Errorf("encode early-stop assessment outcome: %w", outcomeErr)
 		}
@@ -3874,15 +3875,16 @@ func completeCodeReviewAfterStableDeterministicFailure(
 	additions, deletions := codeReviewLineChanges(changedFiles)
 	removeCodeReviewRequestedReviewer(ctx, stores, services, logger, job, pr)
 	completion := db.CompleteCodeReviewParams{
-		SessionID:         job.SessionID,
-		Decision:          decision.Decision,
-		Acceptable:        decision.Acceptable,
-		GitHubReviewID:    submission.GitHubReviewID,
-		GitHubReviewURL:   submission.GitHubReviewURL,
-		FinalReviewBody:   finalReviewBody,
-		Additions:         &additions,
-		Deletions:         &deletions,
-		RiskReasonDetails: decision.RiskReasonDetails,
+		SessionID:                job.SessionID,
+		Decision:                 decision.Decision,
+		Acceptable:               decision.Acceptable,
+		GitHubReviewID:           submission.GitHubReviewID,
+		GitHubReviewURL:          submission.GitHubReviewURL,
+		FinalReviewBody:          finalReviewBody,
+		Additions:                &additions,
+		Deletions:                &deletions,
+		RiskReasonDetails:        decision.RiskReasonDetails,
+		SizeLimitOverrideApplied: len(decision.OverriddenSizeLimits) > 0,
 	}
 	completionStage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "review_completion_persist")
 	var completionErr error
@@ -3988,7 +3990,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		EvidenceRecheckURL:        input.EvidenceRecheckURL,
 		ReviewNowURL:              input.ReviewNowURL,
 		SizeLimitOverrideURL:      codeReviewSizeLimitOverrideURL(policy, input.ReviewNowURL),
-		OverriddenSizeLimits:      codeReviewOverriddenSizeLimits(policy, input.Job, input.ChangedFiles),
+		OverriddenSizeLimits:      decision.OverriddenSizeLimits,
 		ReviewProvenance:          input.ReviewProvenance,
 		DescriptionPassed:         descriptionPassed,
 		DescriptionIssues:         codeReviewFailedDescriptionRequirements(descriptionEvaluation.RequirementSummaries),

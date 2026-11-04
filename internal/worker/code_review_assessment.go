@@ -450,13 +450,21 @@ func fullAssessmentCoverage(policy models.CodeReviewPolicyConfig, results []mode
 	return safeSelectedOrchestrator && completedReviewers >= policy.AgentRoster.EffectiveReviewerCount() && completedReviewers >= policy.AgentRoster.RequireReviewerQuorum
 }
 
-func fullAssessmentOutcome(results []models.CodeReviewAgentResult, reasons []models.CodeReviewRiskReason, coverage bool) (json.RawMessage, error) {
+type fullAssessmentStructuredOutcome struct {
+	DescriptionAssessments   []codeReviewDescriptionAssessment `json:"description_assessments"`
+	RiskReasons              []models.CodeReviewRiskReason     `json:"risk_reasons"`
+	CoverageComplete         bool                              `json:"coverage_complete"`
+	SizeLimitOverrideApplied bool                              `json:"size_limit_override_applied,omitempty"`
+}
+
+func fullAssessmentOutcome(results []models.CodeReviewAgentResult, decision models.CodeReviewDecisionEvaluation, coverage bool) (json.RawMessage, error) {
 	synthesis := codeReviewOrchestratorSynthesisFromResults(results)
-	return json.Marshal(struct {
-		DescriptionAssessments []codeReviewDescriptionAssessment `json:"description_assessments"`
-		RiskReasons            []models.CodeReviewRiskReason     `json:"risk_reasons"`
-		CoverageComplete       bool                              `json:"coverage_complete"`
-	}{append([]codeReviewDescriptionAssessment{}, synthesis.DescriptionAssessments...), reasons, coverage})
+	return json.Marshal(fullAssessmentStructuredOutcome{
+		DescriptionAssessments:   append([]codeReviewDescriptionAssessment{}, synthesis.DescriptionAssessments...),
+		RiskReasons:              decision.RiskReasonDetails,
+		CoverageComplete:         coverage,
+		SizeLimitOverrideApplied: len(decision.OverriddenSizeLimits) > 0,
+	})
 }
 
 func failFullAssessmentForSession(ctx context.Context, stores *Stores, job runCodeReviewPayload, detail string) error {
@@ -607,6 +615,10 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 	if assessment.ResultOrigin == nil || assessment.Decision == nil || assessment.Acceptable == nil || assessment.RenderedBody == nil || len(assessment.StructuredOutcome) == 0 {
 		return db.ErrCodeReviewAssessmentState
 	}
+	var outcome fullAssessmentStructuredOutcome
+	if err := json.Unmarshal(assessment.StructuredOutcome, &outcome); err != nil {
+		return fmt.Errorf("decode staged full assessment outcome: %w", err)
+	}
 	logger := *zerolog.Ctx(ctx)
 	var pr models.PullRequest
 	if stores.PullRequests != nil {
@@ -681,7 +693,16 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 			return fmt.Errorf("decode staged risk reasons: %w", err)
 		}
 	}
-	legacy := db.CompleteCodeReviewParams{SessionID: job.SessionID, Decision: *assessment.Decision, Acceptable: *assessment.Acceptable, GitHubReviewID: submission.GitHubReviewID, GitHubReviewURL: submission.GitHubReviewURL, FinalReviewBody: finalBody, RiskReasonDetails: reasons}
+	legacy := db.CompleteCodeReviewParams{
+		SessionID:                job.SessionID,
+		Decision:                 *assessment.Decision,
+		Acceptable:               *assessment.Acceptable,
+		GitHubReviewID:           submission.GitHubReviewID,
+		GitHubReviewURL:          submission.GitHubReviewURL,
+		FinalReviewBody:          finalBody,
+		RiskReasonDetails:        reasons,
+		SizeLimitOverrideApplied: outcome.SizeLimitOverrideApplied,
+	}
 	if filesAvailable {
 		additions, deletions := codeReviewLineChanges(changedFiles)
 		legacy.Additions, legacy.Deletions = &additions, &deletions

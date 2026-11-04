@@ -40,14 +40,14 @@ func TestCodeReviewStableFailureReviewBodyDisclosesOverriddenLimits(t *testing.T
 	policy.RiskPolicy.BlockedPathPatterns = []string{"migrations/**"}
 	changedFiles := []codereviewsvc.PullRequestFile{{Filename: "migrations/1.sql", Additions: 101}}
 	job := runCodeReviewPayload{SessionID: uuid.New(), HeadSHA: "head", RequestContext: &codereviewsvc.ReviewRequestContext{OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head"}}
-	risk := models.EvaluateCodeReviewRisk(policy, models.CodeReviewRiskInput{
-		FilesChanged: 1, Additions: 101, ChangedPaths: []string{"migrations/1.sql"}, DescriptionPassed: true, OverrideSizeLimits: true,
-	})
-	require.Equal(t, []models.CodeReviewRiskReasonCode{models.CodeReviewRiskReasonBlockedPath}, []models.CodeReviewRiskReasonCode{risk.ReasonDetails[0].Code}, "the blocked path should be the remaining stable blocker")
+	risk := codeReviewStableDeterministicRisk(policy, job, models.PullRequest{}, changedFiles, true)
+	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonBlockedPath, Subject: "migrations/1.sql"}}, risk.ReasonDetails, "the blocked path should be the remaining stable blocker")
 
-	body := codeReviewStableFailureReviewBody(&Services{FrontendURL: "https://143.test"}, job, policy, models.EvaluateCodeReviewDecision(policy, risk), changedFiles)
+	decision := models.EvaluateCodeReviewDecision(policy, risk)
+	body := codeReviewStableFailureReviewBody(&Services{FrontendURL: "https://143.test"}, job, policy, decision, changedFiles)
 
 	require.Contains(t, body, "**Size limits overridden for this review:** This change has 101 additions; the policy limit is 100.", "an early stop should still disclose the skipped limits")
+	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 101, Limit: 100}}, decision.OverriddenSizeLimits, "an early stop should still record the skipped limits")
 }
 
 func TestCodeReviewSizeLimitOverrideURL(t *testing.T) {
