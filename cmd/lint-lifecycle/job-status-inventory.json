@@ -1419,6 +1419,26 @@
       ]
     },
     {
+      "id": "internal/db/session_executor_retention.go:SessionExecutorStore.ListTerminalContainersByIdentity:sql:1",
+      "source_sha256": "63ad7548886bcc4bccfdb41625ed6d31f01d70251fa698f70486be0af0ee6d51",
+      "classification": "lifecycle-cleanup",
+      "action_0a": "Keep the exact running-job ownership exclusion and paired tenant/executor identities, with terminal-executor, age, expired-lease and no-active-container guards. Do not widen the running owner predicate to awaiting_start_control. Before enabling this path for 0a, separately review exact parked controls, nonterminal reservations, retained preparation/allocation references and physical drain blockers; this inventory does not establish deletion safety or activate that protocol.",
+      "reason": "This read-only query selects physical container cleanup candidates. Its running-job predicate is a negative ownership guard, not a terminal-job retention set or runnable eligibility test.",
+      "evidence": [
+        "internal/db/session_executor_retention.go:29",
+        "j . status = 'running'",
+        "internal/db/session_executor_retention_postgres_test.go:TestSessionExecutorRetentionPostgres_Ownership",
+        "internal/db/session_executor_retention_postgres_test.go:TestSessionExecutorRetentionPostgres_PairedTenantBatch"
+      ],
+      "predicate_policies": [
+        {
+          "fact": "j . status = 'running'",
+          "classification": "lease-owned",
+          "action_0a": "Preserve a cleanup candidate when a running job has a matching tenant and executor ownership, or a matching tenant and exact job/lock token. Parked jobs have no execution lease and must not satisfy this owner predicate. Keep logical and physical lifecycle retention obligations separate."
+        }
+      ]
+    },
+    {
       "id": "internal/db/session_executor_store.go:SessionExecutorStore.ClearPreHandoffReservation:sql:1",
       "source_sha256": "ae41ecac5990477dc8297a501116b6388b7bda5210350b7eca1d08f728e67b4c",
       "classification": "lifecycle-cleanup",
