@@ -29,7 +29,7 @@ interface ReviewRequestDialogProps {
   error?: string;
   unavailable?: string;
   assessmentID?: string;
-  allowSizeLimitOverride?: boolean;
+  overrideReviewSessionID?: string;
   defaultOverrideSizeLimits?: boolean;
 }
 
@@ -50,15 +50,19 @@ function resultCopy(result: CodeReviewRequestResponse, mode: RequestMode) {
 }
 
 /** Shared confirmation and receipt for the read-only GitHub action links. */
-export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID, allowSizeLimitOverride = false, defaultOverrideSizeLimits = false }: ReviewRequestDialogProps) {
+export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID, overrideReviewSessionID, defaultOverrideSizeLimits = false }: ReviewRequestDialogProps) {
   const client = useQueryClient();
   const requestID = useRef<string | null>(null);
   const [overrideSizeLimits, setOverrideSizeLimits] = useState(defaultOverrideSizeLimits);
+  const overrideSessionID = mode === "review_now" ? overrideReviewSessionID : undefined;
   const mutation = useMutation({
     mutationFn: () => {
       if (!target) throw new Error("The pull request is not available.");
       requestID.current ??= crypto.randomUUID();
-      return api.codeReviews.requestReview(target.pull_request_id, { request_id: requestID.current, mode, ...(allowSizeLimitOverride && overrideSizeLimits && mode === "review_now" ? { override_size_limits: true } : {}) });
+      const override = overrideSizeLimits && overrideSessionID
+        ? { override_size_limits: true, override_review_session_id: overrideSessionID }
+        : {};
+      return api.codeReviews.requestReview(target.pull_request_id, { request_id: requestID.current, mode, ...override });
     },
     onSuccess: () => {
       void client.invalidateQueries({ queryKey: ["code-reviews"] });
@@ -77,7 +81,10 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
   const receipt = result ? resultCopy(result, mode) : undefined;
   const isRecheck = mode === "recheck";
   const title = isRecheck ? "Re-check evidence" : "Request full review";
-  const disabledReason = mutation.isPending ? "Your request is being recorded." : loading ? "Loading review settings and pull request." : error ?? unavailable;
+  const overrideStale = Boolean(overrideSessionID) && overrideSizeLimits && mutation.error instanceof ApiError && mutation.error.code === "CODE_REVIEW_OVERRIDE_STALE";
+  const disabledReason = mutation.isPending ? "Your request is being recorded."
+    : loading ? "Loading review settings and pull request."
+    : error ?? unavailable ?? (overrideStale ? "Uncheck the override to request a review with size limits." : undefined);
   const canRequest = Boolean(target) && !loading && !error && !unavailable;
   const resultHref = result?.assessment_id ? `/code-reviews?assessment=${result.assessment_id}`
     : result?.session_id ? `/sessions/${result.session_id}` : "/code-reviews?tab=queue";
@@ -103,11 +110,15 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
           {target && !loading && !error ? <p className="text-sm text-muted-foreground">{isRecheck
             ? "Previous findings stay in place. Changes to code or review policy require a full review."
             : "A running or completed review may be reused if it already covers these changes."}</p> : null}
-          {allowSizeLimitOverride && mode === "review_now" && target && !loading && !error ? <div className="flex items-start gap-2">
-            <Checkbox id="override-size-limits" className="mt-0.5" checked={overrideSizeLimits} onCheckedChange={(checked) => { setOverrideSizeLimits(checked === true); requestID.current = null; }} />
+          {overrideSessionID && target && !loading && !error ? <div className="flex items-start gap-2">
+            <Checkbox id="override-size-limits" className="mt-0.5" checked={overrideSizeLimits} disabled={mutation.isPending} onCheckedChange={(checked) => {
+              setOverrideSizeLimits(checked === true);
+              requestID.current = null;
+              mutation.reset();
+            }} />
             <div className="space-y-1">
               <Label htmlFor="override-size-limits">Override size limits for this review</Label>
-              <p className="text-xs text-muted-foreground">143 can approve this pull request even if it exceeds the policy&apos;s files, additions, or deletions limits. Every other safeguard still applies, and the review names the exceeded limits. The size limits apply again if the head or base changes.</p>
+              <p className="text-xs text-muted-foreground">The override applies only to the linked review&apos;s head and base. It waives the files, additions, and deletions limits. All other safeguards still apply.</p>
             </div>
           </div> : null}
           {unavailable && !loading && !error ? <p role="status" className="text-sm text-muted-foreground">{unavailable}</p> : null}

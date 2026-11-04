@@ -174,14 +174,26 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 }
 
 func assessmentRequestContext(req ScheduleRequestInput) *ReviewRequestContext {
-	if req.RequestContext != nil {
-		return normalizeReviewRequestContext(req.RequestContext)
-	}
 	overrideSizeLimits := req.Mode == models.CodeReviewReviewNow && req.OverrideSizeLimits
+	if req.RequestContext != nil {
+		request := normalizeReviewRequestContext(req.RequestContext)
+		if !overrideSizeLimits {
+			return request
+		}
+		if request != nil {
+			request.OverrideSizeLimits = true
+			request.OverrideReviewSessionID = req.OverrideReviewSessionID
+			return request
+		}
+	}
 	if strings.TrimSpace(req.Reason) == "" && !overrideSizeLimits {
 		return nil
 	}
-	return &ReviewRequestContext{Source: "ui", Body: strings.TrimSpace(req.Reason), OverrideSizeLimits: overrideSizeLimits}
+	request := &ReviewRequestContext{Source: "ui", Body: strings.TrimSpace(req.Reason), OverrideSizeLimits: overrideSizeLimits}
+	if overrideSizeLimits {
+		request.OverrideReviewSessionID = req.OverrideReviewSessionID
+	}
+	return request
 }
 
 func decodeAssessmentManifest(raw json.RawMessage) (ReviewInputManifest, error) {

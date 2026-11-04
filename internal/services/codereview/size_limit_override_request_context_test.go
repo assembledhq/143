@@ -1,16 +1,20 @@
 package codereview
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
 func TestAssessmentRequestContextOverrideSizeLimits(t *testing.T) {
 	t.Parallel()
 
+	sourceID := uuid.New()
+	longReason := strings.Repeat("x", reviewRequestContextMaxRunes+1)
 	tests := []struct {
 		name     string
 		req      ScheduleRequestInput
@@ -18,13 +22,23 @@ func TestAssessmentRequestContextOverrideSizeLimits(t *testing.T) {
 	}{
 		{name: "review now without the opt-in has no context", req: ScheduleRequestInput{Mode: models.CodeReviewReviewNow}},
 		{
+			name:     "plain explicit reason stays intact before hashing",
+			req:      ScheduleRequestInput{Mode: models.CodeReviewRecheck, Reason: longReason},
+			expected: &ReviewRequestContext{Source: "ui", Body: longReason},
+		},
+		{
 			name:     "review now opt-in does not need a reason",
-			req:      ScheduleRequestInput{Mode: models.CodeReviewReviewNow, OverrideSizeLimits: true},
-			expected: &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true},
+			req:      ScheduleRequestInput{Mode: models.CodeReviewReviewNow, OverrideSizeLimits: true, OverrideReviewSessionID: &sourceID},
+			expected: &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideReviewSessionID: &sourceID},
+		},
+		{
+			name:     "review now opt-in preserves supplied request text",
+			req:      ScheduleRequestInput{Mode: models.CodeReviewReviewNow, OverrideSizeLimits: true, OverrideReviewSessionID: &sourceID, RequestContext: &ReviewRequestContext{Source: "ui", Body: " Look again. "}},
+			expected: &ReviewRequestContext{Source: "ui", Body: "Look again.", OverrideSizeLimits: true, OverrideReviewSessionID: &sourceID},
 		},
 		{
 			name:     "other modes ignore the opt-in",
-			req:      ScheduleRequestInput{Mode: models.CodeReviewForceFresh, Reason: "Look again.", OverrideSizeLimits: true},
+			req:      ScheduleRequestInput{Mode: models.CodeReviewForceFresh, Reason: "Look again.", OverrideSizeLimits: true, OverrideReviewSessionID: &sourceID},
 			expected: &ReviewRequestContext{Source: "ui", Body: "Look again."},
 		},
 	}
@@ -128,7 +142,12 @@ func TestReviewRequestHashSeparatesSizeLimitOverride(t *testing.T) {
 
 	plain, err := reviewRequestHash([16]byte{1}, models.CodeReviewReviewNow, nil, false)
 	require.NoError(t, err, "hash a plain request")
-	override, err := reviewRequestHash([16]byte{1}, models.CodeReviewReviewNow, &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true}, false)
+	firstSource := uuid.New()
+	override, err := reviewRequestHash([16]byte{1}, models.CodeReviewReviewNow, &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideReviewSessionID: &firstSource}, false)
 	require.NoError(t, err, "hash an override request")
 	require.NotEqual(t, plain, override, "an override request should not dedupe into a plain request")
+	secondSource := uuid.New()
+	secondOverride, err := reviewRequestHash([16]byte{1}, models.CodeReviewReviewNow, &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideReviewSessionID: &secondSource}, false)
+	require.NoError(t, err, "hash an override request from another source review")
+	require.NotEqual(t, override, secondOverride, "overrides from different review links should be distinct request intents")
 }

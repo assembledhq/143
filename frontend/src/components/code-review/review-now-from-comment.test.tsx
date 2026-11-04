@@ -41,12 +41,12 @@ describe("review link from a GitHub comment", () => {
     }]));
     expect(await within(dialog).findByRole("status")).toHaveTextContent("Queued");
   });
-  it.each<{ name: string; linkParams: Record<string, string>; toggle: boolean; expected: { override_size_limits?: boolean } }>([
-    { name: "the override link preselects the opt-in", linkParams: { override_size_limits: "true" }, toggle: false, expected: { override_size_limits: true } },
-    { name: "the opt-in can be selected in the dialog", linkParams: {}, toggle: true, expected: { override_size_limits: true } },
-    { name: "a preselected opt-in can be cleared", linkParams: { override_size_limits: "true" }, toggle: true, expected: {} },
-    { name: "the opt-in stays off by default", linkParams: {}, toggle: false, expected: {} },
-  ])("$name", async ({ linkParams, toggle, expected }) => {
+  it.each<{ name: string; linkParams: Record<string, string>; toggle: boolean; override: boolean }>([
+    { name: "the override link preselects the opt-in", linkParams: { override_size_limits: "true" }, toggle: false, override: true },
+    { name: "the opt-in can be selected in the dialog", linkParams: {}, toggle: true, override: true },
+    { name: "a preselected opt-in can be cleared", linkParams: { override_size_limits: "true" }, toggle: true, override: false },
+    { name: "the opt-in stays off by default", linkParams: {}, toggle: false, override: false },
+  ])("$name", async ({ linkParams, toggle, override }) => {
     mockTarget({ allowOverride: true });
     const bodies: unknown[] = [];
     server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
@@ -59,7 +59,40 @@ describe("review link from a GitHub comment", () => {
     const optIn = await within(dialog).findByRole("checkbox", { name: "Override size limits for this review" });
     if (toggle) await user.click(optIn);
     await user.click(await within(dialog).findByRole("button", { name: "Request full review" }));
+    const expected = override ? { override_size_limits: true, override_review_session_id: sessionID } : {};
     await waitFor(() => expect(bodies).toEqual([{ request_id: expect.any(String), mode: "review_now", ...expected }]));
+  });
+  it("lets the user clear a stale override and deliberately request a plain review", async () => {
+    mockTarget({ allowOverride: true });
+    const staleMessage = "This review link refers to an older comparison. Uncheck the override or open the latest review link.";
+    const bodies: { request_id: string; override_size_limits?: boolean }[] = [];
+    server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
+      const body = await request.json() as typeof bodies[number];
+      bodies.push(body);
+      if (body.override_size_limits) {
+        return HttpResponse.json({ error: { code: "CODE_REVIEW_OVERRIDE_STALE", message: staleMessage } }, { status: 409 });
+      }
+      return HttpResponse.json({ data: { disposition: "queued" } }, { status: 202 });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewNowFromComment canManage />, { searchParams: { review_now: sessionID, override_size_limits: "true" }, nuqsHasMemory: true });
+    const dialog = await screen.findByRole("dialog", { name: "Request full review" });
+    const optIn = await within(dialog).findByRole("checkbox", { name: "Override size limits for this review" });
+    const firstRequest = { request_id: expect.any(String), mode: "review_now", override_size_limits: true, override_review_session_id: sessionID };
+    expect(bodies).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Request full review" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(staleMessage);
+    expect(bodies).toEqual([firstRequest]);
+    expect(within(dialog).getByRole("button", { name: "Try again" })).toBeDisabled();
+
+    await user.click(optIn);
+    expect(within(dialog).queryByRole("alert")).not.toBeInTheDocument();
+    expect(bodies).toEqual([firstRequest]);
+    await user.click(within(dialog).getByRole("button", { name: "Request full review" }));
+
+    expect(await within(dialog).findByRole("status")).toHaveTextContent("Queued");
+    expect(bodies).toEqual([firstRequest, { request_id: expect.any(String), mode: "review_now" }]);
+    expect(bodies[1]?.request_id).not.toBe(bodies[0]?.request_id);
   });
   it("hides the opt-in and ignores a crafted link when the policy does not allow overrides", async () => {
     mockTarget();

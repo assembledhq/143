@@ -42,7 +42,7 @@ export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
     loading={validID && (review.isPending || policy.isPending)}
     error={error}
     unavailable={unavailable}
-    allowSizeLimitOverride={policy.data?.data.config?.risk_policy?.allow_size_limit_override === true}
+    overrideReviewSessionID={policy.data?.data.config?.risk_policy?.allow_size_limit_override === true ? sessionID ?? undefined : undefined}
     defaultOverrideSizeLimits={overrideSizeLimits === true}
   />;
 }

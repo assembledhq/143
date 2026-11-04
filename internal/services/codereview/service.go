@@ -120,14 +120,15 @@ type ReviewRequestedInput struct {
 // ReviewRequestContext carries the reason and options for an explicit review.
 // Only the orchestrator synthesis prompt receives the request text.
 type ReviewRequestContext struct {
-	Source                    string `json:"source"`
-	AuthorLogin               string `json:"author_login,omitempty"`
-	Body                      string `json:"body"`
-	URL                       string `json:"url,omitempty"`
-	OverrideSizeLimits        bool   `json:"override_size_limits,omitempty"`
-	OverrideSizeLimitsHeadSHA string `json:"override_size_limits_head_sha,omitempty"`
-	OverrideSizeLimitsBaseSHA string `json:"override_size_limits_base_sha,omitempty"`
-	OverrideSizeLimitsBaseRef string `json:"override_size_limits_base_ref,omitempty"`
+	Source                    string     `json:"source"`
+	AuthorLogin               string     `json:"author_login,omitempty"`
+	Body                      string     `json:"body"`
+	URL                       string     `json:"url,omitempty"`
+	OverrideSizeLimits        bool       `json:"override_size_limits,omitempty"`
+	OverrideReviewSessionID   *uuid.UUID `json:"override_review_session_id,omitempty"`
+	OverrideSizeLimitsHeadSHA string     `json:"override_size_limits_head_sha,omitempty"`
+	OverrideSizeLimitsBaseSHA string     `json:"override_size_limits_base_sha,omitempty"`
+	OverrideSizeLimitsBaseRef string     `json:"override_size_limits_base_ref,omitempty"`
 }
 
 type ReviewMentionedInput struct {
@@ -1139,6 +1140,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		"pull_request_title":       input.PullRequestTitle,
 		"pull_request_author":      input.PullRequestAuthor,
 		"base_sha":                 input.BaseSHA,
+		"base_ref":                 input.BaseRef,
 		"head_sha":                 input.HeadSHA,
 		"from_fork":                input.FromFork,
 		"requested_reviewer_login": strings.TrimSpace(input.RequestedLogin),
@@ -1509,6 +1511,7 @@ func normalizeReviewRequestContext(input *ReviewRequestContext) *ReviewRequestCo
 		Body:                      strings.TrimSpace(input.Body),
 		URL:                       strings.TrimSpace(input.URL),
 		OverrideSizeLimits:        input.OverrideSizeLimits,
+		OverrideReviewSessionID:   input.OverrideReviewSessionID,
 		OverrideSizeLimitsHeadSHA: strings.TrimSpace(input.OverrideSizeLimitsHeadSHA),
 		OverrideSizeLimitsBaseSHA: strings.TrimSpace(input.OverrideSizeLimitsBaseSHA),
 		OverrideSizeLimitsBaseRef: strings.TrimSpace(input.OverrideSizeLimitsBaseRef),

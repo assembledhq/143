@@ -117,15 +117,33 @@ func reviewRequestHash(prID uuid.UUID, mode models.CodeReviewRequestMode, contex
 }
 
 type ScheduleRequestInput struct {
-	OrgID              uuid.UUID
-	PullRequestID      uuid.UUID
-	RequestID          uuid.UUID
-	RequesterID        *uuid.UUID
-	Mode               models.CodeReviewRequestMode
-	Reason             string
-	RequestContext     *ReviewRequestContext
-	TriggerSource      models.CodeReviewTriggerSource
-	OverrideSizeLimits bool
+	OrgID                   uuid.UUID
+	PullRequestID           uuid.UUID
+	RequestID               uuid.UUID
+	RequesterID             *uuid.UUID
+	Mode                    models.CodeReviewRequestMode
+	Reason                  string
+	RequestContext          *ReviewRequestContext
+	TriggerSource           models.CodeReviewTriggerSource
+	OverrideSizeLimits      bool
+	OverrideReviewSessionID *uuid.UUID
+}
+
+// ValidateSizeLimitOverride requires an override to identify its source review.
+func (req ScheduleRequestInput) ValidateSizeLimitOverride() error {
+	if !req.OverrideSizeLimits {
+		if req.OverrideReviewSessionID != nil {
+			return errors.New("override_review_session_id requires override_size_limits")
+		}
+		return nil
+	}
+	if req.Mode != models.CodeReviewReviewNow {
+		return errors.New("override_size_limits requires review_now")
+	}
+	if req.OverrideReviewSessionID == nil || *req.OverrideReviewSessionID == uuid.Nil {
+		return errors.New("override_size_limits requires override_review_session_id")
+	}
+	return nil
 }
 
 type ScheduleRequestResult struct {
@@ -138,6 +156,7 @@ type ScheduleRequestResult struct {
 }
 
 var ErrReviewIneligible = errors.New("pull request is not eligible for review")
+var ErrStaleSizeLimitOverride = errors.New("linked review does not match the current pull request comparison")
 var errScheduleSnapshotUnavailable = errors.New("review scheduling snapshot unavailable")
 
 func (s *Service) GetSchedule(ctx context.Context, orgID, prID uuid.UUID) (models.CodeReviewPRState, error) {
@@ -166,6 +185,9 @@ func (s *Service) GetSchedule(ctx context.Context, orgID, prID uuid.UUID) (model
 
 func (s *Service) RequestScheduledReview(ctx context.Context, req ScheduleRequestInput) (ScheduleRequestResult, error) {
 	if err := req.Mode.Validate(); err != nil {
+		return ScheduleRequestResult{}, err
+	}
+	if err := req.ValidateSizeLimitOverride(); err != nil {
 		return ScheduleRequestResult{}, err
 	}
 	if req.RequestID == uuid.Nil {
@@ -407,6 +429,16 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		}
 		if requesterID != nil && snapshot.State != "open" {
 			return ErrReviewIneligible
+		}
+		if input.ExplicitRequest && input.RequestContext != nil && input.RequestContext.OverrideReviewSessionID != nil {
+			if err := scoped.validateSizeLimitOverrideSource(ctx, input, snapshot); err != nil {
+				return err
+			}
+			// The source is part of the request identity. Subsequent refreshes
+			// and retries use the comparison bound below.
+			request := *input.RequestContext
+			request.OverrideReviewSessionID = nil
+			input.RequestContext = &request
 		}
 		if latestErr == nil {
 			if err := adoptLegacyScheduledSession(ctx, tx, state, latest, snapshot.BaseRef, now); err != nil {
@@ -672,6 +704,32 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 	}
 
 	return result, nil
+}
+
+func (s *Service) validateSizeLimitOverrideSource(ctx context.Context, input ReviewChangedInput, snapshot ghservice.CodeReviewPullRequestSnapshot) error {
+	sourceID := *input.RequestContext.OverrideReviewSessionID
+	source, err := s.metadata.GetBySessionID(ctx, input.OrgID, sourceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrStaleSizeLimitOverride
+	}
+	if err != nil {
+		return fmt.Errorf("read size limit override source: %w", err)
+	}
+	if source.PullRequestID != input.PullRequestID || source.RepositoryID != input.RepositoryID ||
+		source.HeadSHA == "" || source.HeadSHA != snapshot.HeadSHA || source.BaseSHA == "" || source.BaseSHA != snapshot.BaseSHA {
+		return ErrStaleSizeLimitOverride
+	}
+	session, err := s.sessions.GetByID(ctx, input.OrgID, sourceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrStaleSizeLimitOverride
+	}
+	if err != nil {
+		return fmt.Errorf("read size limit override source comparison: %w", err)
+	}
+	if baseRef := codeReviewRevisionContextString(session.RevisionContext, "base_ref"); baseRef == "" || baseRef != snapshot.BaseRef {
+		return ErrStaleSizeLimitOverride
+	}
+	return nil
 }
 
 func (s *Service) cancelStaleScheduledThreads(ctx context.Context, orgID, prID uuid.UUID) error {
