@@ -232,7 +232,7 @@ export interface CodeReviewPolicyRecord extends CodeReviewPolicyConfig {
 }
 
 export interface CodeReviewResolvedPolicy {
-  capabilities?: { scheduling?: boolean; conditional_recheck?: boolean; automatic_evidence_recheck?: boolean };
+  capabilities?: { scheduling?: boolean; conditional_recheck?: boolean; automatic_evidence_recheck?: boolean; review_history?: boolean };
   config: CodeReviewPolicyConfig;
   source: "default" | "organization" | "repository" | string;
   policy?: CodeReviewPolicyRecord;

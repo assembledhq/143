@@ -332,6 +332,7 @@ func CodeReviewReviewerPrompt(data CodeReviewReviewerPromptData) string {
 }
 
 type CodeReviewOrchestratorPromptData struct {
+	ReviewHistory              *CodeReviewHistoryPromptData
 	RepositoryGuidance         *models.CodeReviewRepositoryGuidance
 	Repository                 string
 	PullNumber                 int
@@ -358,6 +359,22 @@ type CodeReviewOrchestratorPromptData struct {
 	UseAutomatedApprovalPolicy bool
 	VisualEvidence             []CodeReviewVisualEvidencePromptData
 	VisualEvidenceOmitted      int
+}
+
+// CodeReviewHistoryPromptData carries references only. Earlier conclusions and
+// conversation excerpts are retrieved by the orchestrator when they are useful.
+type CodeReviewHistoryPromptData struct {
+	SessionID string
+	Rounds    []CodeReviewHistoryRoundReference
+	HasMore   bool
+}
+
+type CodeReviewHistoryRoundReference struct {
+	SessionID    string
+	AssessmentID string
+	BaseSHA      string
+	HeadSHA      string
+	CreatedAt    string
 }
 
 func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string {

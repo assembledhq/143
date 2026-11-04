@@ -2032,8 +2032,13 @@ func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.P
 	}))
 }
 
-func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot) string {
+func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot, history ...*prompts.CodeReviewHistoryPromptData) string {
+	var reviewHistory *prompts.CodeReviewHistoryPromptData
+	if len(history) > 0 {
+		reviewHistory = history[0]
+	}
 	return prompts.CodeReviewOrchestratorPrompt(prompts.CodeReviewOrchestratorPromptData{
+		ReviewHistory:              reviewHistory,
 		RepositoryGuidance:         job.RepositoryGuidance,
 		Repository:                 pr.GitHubRepo,
 		PullNumber:                 pr.GitHubPRNumber,
@@ -3223,7 +3228,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	}
 	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings, visualEvidence)
 	descriptionInputHash := codeReviewDescriptionInputHash(pr, visualEvidence)
-	if err := storeCodeReviewPromptRecord(ctx, stores, models.CodeReviewPromptRecord{
+	promptRecord := models.CodeReviewPromptRecord{
 		OrgID:         job.OrgID,
 		SessionID:     job.SessionID,
 		RecordKey:     recordKey,
@@ -3237,8 +3242,12 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 			"input_hash":           descriptionInputHash,
 			"visual_evidence_hash": visualEvidence.CanonicalHash(),
 		}),
-	}); err != nil {
-		return err
+	}
+	useHistory := job.RequestContext != nil && job.RequestContext.UseReviewHistory
+	if !useHistory {
+		if err := storeCodeReviewPromptRecord(ctx, stores, promptRecord); err != nil {
+			return err
+		}
 	}
 	threads := newWorkerThreadService(stores, logger)
 	// Legacy first synthesis uses Main. Assessment-enabled reviews use an
@@ -3365,6 +3374,14 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 					Str("orchestrator", string(agentType)).
 					Msg("retargeted code review primary thread to available orchestrator")
 			}
+		}
+	}
+	if useHistory {
+		promptText, err = prepareCodeReviewHistoryPrompt(ctx, stores.CodeReviews, job, threadID, promptRecord, func(history *prompts.CodeReviewHistoryPromptData) string {
+			return codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings, visualEvidence, history)
+		})
+		if err != nil {
+			return err
 		}
 	}
 	structured := marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
@@ -3589,31 +3606,45 @@ func harvestCodeReviewOrchestratorResult(ctx context.Context, stores *Stores, se
 		if synthesisErr == nil {
 			_, synthesisErr = codeReviewDescriptionEvaluationFromSynthesis(policy.Config(), changedFiles, synthesis, visualEvidence)
 		}
+		if synthesisErr == nil && job.RequestContext != nil && job.RequestContext.UseReviewHistory {
+			records, historyErr := stores.CodeReviews.ListPromptRecords(ctx, job.OrgID, job.SessionID)
+			if historyErr != nil {
+				return fmt.Errorf("load review history receipts: %w", historyErr)
+			}
+			if historyErr := validateCodeReviewHistoryReads(records, job, state.PromptRecordKey, threadID); historyErr != nil {
+				synthesisErr = fmt.Errorf("%w: %v", errCodeReviewHistoryNotRead, historyErr)
+			}
+		}
 		if synthesisErr != nil {
-			threads := newWorkerThreadService(stores, logger)
-			repairHandled, repairStarted, repairErr := requestCodeReviewOrchestratorSynthesisRepair(
-				ctx,
-				stores,
-				threads,
-				logger,
-				job,
-				policy.Config(),
-				changedFiles,
-				result,
-				state,
-				thread.CurrentTurn,
-				combinedRaw,
-				synthesisErr,
-				visualEvidence,
-			)
-			if repairErr != nil {
-				return repairErr
-			}
-			if repairStarted {
-				return codeReviewWaitingForOrchestrator(policy.Config())
-			}
-			if repairHandled {
-				continue
+			// Schema-only repair cannot supply missing history: it explicitly forbids
+			// new inspection and preserves old conclusions. Keep this operational
+			// failure visible rather than silently accepting an unenrolled review.
+			if !errors.Is(synthesisErr, errCodeReviewHistoryNotRead) {
+				threads := newWorkerThreadService(stores, logger)
+				repairHandled, repairStarted, repairErr := requestCodeReviewOrchestratorSynthesisRepair(
+					ctx,
+					stores,
+					threads,
+					logger,
+					job,
+					policy.Config(),
+					changedFiles,
+					result,
+					state,
+					thread.CurrentTurn,
+					combinedRaw,
+					synthesisErr,
+					visualEvidence,
+				)
+				if repairErr != nil {
+					return repairErr
+				}
+				if repairStarted {
+					return codeReviewWaitingForOrchestrator(policy.Config())
+				}
+				if repairHandled {
+					continue
+				}
 			}
 
 			state.Synthesis = codeReviewOrchestratorSynthesis{}
@@ -3817,6 +3848,7 @@ func codeReviewStableFailureReviewBody(services *Services, job runCodeReviewPayl
 		ReviewNowURL:         codeReviewAvailableReviewNowURL(services, job.SessionID),
 		SizeLimitOverrideURL: codeReviewSizeLimitOverrideURL(policy, codeReviewAvailableReviewNowURL(services, job.SessionID)),
 		OverriddenSizeLimits: decision.OverriddenSizeLimits,
+		ReviewProvenance:     codeReviewHistoryProvenance(liveCodeReviewOutcomeInput{Job: job}),
 		ChangeStatsAvailable: true,
 		FilesChanged:         len(changedFiles),
 		LinesChanged:         codeReviewLinesChanged(changedFiles),
@@ -4006,7 +4038,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		ReviewNowURL:              input.ReviewNowURL,
 		SizeLimitOverrideURL:      codeReviewSizeLimitOverrideURL(policy, input.ReviewNowURL),
 		OverriddenSizeLimits:      decision.OverriddenSizeLimits,
-		ReviewProvenance:          input.ReviewProvenance,
+		ReviewProvenance:          codeReviewHistoryProvenance(input),
 		DescriptionPassed:         descriptionPassed,
 		DescriptionIssues:         codeReviewFailedDescriptionRequirements(descriptionEvaluation.RequirementSummaries),
 		AgentSummaries:            codeReviewAgentSummaries(input.AgentResults, input.Findings),

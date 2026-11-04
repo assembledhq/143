@@ -100,8 +100,9 @@ type ReviewTextInput struct {
 // ReviewRequestInput excludes request UUID, actor, and trigger envelope. A
 // substantive objection or instruction is included for evidence reassessment.
 type ReviewRequestInput struct {
-	SubstantiveText string `json:"substantive_text"`
-	DisputeRouted   bool   `json:"dispute_routed"` // Historical fingerprint field; dedicated dispute admission chooses its own route.
+	SubstantiveText  string `json:"substantive_text"`
+	DisputeRouted    bool   `json:"dispute_routed"` // Historical fingerprint field; dedicated dispute admission chooses its own route.
+	UseReviewHistory bool   `json:"use_review_history,omitempty"`
 }
 
 type ReviewGateInput struct {

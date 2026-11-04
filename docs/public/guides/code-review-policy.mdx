@@ -34,6 +34,31 @@ Open the review's **Evidence** panel to see captured thumbnails, source surface 
 
 A new GitHub review request for the configured 143 reviewer team starts a fresh full review after the previous review completes, even on the same commit. If an equivalent full review is already queued or running, the request joins that review. Redelivery of an existing request keeps its original identity and does not start another review. Team mentions and the UI's ordinary **Review now** action can still reuse applicable work; different review context or a deterministic early stop can require another assessment. The Code reviews page retains executed assessments as audit history.
 
+### Use earlier review history
+
+When enabled for your installation, the **Request full review** dialog offers
+**Use earlier review history (experimental)**. It is unchecked by default and
+applies only to that request. Selecting it starts a fresh full review after the
+latest review completes, even on unchanged code; an equivalent running request
+can still be joined.
+
+The code reviewers inspect the current changes independently. The orchestrator
+receives references to earlier rounds and can retrieve their reports, findings,
+and session excerpts as needed. It must compare old conclusions with the current
+code and explain repeated or reversed findings. Earlier approval decisions and
+claims that something was fixed do not establish correctness.
+
+History access is limited to earlier rounds of the same pull request. If prior
+rounds exist but the orchestrator does not successfully retrieve the latest round's
+report, the review remains incomplete rather than claiming to have used history. A first
+review with no earlier rounds can complete normally. This experiment does not
+resume an earlier model conversation or enroll future automatic reviews.
+
+The installation flag `CODE_REVIEW_HISTORY_ENABLED` defaults to `false`. Deploy
+the API, all workers, and the sandbox image containing the new `143-tools`
+commands before enabling it. The opt-in remains hidden and requests are rejected
+while the flag is off.
+
 ### Re-check updated evidence
 
 When **Allow PR re-checks** is enabled, choose **Re-check PR evidence** from a completed review's overflow menu or follow the link in its review comment. With a complete prior review, unchanged code and an unchanged review policy, 143 reassesses screenshots, test results, logs, descriptions, discussion, and existing findings without rerunning the code reviewers. Updates to the title, generated attribution, or CI status also use this evidence path.

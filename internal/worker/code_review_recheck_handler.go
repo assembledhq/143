@@ -173,7 +173,7 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		if err = codereviewsvc.ValidateReviewInputManifest(manifest); err != nil {
 			return failCodeReviewRecheck(ctx, stores, services, a, err.Error(), false)
 		}
-		requestContext := &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText}
+		requestContext := &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText, UseReviewHistory: manifest.Request.UseReviewHistory}
 		capture, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: requestContext})
 		if err != nil {
 			if errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
@@ -517,7 +517,7 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 			// The PR publication lock serializes this check with our other
 			// publishers. Re-read after acquiring it: waiting for another
 			// publisher must not preserve permission to send stale inputs.
-			fresh, captureErr := services.CodeReviewInputCapture.CaptureAssessmentInputs(lockCtx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText}})
+			fresh, captureErr := services.CodeReviewInputCapture.CaptureAssessmentInputs(lockCtx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText, UseReviewHistory: manifest.Request.UseReviewHistory}})
 			if errors.Is(captureErr, models.ErrInvalidCodeReviewGuidanceFile) && current.PublicationState == models.CodeReviewPublicationReserved {
 				// No send has started, so a permanent file error can fail safely.
 				// Uncertain sends must still reconcile their possible receipt.

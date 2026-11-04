@@ -68,7 +68,7 @@ func (s *capabilityFilteredToolSource) toolAllowed(name string) bool {
 		// capability:list is the only bypass namespace the allowlist keeps
 		// and needs no grant; every other allowlisted tool still needs its
 		// capability.
-		if namespace == NamespaceCapability {
+		if namespace == NamespaceCapability || isPriorReviewHistoryCommand(namespace, action) {
 			return true
 		}
 		return s.allowed[string(namespace)+" "+string(action)]
@@ -82,6 +82,12 @@ func (s *capabilityFilteredToolSource) toolAllowed(name string) bool {
 	// Preview tools are intrinsic to the current coding session and are
 	// independently constrained by session-scoped token capabilities.
 	if namespace == NamespacePreview {
+		return true
+	}
+	// These read-only tools are independently authorized by the current
+	// review's opt-in and its pre-dispatch orchestrator binding. They confer no
+	// repository-wide session/history capability.
+	if isPriorReviewHistoryCommand(namespace, action) {
 		return true
 	}
 	return s.allowed[string(namespace)+" "+string(action)]

@@ -290,8 +290,10 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 		textItems = append(textItems, newReviewTextEvidence("check_status", identity, sourceURL, check.Provider, content, "status"))
 	}
 	text := ""
+	useReviewHistory := false
 	if in.RequestContext != nil {
 		text = in.RequestContext.Body
+		useReviewHistory = in.RequestContext.UseReviewHistory
 	}
 	config := resolved.Config
 	activeAuthorTeams := make([]string, 0, len(config.RiskPolicy.EligibleAuthorTeams))
@@ -324,7 +326,7 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 			Repository                   json.RawMessage
 			ExternalContextDigest        string
 		}{snapshot.HeadSHA, snapshot.BaseSHA, config.ReviewInstructions, config.AutomatedApprovalPolicy, repo.Settings, externalDigest}), ExternalInputsComplete: true},
-		Title: snapshot.Title, Description: snapshot.Body, Visual: visualInput, TextEvidence: ReviewTextInput{Items: textItems, UnclassifiedDigest: digestJSON(unclassified), Complete: true, SourceProvenanceComplete: true, FullDiscussionCaptured: true, ParseAmbiguous: parseAmbiguous}, Request: ReviewRequestInput{SubstantiveText: text},
+		Title: snapshot.Title, Description: snapshot.Body, Visual: visualInput, TextEvidence: ReviewTextInput{Items: textItems, UnclassifiedDigest: digestJSON(unclassified), Complete: true, SourceProvenanceComplete: true, FullDiscussionCaptured: true, ParseAmbiguous: parseAmbiguous}, Request: ReviewRequestInput{SubstantiveText: text, UseReviewHistory: useReviewHistory},
 		Gates: ReviewGateInput{EligibilityDigest: digestJSON(struct {
 			MergeGuard        string
 			HasConflicts      bool

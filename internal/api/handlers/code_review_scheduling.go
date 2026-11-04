@@ -73,6 +73,7 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 		Reason                  string                       `json:"reason,omitempty"`
 		OverrideSizeLimits      bool                         `json:"override_size_limits,omitempty"`
 		OverrideReviewSessionID *uuid.UUID                   `json:"override_review_session_id,omitempty"`
+		UseReviewHistory        bool                         `json:"use_review_history,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RequestID == uuid.Nil {
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "request_id and mode are required")
@@ -82,10 +83,19 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "invalid request mode", err)
 		return
 	}
+	if req.UseReviewHistory && req.Mode != models.CodeReviewReviewNow {
+		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "use_review_history requires review_now")
+		return
+	}
+	if req.UseReviewHistory && !h.reviewHistoryCapability {
+		writeError(w, r, 409, "CODE_REVIEW_CAPABILITY_UNAVAILABLE", "reviews using earlier history are not available")
+		return
+	}
 	input := codereviewsvc.ScheduleRequestInput{
 		OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id,
 		RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode, Reason: strings.TrimSpace(req.Reason),
 		OverrideSizeLimits: req.OverrideSizeLimits, OverrideReviewSessionID: req.OverrideReviewSessionID,
+		UseReviewHistory: req.UseReviewHistory,
 	}
 	if err := input.ValidateSizeLimitOverride(); err != nil {
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", err.Error())
@@ -112,7 +122,7 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, status, models.SingleResponse[codereviewsvc.ScheduleRequestResult]{Data: result})
 	resourceID := id.String()
-	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"request_id": req.RequestID, "mode": req.Mode, "disposition": result.Disposition, "override_size_limits": req.OverrideSizeLimits})
+	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"request_id": req.RequestID, "mode": req.Mode, "disposition": result.Disposition, "override_size_limits": req.OverrideSizeLimits, "use_review_history": req.UseReviewHistory})
 	emitUserAudit(h.audit, r, models.AuditActionCodeReviewRequested, models.AuditResourcePullRequest, &resourceID, details)
 }
 func (h *CodeReviewHandler) PauseSchedule(w http.ResponseWriter, r *http.Request) {

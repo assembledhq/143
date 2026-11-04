@@ -229,6 +229,12 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			require.Equal(t, 1, snapshots.snapshotCalls, "assessment must keep one independent final PR read without an initial duplicate")
 			require.True(t, visual.request.Fresh, "publication refresh must bypass immutable visual snapshot restoration")
 			require.Equal(t, in.AssessmentID, *visual.request.AssessmentID, "capture must retain assessment identity")
+			in.RequestContext = &ReviewRequestContext{UseReviewHistory: true}
+			historyCapture, err := s.CaptureAssessmentInputs(context.Background(), in)
+			require.NoError(t, err, "history enrollment should be captured for retry and fallback")
+			require.Equal(t, ReviewRequestInput{UseReviewHistory: true}, historyCapture.Manifest.Request, "capture must preserve the per-request history option")
+			require.NotEqual(t, result.Manifest.RequestDigest, historyCapture.Manifest.RequestDigest, "history selection must change captured request identity")
+			in.RequestContext = nil
 			snapshots.guidance = &models.CodeReviewRepositoryGuidance{Branch: "master", Present: true, BlobSHA: strings.Repeat("d", 40), Content: "Updated default branch guidance"}
 			updatedGuidance, err := s.CaptureAssessmentInputs(context.Background(), in)
 			require.NoError(t, err, "same-head review must recapture current default branch guidance")

@@ -37,6 +37,7 @@ func (s *internalMetaToolSource) ListTools() []Tool {
 	if s.token == "" || s.apiURL == "" {
 		return tools
 	}
+	tools = append(tools, priorReviewHistoryTools()...)
 	tools = append(tools,
 		Tool{Name: "automation_execute_action", Description: "Execute one configured external action with stable operation_key and action_key. After interruption inspect action-status and resume the same step; succeeded and unknown actions are never resent. Available across automation run modes.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{"request": {Type: "object", Description: "Action request: operation_key, action_key, kind, text or properties; GitHub actions require pr_number and the current full head_sha. github_issue_comment_update takes text and source_action_id, the UUID of the original successful github_issue_comment receipt in the same automation, repository, PR, and scope. Slack/Notion may omit PR preconditions in any run mode; include them only for commit-specific content. Supplied preconditions remain enforced on resume and must match the target in per-target turns."}, "file": {Type: "string", Description: "CLI only: local JSON request file"}, "resume": {Type: "boolean", Description: "Resume the stored step without replacing content", Default: false}, "operation_key": {Type: "string", Description: "Stable workflow key for resume"}, "action_key": {Type: "string", Description: "Stable step key for resume"}}}},
 		Tool{Name: "automation_action_status", Description: "Read recorded action receipts for one operation. Keys survive runs and session reconstruction. Unknown sends require reconciliation; use the same keys to resume safe steps.", InputSchema: ToolSchema{Type: "object", Properties: map[string]SchemaProperty{"operation_key": {Type: "string", Description: "Stable workflow key"}}, Required: []string{"operation_key"}}},
@@ -91,6 +92,8 @@ func (s *internalMetaToolSource) ListTools() []Tool {
 
 func (s *internalMetaToolSource) CallTool(ctx context.Context, name string, args json.RawMessage) *ToolCallResult {
 	switch name {
+	case "code_review_history_prior_rounds", "code_review_history_prior_round", "code_review_history_prior_messages":
+		return s.priorReviewHistory(ctx, name, args)
 	case "automation_action_status":
 		var params struct {
 			OperationKey string `json:"operation_key"`

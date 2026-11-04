@@ -6,12 +6,12 @@ import { ReviewNowFromComment } from "./review-now-from-comment";
 
 const sessionID = "90d8a47d-d87e-4780-90af-040f5144685a";
 const prID = "b8c1dede-d37b-497c-95c9-ec096f514c2a";
-function mockTarget({ enabled = true, inaccessible = false, allowOverride = false } = {}) {
+function mockTarget({ enabled = true, inaccessible = false, allowOverride = false, reviewHistory = false } = {}) {
   server.use(
     http.get("*/api/v1/code-reviews/:id", () => inaccessible
       ? HttpResponse.json({ error: { code: "NOT_FOUND", message: "Not found" } }, { status: 404 })
       : HttpResponse.json({ data: { session_id: sessionID, pull_request_id: prID, github_repo: "acme/api", github_pr_number: 17, pull_request_title: "Reduce duplicate reviews" } })),
-    http.get("*/api/v1/code-review-policies", () => HttpResponse.json({ data: { capabilities: { scheduling: enabled }, config: { risk_policy: { allow_size_limit_override: allowOverride } } } })),
+    http.get("*/api/v1/code-review-policies", () => HttpResponse.json({ data: { capabilities: { scheduling: enabled, review_history: reviewHistory }, config: { risk_policy: { allow_size_limit_override: allowOverride } } } })),
   );
 }
 function renderLink(canManage = true) {
@@ -21,6 +21,59 @@ function renderLink(canManage = true) {
 }
 
 describe("review link from a GitHub comment", () => {
+  it.each<{ name: string; linkParams: Record<string, string>; toggle: boolean; history: boolean }>([
+    { name: "review history is unchecked by default", linkParams: {}, toggle: false, history: false },
+    { name: "the history link preselects the opt-in", linkParams: { use_review_history: "true" }, toggle: false, history: true },
+    { name: "review history can be selected in the dialog", linkParams: {}, toggle: true, history: true },
+    { name: "a preselected history opt-in can be cleared", linkParams: { use_review_history: "true" }, toggle: true, history: false },
+  ])("$name", async ({ linkParams, toggle, history }) => {
+    mockTarget({ reviewHistory: true });
+    const bodies: unknown[] = [];
+    server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
+      bodies.push(await request.json());
+      return HttpResponse.json({ data: { disposition: "queued" } }, { status: 202 });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewNowFromComment canManage />, { searchParams: { review_now: sessionID, ...linkParams }, nuqsHasMemory: true });
+    const dialog = await screen.findByRole("dialog", { name: "Request full review" });
+    const optIn = await within(dialog).findByRole("checkbox", { name: "Use earlier review history (experimental)" });
+    if (toggle) await user.click(optIn);
+    expect(optIn).toHaveAttribute("aria-checked", String(history));
+    expect(within(dialog).getByText(history ? /Starts a new full review/ : /may be reused/)).toBeInTheDocument();
+    expect(bodies).toEqual([]);
+    await user.click(within(dialog).getByRole("button", { name: "Request full review" }));
+    await waitFor(() => expect(bodies).toEqual([{ request_id: expect.any(String), mode: "review_now", ...(history ? { use_review_history: true } : {}) }]));
+  });
+  it("ignores a history link until the installation supports retrieval", async () => {
+    mockTarget();
+    const bodies: unknown[] = [];
+    server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
+      bodies.push(await request.json());
+      return HttpResponse.json({ data: { disposition: "queued" } }, { status: 202 });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewNowFromComment canManage />, { searchParams: { review_now: sessionID, use_review_history: "true" }, nuqsHasMemory: true });
+    const dialog = await screen.findByRole("dialog", { name: "Request full review" });
+    const action = await within(dialog).findByRole("button", { name: "Request full review" });
+    await waitFor(() => expect(action).toBeEnabled());
+    expect(within(dialog).queryByRole("checkbox", { name: "Use earlier review history (experimental)" })).not.toBeInTheDocument();
+    await user.click(action);
+    await waitFor(() => expect(bodies).toEqual([{ request_id: expect.any(String), mode: "review_now" }]));
+  });
+  it("submits history retrieval and a size override as independent options", async () => {
+    mockTarget({ reviewHistory: true, allowOverride: true });
+    const bodies: unknown[] = [];
+    server.use(http.post("*/api/v1/pull-requests/:id/code-review/requests", async ({ request }) => {
+      bodies.push(await request.json());
+      return HttpResponse.json({ data: { disposition: "queued" } }, { status: 202 });
+    }));
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewNowFromComment canManage />, { searchParams: { review_now: sessionID, use_review_history: "true", override_size_limits: "true" }, nuqsHasMemory: true });
+    const dialog = await screen.findByRole("dialog", { name: "Request full review" });
+    await within(dialog).findByRole("checkbox", { name: "Use earlier review history (experimental)" });
+    await user.click(within(dialog).getByRole("button", { name: "Request full review" }));
+    await waitFor(() => expect(bodies).toEqual([{ request_id: expect.any(String), mode: "review_now", use_review_history: true, override_size_limits: true, override_review_session_id: sessionID }]));
+  });
   it("loads the PR without mutation and submits only after the user clicks Request full review", async () => {
     mockTarget();
     const requests: { path: string; body: unknown }[] = [];
