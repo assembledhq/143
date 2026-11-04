@@ -43,6 +43,8 @@ readonly BINARY_ROLLBACK_SCHEMA_VERSION="${BINARY_ROLLBACK_SCHEMA_VERSION:-}"
 # Shared worker bucket defaults and mapping logic.
 # shellcheck source=deploy/scripts/worker_buckets.sh
 source "$SCRIPT_DIR/worker_buckets.sh"
+# shellcheck source=deploy/scripts/worker-disk-capacity.sh
+source "$SCRIPT_DIR/worker-disk-capacity.sh"
 
 case "$ROLE" in
   app)
@@ -159,8 +161,9 @@ remote_env_assignment() {
 
 # A host-side guardian owns the flock across every SSH/configuration phase,
 # not just the final rollover. Its exclusive durable intent survives launcher
-# loss, signals, and unknown outcomes. Only a joined successful attempt clears
-# its own latch; reconciliation is deliberately an operator action.
+# loss, signals, and unknown outcomes. Only a joined successful attempt or a
+# proven initial admission refusal archives its own latch. Reconciliation of
+# existing or post-ready attempts is deliberately an operator action.
 worker_rollout_guard() {
   set -euo pipefail
   # Transport loss must not terminate receipt writes with SIGPIPE.
@@ -220,8 +223,33 @@ worker_rollout_guard() {
   trap 'exit 143' TERM
   sync -f "$root"
   if [ "${DEPLOY_MODE:-routine}" = routine ]; then
-    WORKER_ROLLOUT_ATTEMPT="$attempt" IMAGE_TAG="$build_sha" \
-      worker_host_disk_capacity_preflight pre-pull "$root/.worker-rollout" || return 1
+    if ! WORKER_ROLLOUT_ATTEMPT="$attempt" IMAGE_TAG="$build_sha" \
+      worker_host_disk_capacity_preflight pre-pull "$root/.worker-rollout"; then
+      # This invocation has not emitted ready or allowed any configuration,
+      # pull, candidate, or retirement operation. Only this known rejection
+      # can become nonblocking. Never apply this rule to a pre-existing latch
+      # or a later failure with the same phase name.
+      if [ "${WORKER_DISK_FAILURE_PERSISTED:-0}" = 1 ] &&
+         [ ! -e "$root/.worker-rollout/candidate.json" ] &&
+         [ ! -e "$root/.worker-rollout/completion.json" ] &&
+         jq -e --arg attempt "$attempt" --arg build "$build_sha" \
+           '.attempt == $attempt and .build_sha == $build and .stage == "pre-pull" and .reason != "accepted"' \
+           "$root/.worker-rollout/capacity.json" >/dev/null &&
+         mkdir -p "$root/.worker-rollout-rejections" &&
+         mkdir "$root/.worker-rollout-rejections/$attempt" &&
+         cp -p "$root/.worker-rollout/attempt" "$root/.worker-rollout/build-sha" \
+           "$root/.worker-rollout/guardian-pid" "$root/.worker-rollout/failure.json" \
+           "$root/.worker-rollout/capacity.json" "$root/.worker-rollout-rejections/$attempt/" &&
+         sync -f "$root/.worker-rollout-rejections/$attempt"; then
+        # Persist the rejection before removing only these five owned files.
+        # A copy/sync/removal failure or unexpected file leaves a blocking
+        # directory. A crash before removal also fails closed on the next run.
+        rm "$root/.worker-rollout/attempt" "$root/.worker-rollout/build-sha" \
+          "$root/.worker-rollout/guardian-pid" "$root/.worker-rollout/failure.json" \
+          "$root/.worker-rollout/capacity.json" && rmdir "$root/.worker-rollout"
+      fi
+      return 1
+    fi
   fi
   printf 'ready:%s\n' "$attempt"
   while read -r command token; do
@@ -251,72 +279,33 @@ worker_rollout_guard() {
 # The floor is reserved for reviews and logs. The separate pre-pull allowance
 # is an operator-verified deployment budget, not evidence that any image fits.
 worker_host_disk_capacity_preflight() {
-  local phase="$1" directory="${2:-/opt/143/.worker-rollout}"
-  local reserve_mb="${WORKER_BLUE_GREEN_MIN_FREE_DISK_MB:-10240}" reserve_inodes="${WORKER_BLUE_GREEN_MIN_FREE_INODES:-100000}"
-  local pull_mb="${WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB:-8192}" pull_inodes="${WORKER_BLUE_GREEN_PULL_INODE_BUDGET:-100000}"
-  local docker_root bytes_output inodes_output available_kb available_inodes required_kb required_inodes started finished
-  disk_capacity_failure() {
-    WORKER_ROLLOUT_PHASE=host_disk_capacity_failed
-    local record node="${ACTIVE_WORKER_CANDIDATE_NODE:-unknown}" cid="${STARTED_WORKER_CID:-unknown}"
-    if [ -n "${WORKER_ROLLOUT_ATTEMPT:-}" ] && [ -n "${IMAGE_TAG:-}" ] &&
-       [ "$(cat "$directory/attempt" 2>/dev/null)" = "$WORKER_ROLLOUT_ATTEMPT" ] &&
-       [ "$(cat "$directory/build-sha" 2>/dev/null)" = "$IMAGE_TAG" ]; then
-      if record="$(mktemp "$directory/.disk-failure.XXXXXX" 2>/dev/null)" &&
-         jq -n --arg attempt "$WORKER_ROLLOUT_ATTEMPT" --arg build "$IMAGE_TAG" --arg node "$node" --arg cid "$cid" \
-           '{attempt:$attempt, build_sha:$build, phase:"host_disk_capacity_failed", candidate_node:$node, candidate_container:$cid}' > "$record" &&
-         mv "$record" "$directory/failure.json"; then
-        sync -f "$directory" || true
-      fi
-    fi
-    # Receipt first: a disconnected error channel must not erase the reason.
-    echo "ERROR: worker disk-capacity evidence is missing, stale, invalid, or below its maintenance floor; resources and intent retained." >&2 || true
-    return 1
-  }
+  local phase="$1" directory="${2:-/opt/143/.worker-rollout}" record
+  WORKER_DISK_FAILURE_PERSISTED=0
   if [ -z "${WORKER_ROLLOUT_ATTEMPT:-}" ] || [ -z "${IMAGE_TAG:-}" ] ||
      [ "$(cat "$directory/attempt" 2>/dev/null)" != "$WORKER_ROLLOUT_ATTEMPT" ] ||
      [ "$(cat "$directory/build-sha" 2>/dev/null)" != "$IMAGE_TAG" ]; then
-    disk_capacity_failure; return 1
+    echo "ERROR: disk-capacity gate has no matching rollout identity; intent retained." >&2 || true
+    return 1
   fi
-  # Bound decimal widths before Bash arithmetic; neither zero nor overflow can
-  # disable the gate. Fresh observations are collected within one 15s window.
-  if ! [[ "$reserve_mb" =~ ^[1-9][0-9]{0,11}$ && "$reserve_inodes" =~ ^[1-9][0-9]{0,11}$ &&
-          "$pull_mb" =~ ^[1-9][0-9]{0,11}$ && "$pull_inodes" =~ ^[1-9][0-9]{0,11}$ ]]; then
-    disk_capacity_failure; return 1
+  if worker_disk_capacity_observe "$phase"; then return 0; fi
+  WORKER_ROLLOUT_PHASE=host_disk_capacity_failed
+  # Write the complete observation before the failure marker. Callers may only
+  # archive an initial rejection if both records are durably bound to this attempt.
+  if record="$(mktemp "$directory/.capacity.XXXXXX")" &&
+     worker_disk_capacity_json | jq --arg attempt "$WORKER_ROLLOUT_ATTEMPT" --arg build "$IMAGE_TAG" \
+       '. + {attempt:$attempt,build_sha:$build}' >"$record" &&
+     mv "$record" "$directory/capacity.json" &&
+     record="$(mktemp "$directory/.disk-failure.XXXXXX")" &&
+     jq -n --arg attempt "$WORKER_ROLLOUT_ATTEMPT" --arg build "$IMAGE_TAG" \
+       --arg node "${ACTIVE_WORKER_CANDIDATE_NODE:-unknown}" --arg cid "${STARTED_WORKER_CID:-unknown}" \
+       '{attempt:$attempt,build_sha:$build,phase:"host_disk_capacity_failed",candidate_node:$node,candidate_container:$cid}' >"$record" &&
+     mv "$record" "$directory/failure.json" && sync -f "$directory"; then
+    WORKER_DISK_FAILURE_PERSISTED=1
+  else
+    echo "ERROR: disk-capacity receipt could not be persisted; intent retained." >&2 || true
   fi
-  required_kb=$((reserve_mb * 1024))
-  required_inodes="$reserve_inodes"
-  case "$phase" in
-    pre-pull) required_kb=$(((reserve_mb + pull_mb) * 1024)); required_inodes=$((reserve_inodes + pull_inodes)) ;;
-    pre-start) ;;
-    *) disk_capacity_failure; return 1 ;;
-  esac
-  if ! started="$(date +%s)" || ! [[ "$started" =~ ^[1-9][0-9]{0,11}$ ]]; then
-    disk_capacity_failure; return 1
-  fi
-  if ! docker_root="$(timeout --foreground 5s docker info --format '{{.DockerRootDir}}' 2>/dev/null)" ||
-     ! [[ "$docker_root" = /* && "$docker_root" != *[[:cntrl:]]* ]] || [ ! -d "$docker_root" ]; then
-    disk_capacity_failure; return 1
-  fi
-  if ! bytes_output="$(LC_ALL=C timeout --foreground 5s df -Pk -- "$docker_root" 2>/dev/null)" ||
-     ! inodes_output="$(LC_ALL=C timeout --foreground 5s df -Pi -- "$docker_root" 2>/dev/null)"; then
-    disk_capacity_failure; return 1
-  fi
-  if ! available_kb="$(printf '%s\n' "$bytes_output" | awk '
-      NR==1 {if ($1!="Filesystem" || $2!="1024-blocks" || $4!="Available") exit 1; next}
-      NR==2 {if (NF<6 || $2!~/^[1-9][0-9]*$/ || $3!~/^[0-9]+$/ || $4!~/^[1-9][0-9]*$/ || length($2)>15 || length($3)>15 || length($4)>15 || ($3+0)+($4+0)>($2+0)) exit 1; value=$4; next}
-      END {if (NR!=2 || value=="") exit 1; print value}')" ||
-     ! available_inodes="$(printf '%s\n' "$inodes_output" | awk '
-      NR==1 {if ($1!="Filesystem" || $2!="Inodes" || $4!="IFree") exit 1; next}
-      NR==2 {if (NF<6 || $2!~/^[1-9][0-9]*$/ || $3!~/^[0-9]+$/ || $4!~/^[1-9][0-9]*$/ || length($2)>15 || length($3)>15 || length($4)>15 || ($3+0)+($4+0)>($2+0)) exit 1; value=$4; next}
-      END {if (NR!=2 || value=="") exit 1; print value}')" ||
-     ! [[ "$available_kb" =~ ^[1-9][0-9]{0,14}$ && "$available_inodes" =~ ^[1-9][0-9]{0,14}$ ]]; then
-    disk_capacity_failure; return 1
-  fi
-  if ! finished="$(date +%s)" || ! [[ "$finished" =~ ^[1-9][0-9]{0,11}$ ]] ||
-     [ "$finished" -lt "$started" ] || [ "$((finished - started))" -gt 15 ] ||
-     [ "$available_kb" -lt "$required_kb" ] || [ "$available_inodes" -lt "$required_inodes" ]; then
-    disk_capacity_failure; return 1
-  fi
+  echo "ERROR: worker disk-capacity admission failed; inspect the private capacity receipt." >&2 || true
+  return 1
 }
 
 finish_worker_rollout_guard() {
@@ -355,7 +344,7 @@ begin_worker_rollout_guard() {
   mkfifo "$WORKER_ROLLOUT_GUARD_DIR/control"
   exec 8<>"$WORKER_ROLLOUT_GUARD_DIR/control"
   local guardian
-  guardian="$(declare -f worker_host_disk_capacity_preflight worker_rollout_guard)"$'\n''worker_rollout_guard "$@"'
+  guardian="$(declare -f worker_disk_capacity_observe worker_disk_capacity_json worker_host_disk_capacity_preflight worker_rollout_guard)"$'\n''worker_rollout_guard "$@"'
   ssh "${SSH_OPTS[@]}" -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 deploy@"$HOST" \
     "$(remote_env_assignment DEPLOY_MODE "${DEPLOY_MODE:-routine}")" \
     "$(remote_env_assignment WORKER_BLUE_GREEN_MIN_FREE_DISK_MB "${WORKER_BLUE_GREEN_MIN_FREE_DISK_MB:-10240}")" \
@@ -1119,7 +1108,7 @@ fi
 
 worker_disk_preflight_function=""
 if [ "$ROLE" = worker ]; then
-  worker_disk_preflight_function="$(declare -f worker_host_disk_capacity_preflight)"
+  worker_disk_preflight_function="$(declare -f worker_disk_capacity_observe worker_disk_capacity_json worker_host_disk_capacity_preflight)"
 fi
 
 ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
@@ -2604,18 +2593,43 @@ SELECT COUNT(*) FROM endpoint_blockers;"
         ;;
     esac
 
+    local preserve_worker_images=0
+    if [ "$role" = worker ]; then
+      preserve_worker_images=1
+    else
+      # App and worker roles may share a Docker daemon. Check both kinds of
+      # ownership before container pruning can erase their last references.
+      local worker_containers executor_containers
+      if ! worker_containers="$(docker ps -aq --filter label=com.docker.compose.service=worker)" ||
+         ! executor_containers="$(docker ps -aq --filter label=com.143.role=session-executor)"; then
+        echo "WARNING: cannot verify Docker worker ownership; skipping deploy prune." >&2
+        return 0
+      fi
+      if [ -n "$worker_containers" ] || [ -n "$executor_containers" ]; then
+        preserve_worker_images=1
+      fi
+    fi
+
     local prune_until="${DOCKER_PRUNE_UNTIL:-24h}"
     echo "Pruning unused Docker resources older than $prune_until..."
     # The preview reconciler owns these containers and their anonymous data.
     # Preserve ownership metadata until it has checked persisted liveness;
     # generic container prune would strand the volumes without that metadata.
-    if [ "$role" = worker ] && [ "${DEPLOY_MODE:-routine}" = routine ]; then
+    if [ "$preserve_worker_images" = 1 ] && { [ "$role" = app ] || [ "${DEPLOY_MODE:-routine}" = routine ]; }; then
       # Stopped generations and their logs are part of the rollout receipt.
       echo "Preserving stopped worker containers during routine deployment."
     else
       docker container prune -f --filter "until=$prune_until" --filter "label!=com.143.preview.infrastructure" || echo "WARNING: docker container prune failed; continuing."
     fi
-    docker image prune -af --filter "until=$prune_until" || echo "WARNING: docker image prune failed; continuing."
+    if [ "$preserve_worker_images" = 1 ]; then
+      # Terminal executor GC can remove the last container reference to an
+      # image. Generic prune does not honor worker_image_retention or rollback
+      # policy, including digest-only images, so preserve worker images until
+      # an image collector checks those protected references explicitly.
+      echo "Preserving worker images; generic prune cannot enforce image retention."
+    else
+      docker image prune -af --filter "until=$prune_until" || echo "WARNING: docker image prune failed; continuing."
+    fi
     docker builder prune -af --filter "until=$prune_until" || echo "WARNING: docker builder prune failed; continuing."
     if [ "$role" = "worker" ] && [ -n "${IMAGE_TAG:-}" ]; then
       # worker-deployctl release-retained-images clears expired DB retention records.

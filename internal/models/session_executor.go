@@ -95,3 +95,29 @@ type CreateSessionExecutorParams struct {
 	BuildSHA          string
 	RuntimeDeadlineAt *time.Time
 }
+
+// SessionExecutorIdentity pairs an executor with its tenant for host-local
+// retention lookups. Executor IDs alone never establish tenant ownership.
+type SessionExecutorIdentity struct {
+	OrgID uuid.UUID
+	ID    uuid.UUID
+}
+
+// SessionExecutorContainerRetention is the durable identity and terminal
+// evidence used to remove an exited executor container without removing its
+// volumes, image, or any of its session's other resources.
+type SessionExecutorContainerRetention struct {
+	ID             uuid.UUID             `db:"id"`
+	OrgID          uuid.UUID             `db:"org_id"`
+	SessionID      uuid.UUID             `db:"session_id"`
+	ThreadID       *uuid.UUID            `db:"thread_id"`
+	JobID          uuid.UUID             `db:"job_id"`
+	JobType        string                `db:"job_type"`
+	HostNodeID     string                `db:"host_node_id"`
+	ContainerID    string                `db:"container_id"`
+	Image          string                `db:"image"`
+	BuildSHA       string                `db:"build_sha"`
+	Status         SessionExecutorStatus `db:"status"`
+	CompletedAt    time.Time             `db:"completed_at"`
+	LeaseExpiresAt *time.Time            `db:"lease_expires_at"`
+}

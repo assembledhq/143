@@ -889,6 +889,9 @@ func main() {
 		if workerServices != nil && workerServices.SandboxGC != nil {
 			go workerServices.SandboxGC.Run(ctx)
 		}
+		if workerServices != nil && workerServices.ExecutorContainerGC != nil {
+			go workerServices.ExecutorContainerGC.Run(ctx)
+		}
 
 		// Upload reaper: clean up old uploaded files (local mode only; use S3 lifecycle rules for S3).
 		uploadStore := storage.NewFileUploadStore(cfg.UploadStorageDir, "")
@@ -1373,6 +1376,26 @@ func configureSessionExecutorDispatch(
 		ResolveRuntimeCeiling: svc.Orchestrator.ResolveAbsoluteRuntimeCeiling,
 		Logger:                logger,
 	}
+}
+
+func configureExecutorContainerGC(svc *worker.Services, cfg *config.Config, pool *pgxpool.Pool, dockerCli *dockerclient.Client, logger zerolog.Logger) error {
+	if svc == nil || cfg == nil || cfg.SessionExecutorGCInterval <= 0 {
+		return nil
+	}
+	if pool == nil || dockerCli == nil {
+		return fmt.Errorf("executor container retention requires Docker and database clients")
+	}
+	gc, err := worker.NewExecutorContainerGC(dockerCli, db.NewSessionExecutorStore(pool), worker.ExecutorContainerGCConfig{
+		Interval:  cfg.SessionExecutorGCInterval,
+		Retention: cfg.SessionExecutorRetention,
+		BatchSize: cfg.SessionExecutorGCBatchSize,
+		Timeout:   cfg.SessionExecutorGCTimeout,
+	}, logger)
+	if err != nil {
+		return fmt.Errorf("configure executor container retention: %w", err)
+	}
+	svc.ExecutorContainerGC = gc
+	return nil
 }
 
 func sessionExecutorBinds(extraBinds []string) []string {
@@ -2064,6 +2087,9 @@ func buildServices(
 	})
 	svc.PagerDutyWrites = pagerDutyWritebacks
 	configureSessionExecutorDispatch(svc, cfg, pool, dockerCli, jobStore, logger)
+	if err := configureExecutorContainerGC(svc, cfg, pool, dockerCli, logger); err != nil {
+		return nil, err
+	}
 
 	// Linear inbound-agent worker wiring. The process-wide
 	// LINEAR_AGENT_ENABLED flag gates the webhook dispatcher, not the

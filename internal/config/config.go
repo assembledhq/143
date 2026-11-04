@@ -92,6 +92,13 @@ type Config struct {
 	// containers. Routine deploys should not stop active executors, but this
 	// keeps maintenance/emergency stops aligned with runtime policy.
 	SessionExecutorStopTimeout time.Duration `env:"SESSION_EXECUTOR_STOP_TIMEOUT" envDefault:"2h"`
+	// SessionExecutorGCInterval schedules host-local cleanup of old, stopped
+	// executor containers with matching terminal database ownership. Zero disables
+	// cleanup. Images, volumes, and worker generations are always preserved.
+	SessionExecutorGCInterval  time.Duration `env:"SESSION_EXECUTOR_GC_INTERVAL" envDefault:"5m"`
+	SessionExecutorRetention   time.Duration `env:"SESSION_EXECUTOR_RETENTION" envDefault:"24h"`
+	SessionExecutorGCBatchSize int           `env:"SESSION_EXECUTOR_GC_BATCH_SIZE" envDefault:"100"`
+	SessionExecutorGCTimeout   time.Duration `env:"SESSION_EXECUTOR_GC_TIMEOUT" envDefault:"30s"`
 	// WorkerDrainTimeout is how long graceful shutdown waits for in-flight
 	// worker jobs to finish before cancelling the worker context. Coding
 	// turns routinely run 5–15 minutes (per-org cap is even higher), so a
