@@ -473,6 +473,9 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		if err != nil {
 			return err
 		}
+		if input.ExplicitRequest {
+			input.RequestContext = bindSizeLimitOverrideToComparison(input.RequestContext, snapshot)
+		}
 		// Automated updates move the target but preserve a pending explicit request.
 		if pending.Input.ExplicitRequest && !input.ExplicitRequest {
 			input.ExplicitRequest = true
@@ -488,7 +491,6 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 			mode = pending.Mode
 			force = force || pending.Force
 		}
-		input.RequestContext = bindSizeLimitOverrideToHead(input.RequestContext, snapshot.HeadSHA)
 		if !input.ExplicitRequest && (pending.Mode == models.CodeReviewReviewNow || pending.Mode == models.CodeReviewRecheck || pending.Mode == models.CodeReviewForceFresh) {
 			mode = pending.Mode
 		}
@@ -926,7 +928,7 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 			return wait(at)
 		}
 		in := intent.Input
-		requested := ReviewRequestedInput{OrgID: in.OrgID, RepositoryID: in.RepositoryID, PullRequestID: in.PullRequestID, GitHubRepo: in.GitHubRepo, GitHubPRNumber: in.GitHubPRNumber, GitHubPRURL: in.GitHubPRURL, PullRequestTitle: in.PullRequestTitle, PullRequestAuthor: in.PullRequestAuthor, BaseSHA: in.BaseSHA, HeadSHA: in.HeadSHA, FromFork: in.FromFork, RequestedLogin: in.RequestedReviewerLogin, RequestedTeam: in.RequestedTeamSlug, RequestContext: in.RequestContext, DeliveryID: in.GitHubDeliveryID}
+		requested := ReviewRequestedInput{OrgID: in.OrgID, RepositoryID: in.RepositoryID, PullRequestID: in.PullRequestID, GitHubRepo: in.GitHubRepo, GitHubPRNumber: in.GitHubPRNumber, GitHubPRURL: in.GitHubPRURL, PullRequestTitle: in.PullRequestTitle, PullRequestAuthor: in.PullRequestAuthor, BaseSHA: in.BaseSHA, BaseRef: current.BaseRef, HeadSHA: in.HeadSHA, FromFork: in.FromFork, RequestedLogin: in.RequestedReviewerLogin, RequestedTeam: in.RequestedTeamSlug, RequestContext: in.RequestContext, DeliveryID: in.GitHubDeliveryID}
 		source := in.TriggerSource
 		if source == "" {
 			source = models.CodeReviewTriggerSourceAutoPolicy

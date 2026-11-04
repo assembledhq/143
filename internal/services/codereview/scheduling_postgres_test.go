@@ -353,7 +353,16 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"single connection snapshot after lock wait", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testSchedulingSingleConnection(t, p, org, repo, pr, snapshot, "wait")
 		}},
-		{"size limit override stays bound when a push retargets the request", testSchedulingSizeLimitOverrideHeadBinding},
+		{"size limit override stays bound when a push retargets the request", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingSizeLimitOverrideBinding(t, p, org, repo, pr, snapshot, func(s *ghservice.CodeReviewPullRequestSnapshot) { s.HeadSHA = strings.Repeat("c", 40) })
+		}},
+		{"size limit override stays bound when the base SHA changes", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingSizeLimitOverrideBinding(t, p, org, repo, pr, snapshot, func(s *ghservice.CodeReviewPullRequestSnapshot) { s.BaseSHA = strings.Repeat("c", 40) })
+		}},
+		{"size limit override stays bound when the base ref changes", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testSchedulingSizeLimitOverrideBinding(t, p, org, repo, pr, snapshot, func(s *ghservice.CodeReviewPullRequestSnapshot) { s.BaseRef = "release" })
+		}},
+		{"size limit override expires when a retry changes the base ref", testSchedulingSizeLimitOverrideRetry},
 		{"snapshot preparation outage preserves pending intent", testSchedulingPreparationRecovery},
 		{"snapshot preparation outage preserves replay and terminal paths", testSchedulingPreparationFastPaths},
 		{"single connection validation", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
@@ -1099,31 +1108,82 @@ func testSchedulingSingleConnection(t *testing.T, adminPool *pgxpool.Pool, org, 
 	require.NoError(t, err, "scheduling path cannot reacquire its transaction's saturated pool")
 }
 
-func testSchedulingSizeLimitOverrideHeadBinding(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+func testSchedulingSizeLimitOverrideBinding(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture, retarget func(*ghservice.CodeReviewPullRequestSnapshot)) {
 	ctx := context.Background()
-	service, _, _ := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
-	snapshot.Lock()
-	confirmedHead := snapshot.snapshot.HeadSHA
-	snapshot.Unlock()
-	requested, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow, OverrideSizeLimits: true})
+	service, claim, oldSessionID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	original, err := snapshot.GetCodeReviewPullRequestSnapshot(ctx, org, repo, 17)
+	require.NoError(t, err, "read the comparison before the override request")
+	const reason = "Review the generated changes."
+	bound := &ReviewRequestContext{Source: "ui", Body: reason, OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: original.HeadSHA, OverrideSizeLimitsBaseSHA: original.BaseSHA, OverrideSizeLimitsBaseRef: original.BaseRef}
+	requested, err := service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow, Reason: reason, OverrideSizeLimits: true})
 	require.NoError(t, err, "the override request should be accepted")
 	require.NotNil(t, requested.Schedule.PendingInput, "the override request should wait as pending intent")
 	var pending scheduledReviewIntent
 	require.NoError(t, json.Unmarshal(requested.Schedule.PendingInput, &pending), "pending intent should decode")
-	require.NotNil(t, pending.Input.RequestContext, "pending intent should keep the override context")
-	require.Equal(t, confirmedHead, pending.Input.RequestContext.OverrideSizeLimitsHeadSHA, "the override should bind to the head the request observed")
+	require.Equal(t, bound, pending.Input.RequestContext, "the override should bind to the comparison the request observed")
 
-	snapshot.Lock()
-	snapshot.snapshot.HeadSHA = "pushed-after-confirmation"
-	snapshot.Unlock()
+	snapshot.update(retarget)
+	current, err := snapshot.GetCodeReviewPullRequestSnapshot(ctx, org, repo, 17)
+	require.NoError(t, err, "read the changed comparison")
 	_, err = service.QueueReviewChanged(ctx, ReviewChangedInput{OrgID: org, RepositoryID: repo, PullRequestID: pr})
-	require.NoError(t, err, "the push should retarget the pending request")
+	require.NoError(t, err, "the revision change should retarget the pending request")
 	retargeted, err := service.GetSchedule(ctx, org, pr)
 	require.NoError(t, err, "read the retargeted schedule")
+	require.Equal(t, []string{current.HeadSHA, current.BaseSHA, current.BaseRef}, []string{retargeted.HeadSHA, retargeted.BaseSHA, retargeted.BaseRef}, "the pending request should move to the new comparison")
+	pending = scheduledReviewIntent{}
 	require.NoError(t, json.Unmarshal(retargeted.PendingInput, &pending), "retargeted intent should decode")
-	require.Equal(t, "pushed-after-confirmation", pending.Input.HeadSHA, "the pending request should move to the pushed head")
-	require.NotNil(t, pending.Input.RequestContext, "the retargeted request should keep its context")
-	require.Equal(t, confirmedHead, pending.Input.RequestContext.OverrideSizeLimitsHeadSHA, "the push must not move the override to the new head")
+	require.Equal(t, bound, pending.Input.RequestContext, "a change must not rebind the override")
+
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2 AND payload->>'session_id'=$3`, org, models.JobTypeRunCodeReview, oldSessionID.String())
+	require.NoError(t, err, "finish the original review job")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "dispatch the pending request on the new comparison")
+	latest, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read the dispatched review")
+	require.NotEqual(t, oldSessionID, latest.SessionID, "the changed comparison requires a replacement review")
+	requireScheduledSizeLimitOverrideContext(t, pool, org, latest.SessionID, &ReviewRequestContext{Source: "ui", Body: reason})
+}
+
+func testSchedulingSizeLimitOverrideRetry(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+	ctx := context.Background()
+	service, claim, originalSessionID := schedulingLifecycleService(t, pool, org, repo, pr, snapshot)
+	_, err := pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='completed' WHERE org_id=$1 AND session_id=$2`, org, originalSessionID)
+	require.NoError(t, err, "complete the ordinary review")
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+	require.NoError(t, err, "finish the ordinary review job")
+
+	const reason = "Review the generated changes."
+	_, err = service.RequestScheduledReview(ctx, ScheduleRequestInput{OrgID: org, PullRequestID: pr, RequestID: uuid.New(), Mode: models.CodeReviewReviewNow, Reason: reason, OverrideSizeLimits: true})
+	require.NoError(t, err, "request a review with the override")
+	require.NoError(t, service.ReconcileSchedule(claim(), models.CodeReviewScheduleWake{OrgID: org, PullRequestID: pr}), "dispatch the override on the unchanged comparison")
+	source, err := db.NewCodeReviewStore(pool).GetLatestByPullRequest(ctx, org, pr)
+	require.NoError(t, err, "read the override review")
+	require.NotEqual(t, originalSessionID, source.SessionID, "an override request should start a fresh review")
+	original, err := snapshot.GetCodeReviewPullRequestSnapshot(ctx, org, repo, 17)
+	require.NoError(t, err, "read the original comparison")
+	bound := &ReviewRequestContext{Source: "ui", Body: reason, OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: original.HeadSHA, OverrideSizeLimitsBaseSHA: original.BaseSHA, OverrideSizeLimitsBaseRef: original.BaseRef}
+	requireScheduledSizeLimitOverrideContext(t, pool, org, source.SessionID, bound)
+
+	_, err = pool.Exec(ctx, `UPDATE code_review_session_metadata SET status='failed',retryable_failure=true WHERE org_id=$1 AND session_id=$2`, org, source.SessionID)
+	require.NoError(t, err, "make the override review retryable")
+	_, err = pool.Exec(ctx, `UPDATE jobs SET status='succeeded' WHERE org_id=$1 AND job_type=$2`, org, models.JobTypeRunCodeReview)
+	require.NoError(t, err, "finish the override review job")
+	service.SetRetryDependencies(db.NewPullRequestStore(pool), &pullRequestSyncerStub{})
+	snapshot.update(func(s *ghservice.CodeReviewPullRequestSnapshot) { s.BaseRef = "release" })
+	retried, err := service.RetryReview(ctx, RetryReviewInput{OrgID: org, SessionID: source.SessionID})
+	require.NoError(t, err, "retry the review on the new base branch")
+	require.NotEqual(t, source.SessionID, retried.SessionID, "the retry should allocate a replacement review")
+	requireScheduledSizeLimitOverrideContext(t, pool, org, retried.SessionID, &ReviewRequestContext{Source: "ui", Body: reason})
+}
+
+func requireScheduledSizeLimitOverrideContext(t *testing.T, pool *pgxpool.Pool, org, sessionID uuid.UUID, expected *ReviewRequestContext) {
+	t.Helper()
+	ctx := context.Background()
+	session, err := db.NewSessionStore(pool).GetByID(ctx, org, sessionID)
+	require.NoError(t, err, "load persisted request context")
+	require.Equal(t, expected, codeReviewRevisionRequestContext(session.RevisionContext), "the persisted request context must reflect the comparison")
+	var payload RunCodeReviewJobPayload
+	require.NoError(t, pool.QueryRow(ctx, `SELECT payload FROM jobs WHERE org_id=$1 AND job_type=$2 AND payload->>'session_id'=$3`, org, models.JobTypeRunCodeReview, sessionID.String()).Scan(&payload), "read the worker payload")
+	require.Equal(t, expected, payload.RequestContext, "the worker must receive the comparison-scoped request context")
 }
 
 func testSchedulingPreparationRecovery(t *testing.T, pool *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {

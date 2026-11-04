@@ -135,6 +135,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		if job.OrgID == uuid.Nil || job.SessionID == uuid.Nil {
 			return fmt.Errorf("org_id and session_id are required")
 		}
+		if job.RequestContext != nil && job.RequestContext.OverrideSizeLimits && !codeReviewCanValidateOverrideScope(services) {
+			job.RequestContext.OverrideSizeLimits = false
+		}
 		reviewLog := codeReviewTimingLogger(ctx, logger, job)
 		defer func() {
 			phase := "freshness"
@@ -369,7 +372,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			enqueueCodeReviewStatusCommentSync(ctx, stores, services, logger, job, "terminal")
 			return nil
 		}
-		stableRisk := codeReviewStableDeterministicRisk(policy.Config(), job, pr, changedFiles, changedFilesAvailable)
+		stableRisk := codeReviewStableDeterministicRisk(policy.Config(), job, pr, health, changedFiles, changedFilesAvailable)
 		if !stableRisk.Acceptable && metadata.FinalReviewBody == nil {
 			provisionalBody := models.BuildCodeReviewProvisionalBody(models.CodeReviewFinalReviewInput{
 				RiskReasons:       stableRisk.ReasonDetails,
@@ -417,6 +420,9 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			}
 			if codeReviewHeadChanged(job.HeadSHA, pr, health) {
 				return supersedeCodeReviewForChangedHead(ctx, stores, services, logger, job, pr, health, "PR head changed before deterministic early-stop decision")
+			}
+			if len(stableRisk.OverriddenSizeLimits) > 0 && !codeReviewOverrideSizeLimits(job, pr, health) {
+				stableRisk = codeReviewStableDeterministicRisk(policy.Config(), job, pr, health, changedFiles, changedFilesAvailable)
 			}
 			return completeCodeReviewAfterStableDeterministicFailure(ctx, stores, services, logger, job, metadata, policy.Config(), pr, changedFiles, stableRisk, assessment)
 		}
@@ -1095,6 +1101,15 @@ func syncCodeReviewPullRequestState(ctx context.Context, services *Services, log
 		return err
 	}
 	return refreshCodeReviewPullRequestState(ctx, services, logger, job)
+}
+
+func codeReviewCanValidateOverrideScope(services *Services) bool {
+	if services == nil {
+		return false
+	}
+	scheduler, scheduled := services.CodeReviewLifecycle.(codeReviewScheduler)
+	_, validates := services.CodeReviewLifecycle.(codeReviewExecutionValidator)
+	return scheduled && validates && scheduler.SchedulingEnabled()
 }
 
 func validateCodeReviewScheduledExecution(ctx context.Context, services *Services, job runCodeReviewPayload) error {
@@ -2065,7 +2080,7 @@ func codeReviewPromptRiskReasons(job runCodeReviewPayload, pr models.PullRequest
 		Author:               codeReviewAuthor(job, pr),
 		AuthorClass:          codeReviewAuthorClass(pr),
 		AuthorTeams:          job.PullRequestAuthorTeams,
-		OverrideSizeLimits:   codeReviewOverrideSizeLimits(job),
+		OverrideSizeLimits:   codeReviewOverrideSizeLimits(job, pr, health),
 		FromFork:             job.FromFork,
 		ContextFetchFailed:   health == nil,
 		HeadSHAChanged:       codeReviewHeadChanged(job.HeadSHA, pr, health),
@@ -3747,7 +3762,7 @@ type liveCodeReviewOutcomeInput struct {
 	AssessedAt            time.Time
 }
 
-func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job runCodeReviewPayload, pr models.PullRequest, changedFiles []codereviewsvc.PullRequestFile, changedFilesAvailable bool) models.CodeReviewRiskEvaluation {
+func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, changedFiles []codereviewsvc.PullRequestFile, changedFilesAvailable bool) models.CodeReviewRiskEvaluation {
 	if !changedFilesAvailable {
 		return models.CodeReviewRiskEvaluation{Acceptable: true}
 	}
@@ -3768,7 +3783,7 @@ func codeReviewStableDeterministicRisk(policy models.CodeReviewPolicyConfig, job
 		Author:                codeReviewAuthor(job, pr),
 		AuthorClass:           codeReviewAuthorClass(pr),
 		AuthorTeams:           job.PullRequestAuthorTeams,
-		OverrideSizeLimits:    codeReviewOverrideSizeLimits(job),
+		OverrideSizeLimits:    codeReviewOverrideSizeLimits(job, pr, health),
 		FromFork:              job.FromFork,
 	})
 	stable := models.CodeReviewRiskEvaluation{Acceptable: true, OverriddenSizeLimits: evaluated.OverriddenSizeLimits}
@@ -3935,7 +3950,7 @@ func evaluateLiveCodeReviewOutcome(input liveCodeReviewOutcomeInput) (models.Cod
 		Author:                codeReviewAuthor(input.Job, input.PullRequest),
 		AuthorClass:           codeReviewAuthorClass(input.PullRequest),
 		AuthorTeams:           input.Job.PullRequestAuthorTeams,
-		OverrideSizeLimits:    codeReviewOverrideSizeLimits(input.Job),
+		OverrideSizeLimits:    codeReviewOverrideSizeLimits(input.Job, input.PullRequest, input.Health),
 		FromFork:              input.Job.FromFork,
 		ContextFetchFailed:    input.Health == nil || !input.ChangedFilesAvailable,
 		HeadSHAChanged:        codeReviewHeadChanged(input.Job.HeadSHA, input.PullRequest, input.Health),

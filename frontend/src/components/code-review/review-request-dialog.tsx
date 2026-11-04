@@ -107,7 +107,7 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
             <Checkbox id="override-size-limits" className="mt-0.5" checked={overrideSizeLimits} onCheckedChange={(checked) => { setOverrideSizeLimits(checked === true); requestID.current = null; }} />
             <div className="space-y-1">
               <Label htmlFor="override-size-limits">Override size limits for this review</Label>
-              <p className="text-xs text-muted-foreground">143 can approve this pull request even if it exceeds the policy&apos;s files, additions, or deletions limits. Every other safeguard still applies, and the review names the exceeded limits. A later push applies the limits again.</p>
+              <p className="text-xs text-muted-foreground">143 can approve this pull request even if it exceeds the policy&apos;s files, additions, or deletions limits. Every other safeguard still applies, and the review names the exceeded limits. The size limits apply again if the head or base changes.</p>
             </div>
           </div> : null}
           {unavailable && !loading && !error ? <p role="status" className="text-sm text-muted-foreground">{unavailable}</p> : null}

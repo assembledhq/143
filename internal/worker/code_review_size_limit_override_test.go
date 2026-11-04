@@ -12,21 +12,38 @@ import (
 func TestCodeReviewOverrideSizeLimits(t *testing.T) {
 	t.Parallel()
 
+	request := codereviewsvc.ReviewRequestContext{
+		OverrideSizeLimits:        true,
+		OverrideSizeLimitsHeadSHA: "head",
+		OverrideSizeLimitsBaseSHA: "base",
+		OverrideSizeLimitsBaseRef: "main",
+	}
 	tests := []struct {
-		name     string
-		context  *codereviewsvc.ReviewRequestContext
-		expected bool
+		name       string
+		context    *codereviewsvc.ReviewRequestContext
+		headSHA    string
+		prBase     string
+		healthBase string
+		expected   bool
 	}{
-		{name: "automatic review has no request context"},
-		{name: "plain request does not opt in", context: &codereviewsvc.ReviewRequestContext{Body: "Please look again."}},
-		{name: "override without a bound head stays off", context: &codereviewsvc.ReviewRequestContext{OverrideSizeLimits: true}},
-		{name: "override bound to an older head stays off", context: &codereviewsvc.ReviewRequestContext{OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "old-head"}},
-		{name: "override bound to the reviewed head applies", context: &codereviewsvc.ReviewRequestContext{OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head"}, expected: true},
+		{name: "automatic review has no request context", headSHA: "head", prBase: "base"},
+		{name: "plain request does not opt in", context: &codereviewsvc.ReviewRequestContext{Body: "Please look again."}, headSHA: "head", prBase: "base"},
+		{name: "unbound override stays off", context: &codereviewsvc.ReviewRequestContext{OverrideSizeLimits: true}, headSHA: "head", prBase: "base"},
+		{name: "legacy head-only override stays off", context: &codereviewsvc.ReviewRequestContext{OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head"}, headSHA: "head", prBase: "base"},
+		{name: "head changed", context: &request, headSHA: "new-head", prBase: "base"},
+		{name: "PR base changed", context: &request, headSHA: "head", prBase: "new-base", healthBase: "base"},
+		{name: "health base changed", context: &request, headSHA: "head", prBase: "base", healthBase: "new-base"},
+		{name: "base unknown", context: &request, headSHA: "head"},
+		{name: "base available from health", context: &request, headSHA: "head", healthBase: "base", expected: true},
+		{name: "original commits match", context: &request, headSHA: "head", prBase: "base", expected: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.expected, codeReviewOverrideSizeLimits(runCodeReviewPayload{HeadSHA: "head", RequestContext: tt.context}), "the override should apply only to the head it was requested on")
+			job := runCodeReviewPayload{HeadSHA: tt.headSHA, RequestContext: tt.context}
+			pr := models.PullRequest{BaseSHA: &tt.prBase}
+			health := &models.PullRequestHealthResponse{BaseSHA: tt.healthBase}
+			require.Equal(t, tt.expected, codeReviewOverrideSizeLimits(job, pr, health), "the override should require the original comparison commits and a bound base branch")
 		})
 	}
 }
@@ -39,8 +56,9 @@ func TestCodeReviewStableFailureReviewBodyDisclosesOverriddenLimits(t *testing.T
 	policy.RiskPolicy.AllowSizeLimitOverride = true
 	policy.RiskPolicy.BlockedPathPatterns = []string{"migrations/**"}
 	changedFiles := []codereviewsvc.PullRequestFile{{Filename: "migrations/1.sql", Additions: 101}}
-	job := runCodeReviewPayload{SessionID: uuid.New(), HeadSHA: "head", RequestContext: &codereviewsvc.ReviewRequestContext{OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head"}}
-	risk := codeReviewStableDeterministicRisk(policy, job, models.PullRequest{}, changedFiles, true)
+	job := runCodeReviewPayload{SessionID: uuid.New(), HeadSHA: "head", RequestContext: &codereviewsvc.ReviewRequestContext{OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head", OverrideSizeLimitsBaseSHA: "base", OverrideSizeLimitsBaseRef: "main"}}
+	base := "base"
+	risk := codeReviewStableDeterministicRisk(policy, job, models.PullRequest{BaseSHA: &base}, nil, changedFiles, true)
 	require.Equal(t, []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonBlockedPath, Subject: "migrations/1.sql"}}, risk.ReasonDetails, "the blocked path should be the remaining stable blocker")
 
 	decision := models.EvaluateCodeReviewDecision(policy, risk)

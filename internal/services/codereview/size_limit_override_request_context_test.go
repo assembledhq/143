@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/stretchr/testify/require"
 )
 
@@ -45,9 +46,10 @@ func TestNormalizeReviewRequestContextKeepsSizeLimitOverride(t *testing.T) {
 		"the opt-in should survive persistence and job dispatch")
 }
 
-func TestBindSizeLimitOverrideToHead(t *testing.T) {
+func TestBindSizeLimitOverrideToComparison(t *testing.T) {
 	t.Parallel()
 
+	snapshot := ghservice.CodeReviewPullRequestSnapshot{HeadSHA: " head ", BaseSHA: " base ", BaseRef: " Main "}
 	tests := []struct {
 		name     string
 		input    *ReviewRequestContext
@@ -56,29 +58,69 @@ func TestBindSizeLimitOverrideToHead(t *testing.T) {
 		{name: "no request context"},
 		{name: "plain request stays unbound", input: &ReviewRequestContext{Body: "Look again."}, expected: &ReviewRequestContext{Body: "Look again."}},
 		{
-			name:     "new override binds to the observed head",
+			name:     "new override binds to the observed comparison",
 			input:    &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true},
-			expected: &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "new-head"},
+			expected: &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head", OverrideSizeLimitsBaseSHA: "base", OverrideSizeLimitsBaseRef: "Main"},
 		},
 		{
-			name:     "retargeted override keeps its original head",
-			input:    &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "confirmed-head"},
-			expected: &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "confirmed-head"},
+			name:     "retargeted override keeps its original comparison",
+			input:    &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "original-head", OverrideSizeLimitsBaseSHA: "original-base", OverrideSizeLimitsBaseRef: "original-ref"},
+			expected: &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "original-head", OverrideSizeLimitsBaseSHA: "original-base", OverrideSizeLimitsBaseRef: "original-ref"},
+		},
+		{
+			name:     "legacy override does not bind to the new base",
+			input:    &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head"},
+			expected: &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.expected, bindSizeLimitOverrideToHead(tt.input, "new-head"), "an override should stay bound to the head it was requested on")
+			require.Equal(t, tt.expected, bindSizeLimitOverrideToComparison(tt.input, snapshot), "an override should stay bound to the comparison it was requested on")
 		})
 	}
 }
 
-func TestNormalizeReviewRequestContextKeepsSizeLimitOverrideHead(t *testing.T) {
+func TestReviewRequestContextForComparison(t *testing.T) {
 	t.Parallel()
 
-	input := &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: " head "}
-	require.Equal(t, "head", normalizeReviewRequestContext(input).OverrideSizeLimitsHeadSHA, "the bound head should survive persistence and job dispatch")
+	bound := ReviewRequestContext{Source: "ui", Body: "Look again.", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head", OverrideSizeLimitsBaseSHA: "base", OverrideSizeLimitsBaseRef: "Main"}
+	plain := ReviewRequestContext{Source: "ui", Body: "Look again."}
+	tests := []struct {
+		name     string
+		head     string
+		base     string
+		baseRef  string
+		expected ReviewRequestContext
+	}{
+		{name: "exact comparison preserves override", head: " HEAD ", base: " BASE ", baseRef: " Main ", expected: bound},
+		{name: "new head", head: "new-head", base: "base", baseRef: "Main", expected: plain},
+		{name: "new base SHA", head: "head", base: "new-base", baseRef: "Main", expected: plain},
+		{name: "new base ref", head: "head", base: "base", baseRef: "main", expected: plain},
+		{name: "unavailable base ref", head: "head", base: "base", expected: plain},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, &tt.expected, reviewRequestContextForComparison(&bound, tt.head, tt.base, tt.baseRef), "dispatch must keep the reason and enforce the full override scope")
+			require.True(t, bound.OverrideSizeLimits, "dispatch must not mutate the original intent")
+		})
+	}
+}
+
+func TestReviewRequestContextForComparisonDiscardsHeadOnlyOverride(t *testing.T) {
+	t.Parallel()
+
+	input := &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head"}
+	require.Nil(t, reviewRequestContextForComparison(input, "head", "base", "main"), "a legacy head-only override cannot waive the limits")
+}
+
+func TestNormalizeReviewRequestContextKeepsSizeLimitOverrideComparison(t *testing.T) {
+	t.Parallel()
+
+	input := &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: " head ", OverrideSizeLimitsBaseSHA: " base ", OverrideSizeLimitsBaseRef: " Main "}
+	expected := &ReviewRequestContext{Source: "ui", OverrideSizeLimits: true, OverrideSizeLimitsHeadSHA: "head", OverrideSizeLimitsBaseSHA: "base", OverrideSizeLimitsBaseRef: "Main"}
+	require.Equal(t, expected, normalizeReviewRequestContext(input), "the bound comparison should survive persistence and job dispatch")
 }
 
 func TestReviewRequestHashSeparatesSizeLimitOverride(t *testing.T) {
