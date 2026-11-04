@@ -4577,6 +4577,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		defer func() { turnStage.End(observability.StageOutcome(ctx, returnErr)) }()
 	}
 
+	startupTiming := beginReviewStartupTiming(reviewTiming, log)
+	defer func() { startupTiming.finish(ctx, returnErr) }()
+
 	// Hold the continuation at the org's max_concurrent_runs quota. The count
 	// is of executing turns (sessions running with BeginRuntime's deadlines
 	// installed), not of running sessions: ClaimIdle/ClaimForResume mark a
@@ -4939,6 +4942,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
+	startupTiming.advance("review_workspace_liveness")
 	// Liveness / cross-node check on reuse. A recorded container_id only
 	// means "someone (preview, prior turn) wrote it" — it does NOT prove
 	// the container is alive AND on this node's docker daemon. Two cases:
@@ -5172,6 +5176,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			Str("head_sha", expectedHead).
 			Msg("reused code review workspace is ready")
 	}
+	startupTiming.advance("review_resume_auth")
 	var integrationSkills string
 	if session.Origin == models.SessionOriginCodeReview {
 		var skillsErr error
@@ -5287,6 +5292,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 
+	startupTiming.advance("review_workspace_acquire")
 	// Determine sandbox strategy:
 	//   - Reuse: a preview already hydrated the container; attach to it by ID
 	//     and skip both Create and Restore.
@@ -5707,6 +5713,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 
+	startupTiming.advance("review_prompt_setup")
 	// 5. Set up the workspace. Three paths:
 	//   - Reuse: the container is already live (preview hydrated it); just
 	//     re-inject Codex auth and build the resume prompt.
@@ -6019,6 +6026,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 
+	startupTiming.finish(ctx, nil)
 	if err := o.ensureCodeReviewInputs(ctx, session, sandbox); err != nil {
 		if errors.Is(err, ErrSandboxWorkspaceNotReady) {
 			return err

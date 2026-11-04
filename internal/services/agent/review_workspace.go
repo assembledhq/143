@@ -131,7 +131,11 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 		cloneBranch = *session.TargetBranch
 	}
 	cloneStage := observability.BeginStage(true, log, "repository_clone")
-	cloneErr := o.cloneRepositoryForReview(ctx, sandbox, repo.CloneURL, cloneBranch, token)
+	cloneLog := o.logger.With().Str("org_id", session.OrgID.String()).Str("session_id", session.ID.String()).Logger()
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
+		cloneLog = cloneLog.With().Str("job_id", jobID.String()).Logger()
+	}
+	cloneErr := o.cloneRepositoryForReview(cloneLog.WithContext(ctx), sandbox, repo.CloneURL, cloneBranch, token)
 	cloneStage.End(observability.StageOutcome(ctx, cloneErr))
 	if cloneErr != nil {
 		return nil, fmt.Errorf("clone review repository: %w", cloneErr)

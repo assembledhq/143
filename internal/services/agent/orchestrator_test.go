@@ -4362,7 +4362,7 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 				run.Origin = models.SessionOriginCodeReview
 				run.RevisionContext = []byte(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 				d.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, command string, stdout, _ io.Writer) (int, error) {
-					if command == "git rev-parse HEAD" {
+					if command == "git rev-parse HEAD" || (strings.Contains(command, " checkout -B ") && strings.Contains(command, "git rev-parse HEAD")) {
 						_, err := io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 						return 0, err
 					}
@@ -4545,7 +4545,7 @@ func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 			}
 			d := defaultDeps()
 			d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-				if cmd == "git rev-parse HEAD" {
+				if cmd == "git rev-parse HEAD" || (strings.Contains(cmd, " checkout -B ") && strings.Contains(cmd, "git rev-parse HEAD")) {
 					_, err := io.WriteString(stdout, tt.expectedBase+"\n")
 					return 0, err
 				}
@@ -8341,7 +8341,7 @@ func TestReviewInputsGateBeforeAgentExecution(t *testing.T) {
 			}
 			var preparationCalls atomic.Int64
 			dependencies.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, command string, stdout, stderr io.Writer) (int, error) {
-				if command == "git rev-parse HEAD" {
+				if command == "git rev-parse HEAD" || (strings.Contains(command, " checkout -B ") && strings.Contains(command, "git rev-parse HEAD")) {
 					_, err := io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 					return 0, err
 				}
