@@ -108,20 +108,22 @@ func TestPrepareCodeReviewWorkspaceColdCloneMaterializesOnlyCapturedHead(t *test
 		home:                        home, destination: destination,
 	}
 	var logs bytes.Buffer
+	tokens := &reviewConfigGitHubTokens{token: "synthetic-cold-review-token"}
 	o := &Orchestrator{
 		provider: provider, sandboxCapacity: NewSandboxCapacityGate(SandboxCapacityGateConfig{
 			Counter: reviewWorkspaceCapacityCounter{}, MaxActive: 2, Logger: zerolog.Nop(),
 		}),
 		env:          NewAgentEnv(AgentEnvDeps{}),
 		repositories: testInternalRepoStore{repo: models.Repository{FullName: "example/repo", CloneURL: f.remote, DefaultBranch: "main"}},
-		github:       testInternalGitHubTokens{token: "synthetic-cold-review-token"}, logger: zerolog.New(&logs),
+		github:       tokens, logger: zerolog.New(&logs),
 	}
 	session := reviewInputsSession(t, f.base, f.head)
 	branch := "review/captured-head"
 	session.WorkingBranch = &branch
 	sandbox, err := o.PrepareCodeReviewWorkspace(jobctx.WithLockToken(context.Background(), uuid.New()), session, f.head)
 	require.NoError(t, err, "real cold preparation must finish checkout and immutable input preparation")
-	require.Equal(t, []string{"review_inputs_local_prepare", "review_inputs_hydrate"}, reviewInputAttemptStages(t, logs.Bytes()), "new unpublished clones must attempt local preparation before hydration without a warm-cache probe")
+	require.Equal(t, []string{"review_inputs_hydrate"}, reviewInputAttemptStages(t, logs.Bytes()), "new unpublished clones must prepare their inputs in one hydration-capable pass")
+	require.Equal(t, 1, tokens.calls, "clone, checkout, and cold hydration must reuse the same installation token")
 	require.Equal(t, "cold-review", sandbox.ID, "successful cold preparation should transfer its unpublished sandbox")
 	require.Equal(t, 0, provider.genericClones, "cold reviews must use the bounded clone transport")
 	require.Equal(t, []string{".git"}, provider.cloneEntries, "clone must not materialize target-branch worktree files")
@@ -157,4 +159,5 @@ func TestPrepareCodeReviewWorkspaceColdCloneMaterializesOnlyCapturedHead(t *test
 	logs.Reset()
 	require.NoError(t, o.ensureCodeReviewInputs(context.Background(), session, sandbox), "final captured inputs must verify and remain reusable offline")
 	require.Equal(t, []string{"review_inputs_verify"}, reviewInputAttemptStages(t, logs.Bytes()), "reused workspaces must retain complete warm verification without preparation or hydration")
+	require.Equal(t, 1, tokens.calls, "warm reuse must not reacquire the cold installation token")
 }

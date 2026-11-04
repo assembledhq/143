@@ -148,7 +148,7 @@ func (o *Orchestrator) PrepareCodeReviewWorkspace(ctx context.Context, session *
 	if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, cfg.WorkDir, repositoryPreparationMinimalReview, log); err != nil {
 		return nil, fmt.Errorf("prepare review repository: %w", err)
 	}
-	if err := o.prepareColdCodeReviewInputs(ctx, session, sandbox); err != nil {
+	if err := o.prepareColdCodeReviewInputs(ctx, session, sandbox, reviewGitAuthentication{RepoURL: repo.CloneURL, Token: token}); err != nil {
 		return nil, err
 	}
 	// Ownership of a successful sandbox transfers to the caller. Its durable

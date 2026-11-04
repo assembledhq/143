@@ -109,7 +109,9 @@ func BenchmarkReviewWorkspaceColdClone(b *testing.B) {
 						ctx := context.Background()
 						prepareInputs := o.ensureCodeReviewInputs
 						if privateClone {
-							prepareInputs = o.prepareColdCodeReviewInputs
+							prepareInputs = func(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
+								return o.prepareColdCodeReviewInputs(ctx, session, sandbox, reviewGitAuthentication{remote, "synthetic-token"})
+							}
 						}
 						b.StartTimer()
 						started := time.Now()

@@ -236,17 +236,17 @@ with pathlib.Path(str(marker) + ".lock").open("a") as lock:
 `
 
 func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
-	return o.prepareCodeReviewInputs(ctx, session, sandbox, true)
+	return o.prepareCodeReviewInputs(ctx, session, sandbox, true, reviewGitAuthentication{})
 }
 
 // prepareColdCodeReviewInputs is only for a newly cloned, unpublished sandbox.
-// Its immutable input bundle cannot exist yet, so begin with local preparation
-// instead of probing the warm cache. Expired budgets still permit only verification.
-func (o *Orchestrator) prepareColdCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
-	return o.prepareCodeReviewInputs(ctx, session, sandbox, false)
+// Reuse its clone authentication to prepare and hydrate missing evidence in one
+// private attempt. Expired budgets still permit only verification.
+func (o *Orchestrator) prepareColdCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox, auth reviewGitAuthentication) error {
+	return o.prepareCodeReviewInputs(ctx, session, sandbox, false, auth)
 }
 
-func (o *Orchestrator) prepareCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox, verifyExisting bool) (returnErr error) {
+func (o *Orchestrator) prepareCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox, verifyExisting bool, coldAuth reviewGitAuthentication) (returnErr error) {
 	if session == nil || session.Origin != models.SessionOriginCodeReview {
 		return nil
 	}
@@ -310,22 +310,29 @@ func (o *Orchestrator) prepareCodeReviewInputs(ctx context.Context, session *mod
 				return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
 			}
 		}
-		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, false)
-		if err != nil || exit != 42 {
-			if err != nil {
-				return nil, err
+		_, trusted := o.provider.(reviewPreparationTrustedStdinExecutor)
+		_, stdin := o.provider.(reviewPreparationStdinExecutor)
+		token := coldAuth.Token
+		// Only the unpublished cold path can reuse clone credentials, and only
+		// when they still match the repository and can travel over private stdin.
+		if verifyExisting || !(trusted || stdin) || token == "" || coldAuth.RepoURL != repo.CloneURL {
+			exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, false)
+			if err != nil || exit != 42 {
+				if err != nil {
+					return nil, err
+				}
+				return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
 			}
-			return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
-		}
-		if o.github == nil {
-			return nil, fmt.Errorf("code review inputs incomplete: missing commits or merge-base history")
-		}
-		if strings.TrimSpace(repo.CloneURL) == "" {
-			return nil, fmt.Errorf("code review inputs incomplete: repository clone URL unavailable")
-		}
-		token, err := o.github.GetInstallationToken(prepareCtx, repo.InstallationID)
-		if err != nil {
-			return nil, fmt.Errorf("authenticate shared review input preparation: %w", err)
+			if o.github == nil {
+				return nil, fmt.Errorf("code review inputs incomplete: missing commits or merge-base history")
+			}
+			if strings.TrimSpace(repo.CloneURL) == "" {
+				return nil, fmt.Errorf("code review inputs incomplete: repository clone URL unavailable")
+			}
+			token, err = o.github.GetInstallationToken(prepareCtx, repo.InstallationID)
+			if err != nil {
+				return nil, fmt.Errorf("authenticate shared review input preparation: %w", err)
+			}
 		}
 		_, err = o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, token, true, false)
 		if err != nil {
