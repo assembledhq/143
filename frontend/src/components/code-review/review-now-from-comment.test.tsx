@@ -62,6 +62,17 @@ describe("review link from a GitHub comment", () => {
     const expected = override ? { override_size_limits: true, override_review_session_id: sessionID } : {};
     await waitFor(() => expect(bodies).toEqual([{ request_id: expect.any(String), mode: "review_now", ...expected }]));
   });
+  it("toggles the override from its explanatory text", async () => {
+    mockTarget({ allowOverride: true });
+    const user = userEvent.setup();
+    renderLink();
+    const dialog = await screen.findByRole("dialog", { name: "Request full review" });
+    const optIn = await within(dialog).findByRole("checkbox", { name: "Override size limits for this review" });
+
+    expect(optIn).not.toBeChecked();
+    await user.click(within(dialog).getByText(/The override applies only/));
+    expect(optIn).toBeChecked();
+  });
   it("lets the user clear a stale override and deliberately request a plain review", async () => {
     mockTarget({ allowOverride: true });
     const staleMessage = "This review link refers to an older comparison. Uncheck the override or open the latest review link.";

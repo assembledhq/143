@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { StatusLabel } from "@/components/status-label";
@@ -52,6 +52,9 @@ function resultCopy(result: CodeReviewRequestResponse, mode: RequestMode) {
 /** Shared confirmation and receipt for the read-only GitHub action links. */
 export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID, overrideReviewSessionID, defaultOverrideSizeLimits = false }: ReviewRequestDialogProps) {
   const client = useQueryClient();
+  const overrideID = useId();
+  const overrideLabelID = `${overrideID}-label`;
+  const overrideDescriptionID = `${overrideID}-description`;
   const requestID = useRef<string | null>(null);
   const [overrideSizeLimits, setOverrideSizeLimits] = useState(defaultOverrideSizeLimits);
   const overrideSessionID = mode === "review_now" ? overrideReviewSessionID : undefined;
@@ -110,17 +113,17 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
           {target && !loading && !error ? <p className="text-sm text-muted-foreground">{isRecheck
             ? "Previous findings stay in place. Changes to code or review policy require a full review."
             : "A running or completed review may be reused if it already covers these changes."}</p> : null}
-          {overrideSessionID && target && !loading && !error ? <div className="flex items-start gap-2">
-            <Checkbox id="override-size-limits" className="mt-0.5" checked={overrideSizeLimits} disabled={mutation.isPending} onCheckedChange={(checked) => {
+          {overrideSessionID && target && !loading && !error ? <Label htmlFor={overrideID} className="flex cursor-pointer items-start gap-2">
+            <Checkbox id={overrideID} aria-labelledby={overrideLabelID} aria-describedby={overrideDescriptionID} className="mt-0.5" checked={overrideSizeLimits} disabled={mutation.isPending} onCheckedChange={(checked) => {
               setOverrideSizeLimits(checked === true);
               requestID.current = null;
               mutation.reset();
             }} />
-            <div className="space-y-1">
-              <Label htmlFor="override-size-limits">Override size limits for this review</Label>
-              <p className="text-xs text-muted-foreground">The override applies only to the linked review&apos;s head and base. It waives the files, additions, and deletions limits. All other safeguards still apply.</p>
-            </div>
-          </div> : null}
+            <span className="space-y-1">
+              <span id={overrideLabelID} className="block text-sm font-medium leading-none">Override size limits for this review</span>
+              <span id={overrideDescriptionID} className="block text-xs font-normal text-muted-foreground">The override applies only to the linked review&apos;s head and base. It waives the files, additions, and deletions limits. All other safeguards still apply.</span>
+            </span>
+          </Label> : null}
           {unavailable && !loading && !error ? <p role="status" className="text-sm text-muted-foreground">{unavailable}</p> : null}
           {assessmentID && target ? <Button variant="link" size="sm" className="h-auto p-0" asChild><Link href={`/code-reviews?assessment=${assessmentID}`}>View previous assessment</Link></Button> : null}
           {mutation.isError ? <ErrorNotice title="Request could not be confirmed" description={mutation.error.message} /> : null}
