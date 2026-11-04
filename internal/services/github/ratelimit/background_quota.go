@@ -15,16 +15,24 @@ import (
 	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
-func (c *Controller) observeBackgroundQuota(ctx context.Context, installationID int64, observation Observation, classification Classification, now time.Time) {
-	if c.backgroundQuotaReserve <= 0 || observation.RequestErr != nil || observation.BodyErr != nil || !isTrustedQuotaResponse(observation.StatusCode, classification) {
+func (c *Controller) observeBackgroundQuota(ctx context.Context, installationID int64, observation Observation, classification Classification, now time.Time, participates bool) {
+	observeAll := participates && c.backgroundQuotaReserve > 0
+	if !observeAll && c.cache == nil {
+		return
+	}
+	if observation.RequestErr != nil || observation.BodyErr != nil || !isTrustedQuotaResponse(observation.StatusCode, classification) {
 		return
 	}
 	quota, ok := backgroundQuotaFromHeaders(observation.Header, now)
-	if !ok {
+	if !ok || !observeAll && quota.Remaining > checkRefreshQuotaReserve {
 		return
 	}
 	if _, err := c.cache.ObserveGitHubQuota(ctx, c.backgroundQuotaKey(installationID), quota); err != nil {
-		c.logBackgroundQuotaDegraded(ctx, installationID, err)
+		if observeAll {
+			c.logBackgroundQuotaDegraded(ctx, installationID, err)
+		} else {
+			c.logQuotaDegraded(ctx, installationID, err, "github core quota observation unavailable")
+		}
 	}
 }
 
@@ -114,6 +122,10 @@ func (c *Controller) recordBackgroundQuotaDecision(ctx context.Context, outcome 
 }
 
 func (c *Controller) logBackgroundQuotaDegraded(ctx context.Context, installationID int64, err error) {
+	c.logQuotaDegraded(ctx, installationID, err, "github background quota coordination unavailable; bypassing optimization")
+}
+
+func (c *Controller) logQuotaDegraded(ctx context.Context, installationID int64, err error, message string) {
 	c.recordBackgroundQuotaDecision(ctx, "degraded")
 	now := c.now().UTC()
 	c.backgroundQuotaLogMu.Lock()
@@ -134,5 +146,5 @@ func (c *Controller) logBackgroundQuotaDegraded(ctx context.Context, installatio
 	c.backgroundQuotaDegradedAt[installationID] = now
 	c.logger.Warn().Err(err).Int64("github_installation_id", installationID).
 		Str("github_rate_limit_mode", string(c.mode)).Bool("github_background_quota_degraded", true).
-		Msg("github background quota coordination unavailable; bypassing optimization")
+		Msg(message)
 }

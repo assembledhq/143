@@ -14,6 +14,30 @@ import (
 
 var errPullRequestBackgroundQuotaDeferred = errors.New("pull request background quota budget deferred")
 
+// ErrPullRequestCheckRefreshDeferred is local admission backpressure. It must
+// not open a provider cooldown or spend the job's normal retry attempts.
+var ErrPullRequestCheckRefreshDeferred = errors.New("pull request check refresh budget deferred")
+
+func (s *PRService) syncWebhookPullRequestChecks(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+	needed, err := s.refreshPullRequestChecksNeeded(ctx, orgID, pullRequestID)
+	if err != nil || !needed {
+		return err
+	}
+	resolved, err := s.resolvePullRequestHealthSync(ctx, orgID, pullRequestID)
+	if err != nil {
+		return err
+	}
+	installationID := resolved.resolution.InstallationID
+	admitted, err := s.backgroundQuotaController.AdmitCheckRefresh(ctx, installationID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPullRequestCheckRefreshDeferred, err)
+	}
+	if !admitted {
+		return ErrPullRequestCheckRefreshDeferred
+	}
+	return s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, resolved, false)
+}
+
 func (s *PRService) backgroundQuotaFlightKey(ctx context.Context, key string, resolution *identity.Resolution) string {
 	if s.backgroundQuotaFlightNeedsResolution(ctx) && resolution != nil && resolution.Source == identity.SourceApp && s.backgroundQuotaController.EnforcesBackgroundQuota(resolution.InstallationID) {
 		return key + ":quota-sweep"

@@ -8,8 +8,23 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/assembledhq/143/internal/db"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
 )
+
+func TestGitHubCheckRefreshBudgetDeferralPreservesAttempts(t *testing.T) {
+	t.Parallel()
+
+	cause := fmt.Errorf("sync pull request: %w", ghservice.ErrPullRequestCheckRefreshDeferred)
+	err := classifyGitHubJobError(cause, "00000000-0000-0000-0000-000000000143")
+	var retryable *RetryableError
+	require.ErrorAs(t, err, &retryable, "budget denial should requeue the check refresh")
+	require.ErrorIs(t, err, ghservice.ErrPullRequestCheckRefreshDeferred, "the worker should preserve local admission as the reason for retrying")
+	require.False(t, retryable.ConsumeAttempt, "local admission should preserve normal job attempts")
+	require.Equal(t, 67*time.Second, *retryable.RetryAfter, "the refresh should retry after a slot interval with per-PR jitter")
+	require.Equal(t, githubRateLimitMaxRetryDuration, *retryable.MaxRetryDuration, "budget deferrals should retain a bounded recovery window")
+	require.Empty(t, retryable.GitHubRetryPolicy, "local admission should not select a provider cooldown policy")
+}
 
 func TestCodeReviewPublicationLockWaitDoesNotConsumeAttempt(t *testing.T) {
 	t.Parallel()

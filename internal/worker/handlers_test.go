@@ -5959,29 +5959,40 @@ func TestPullRequestReconciliationPrioritizesThrottleAcrossJoinedGitHubCauses(t 
 	}
 }
 
-func TestRebuildPullRequestHealthHandlerSkipsAutoRepairAfterNoOp(t *testing.T) {
+func TestRebuildPullRequestHealthHandlerEvaluatesCommittedProjection(t *testing.T) {
 	t.Parallel()
 
-	orgID := uuid.New()
-	prID := uuid.New()
-	rebuildCalls := 0
-	autoRepairCalls := 0
-	services := &Services{PR: &stubPRService{
-		rebuildPullRequestHealthFn: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
-			rebuildCalls++
-			return false, nil
-		},
-		maybeStartAutoRepairForPRFn: func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error) {
-			autoRepairCalls++
-			return &ghservice.AutoRepairDecision{Status: ghservice.AutoRepairDecisionNoBlocker}, nil
-		},
-	}}
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+	for _, tt := range []struct {
+		name       string
+		changed    bool
+		queueError error
+		wantRepair int
+	}{
+		{name: "no-op projection skips repair"},
+		{name: "committed projection survives verification enqueue failure", changed: true, queueError: errors.New("verification enqueue failed"), wantRepair: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	err := newRebuildPullRequestHealthHandler(nil, services, zerolog.Nop())(context.Background(), "rebuild_pull_request_health", payload)
-	require.NoError(t, err, "no-op projected rebuild should complete successfully")
-	require.Equal(t, 1, rebuildCalls, "handler should evaluate the durable projection once")
-	require.Equal(t, 0, autoRepairCalls, "handler should not sync or repair when no projected health change committed")
+			orgID, prID := uuid.New(), uuid.New()
+			rebuildCalls, autoRepairCalls := 0, 0
+			services := &Services{PR: &stubPRService{
+				rebuildPullRequestHealthFn: func(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+					rebuildCalls++
+					return tt.changed, tt.queueError
+				},
+				maybeStartAutoRepairForPRFn: func(context.Context, uuid.UUID, uuid.UUID, string) (*ghservice.AutoRepairDecision, error) {
+					autoRepairCalls++
+					return &ghservice.AutoRepairDecision{Status: ghservice.AutoRepairDecisionNoBlocker}, nil
+				},
+			}}
+			payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `"}`)
+			err := newRebuildPullRequestHealthHandler(nil, services, zerolog.Nop())(t.Context(), "rebuild_pull_request_health", payload)
+			require.ErrorIs(t, err, tt.queueError, "the handler should return the verification enqueue error for retry")
+			require.Equal(t, 1, rebuildCalls, "handler should evaluate the durable projection once")
+			require.Equal(t, tt.wantRepair, autoRepairCalls, "only a committed health change should trigger repair evaluation")
+		})
+	}
 }
 
 func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
@@ -6013,23 +6024,35 @@ func TestSyncPullRequestStateHandlerDefersPendingMergeability(t *testing.T) {
 func TestSyncPullRequestStateHandlerPropagatesSyncReason(t *testing.T) {
 	t.Parallel()
 
-	orgID := uuid.New()
-	prID := uuid.New()
-	var actualReason ghservice.PullRequestSyncReason
-	services := &Services{
-		PR: &stubPRService{
-			syncPullRequestStateFn: func(ctx context.Context, _ uuid.UUID, _ uuid.UUID) error {
-				actualReason = ghservice.PullRequestSyncReasonFromContext(ctx)
-				return nil
-			},
-		},
+	for _, tt := range []struct {
+		reason           ghservice.PullRequestSyncReason
+		autoRepairReason string
+	}{
+		{reason: ghservice.PullRequestSyncReasonHeadChanged, autoRepairReason: "github_pr_health_updated"},
+		{reason: ghservice.PullRequestSyncReasonIncomplete, autoRepairReason: ghservice.PRCheckProjectionAutoRepairReason},
+	} {
+		t.Run(string(tt.reason), func(t *testing.T) {
+			t.Parallel()
+			orgID, prID := uuid.New(), uuid.New()
+			var actualReason ghservice.PullRequestSyncReason
+			var actualAutoRepairReason string
+			services := &Services{PR: &stubPRService{
+				syncPullRequestStateFn: func(ctx context.Context, _ uuid.UUID, _ uuid.UUID) error {
+					actualReason = ghservice.PullRequestSyncReasonFromContext(ctx)
+					return nil
+				},
+				maybeStartAutoRepairForPRFn: func(_ context.Context, _ uuid.UUID, _ uuid.UUID, reason string) (*ghservice.AutoRepairDecision, error) {
+					actualAutoRepairReason = reason
+					return nil, nil
+				},
+			}}
+			payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `","sync_reason":"` + string(tt.reason) + `"}`)
+			err := newSyncPullRequestStateHandler(nil, services, zerolog.Nop())(t.Context(), "sync_pull_request_state", payload)
+			require.NoError(t, err, "sync handler should complete when the GitHub refresh succeeds")
+			require.Equal(t, tt.reason, actualReason, "sync handler should propagate the durable sync reason to GitHub telemetry")
+			require.Equal(t, tt.autoRepairReason, actualAutoRepairReason, "a CI verification should keep subsequent repair evaluation on stored health")
+		})
 	}
-	payload := json.RawMessage(`{"org_id":"` + orgID.String() + `","pull_request_id":"` + prID.String() + `","sync_reason":"head_changed"}`)
-
-	err := newSyncPullRequestStateHandler(nil, services, zerolog.Nop())(context.Background(), "sync_pull_request_state", payload)
-
-	require.NoError(t, err, "sync handler should complete when the GitHub refresh succeeds")
-	require.Equal(t, ghservice.PullRequestSyncReasonHeadChanged, actualReason, "sync handler should propagate the durable sync reason to GitHub telemetry")
 }
 
 func TestSyncPullRequestStateHandlerWaitsForGitHubRateLimit(t *testing.T) {
