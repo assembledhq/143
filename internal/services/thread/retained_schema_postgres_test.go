@@ -77,7 +77,7 @@ func TestLegacySendRetainedSchemaPostgres(t *testing.T) {
 			var dirty, enabled bool
 			var cutovers, nonzero int
 			require.NoError(t, pool.QueryRow(ctx, `SELECT version,dirty,(SELECT intents_enabled FROM caller_send_intent_control),(SELECT count(*) FROM session_lifecycle_cutovers WHERE org_id=$1),(SELECT count(*) FROM sessions WHERE org_id=$1 AND lifecycle_version<>0) FROM schema_migrations`, org).Scan(&version, &dirty, &enabled, &cutovers, &nonzero), "verify retained schema and disabled participation")
-			require.Equal(t, 394, version, "retained package-credential and review-phase migrations remain installed")
+			require.Equal(t, 395, version, "the latest compatible migrations remain installed")
 			require.False(t, dirty, "migration ledger stays clean")
 			require.False(t, enabled, "legacy send cannot enable participation")
 			require.Equal(t, [2]int{0, 0}, [2]int{cutovers, nonzero}, "legacy send cannot activate the lifecycle protocol")

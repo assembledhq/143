@@ -615,7 +615,9 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 	if assessment.ResultOrigin == nil || assessment.Decision == nil || assessment.Acceptable == nil || assessment.RenderedBody == nil || len(assessment.StructuredOutcome) == 0 {
 		return db.ErrCodeReviewAssessmentState
 	}
-	var outcome fullAssessmentStructuredOutcome
+	var outcome struct {
+		SizeLimitOverrideApplied bool `json:"size_limit_override_applied"`
+	}
 	if err := json.Unmarshal(assessment.StructuredOutcome, &outcome); err != nil {
 		return fmt.Errorf("decode staged full assessment outcome: %w", err)
 	}
