@@ -68,12 +68,27 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req struct {
-		RequestID uuid.UUID                    `json:"request_id"`
-		Mode      models.CodeReviewRequestMode `json:"mode"`
-		Reason    string                       `json:"reason,omitempty"`
+		RequestID               uuid.UUID                    `json:"request_id"`
+		Mode                    models.CodeReviewRequestMode `json:"mode"`
+		Reason                  string                       `json:"reason,omitempty"`
+		OverrideSizeLimits      bool                         `json:"override_size_limits,omitempty"`
+		OverrideReviewSessionID *uuid.UUID                   `json:"override_review_session_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RequestID == uuid.Nil {
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "request_id and mode are required")
+		return
+	}
+	if err := req.Mode.Validate(); err != nil {
+		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "invalid request mode", err)
+		return
+	}
+	input := codereviewsvc.ScheduleRequestInput{
+		OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id,
+		RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode, Reason: strings.TrimSpace(req.Reason),
+		OverrideSizeLimits: req.OverrideSizeLimits, OverrideReviewSessionID: req.OverrideReviewSessionID,
+	}
+	if err := input.ValidateSizeLimitOverride(); err != nil {
+		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", err.Error())
 		return
 	}
 	if req.Mode == models.CodeReviewRecheck || req.Mode == models.CodeReviewForceFresh {
@@ -86,11 +101,7 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "force_fresh requires a reason of at most 2000 characters")
 		return
 	}
-	if err := req.Mode.Validate(); err != nil {
-		writeError(w, r, 400, "CODE_REVIEW_REQUEST_INVALID", "invalid request mode", err)
-		return
-	}
-	result, err := s.RequestScheduledReview(r.Context(), codereviewsvc.ScheduleRequestInput{OrgID: middleware.OrgIDFromContext(r.Context()), PullRequestID: id, RequestID: req.RequestID, RequesterID: &user.ID, Mode: req.Mode, Reason: strings.TrimSpace(req.Reason)})
+	result, err := s.RequestScheduledReview(r.Context(), input)
 	if err != nil {
 		writeScheduleError(w, r, err)
 		return
@@ -101,7 +112,7 @@ func (h *CodeReviewHandler) RequestReviewNow(w http.ResponseWriter, r *http.Requ
 	}
 	writeJSON(w, status, models.SingleResponse[codereviewsvc.ScheduleRequestResult]{Data: result})
 	resourceID := id.String()
-	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"request_id": req.RequestID, "mode": req.Mode, "disposition": result.Disposition})
+	details := marshalAuditDetails(*zerolog.Ctx(r.Context()), map[string]any{"request_id": req.RequestID, "mode": req.Mode, "disposition": result.Disposition, "override_size_limits": req.OverrideSizeLimits})
 	emitUserAudit(h.audit, r, models.AuditActionCodeReviewRequested, models.AuditResourcePullRequest, &resourceID, details)
 }
 func (h *CodeReviewHandler) PauseSchedule(w http.ResponseWriter, r *http.Request) {
@@ -175,6 +186,8 @@ func writeScheduleError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, r, 409, "CODE_REVIEW_REQUEST_ID_CONFLICT", "request ID was already used for different input")
 	case errors.Is(err, codereviewsvc.ErrReviewIneligible):
 		writeError(w, r, 409, "CODE_REVIEW_PR_INELIGIBLE", "Review requires an open pull request and an enabled policy.")
+	case errors.Is(err, codereviewsvc.ErrStaleSizeLimitOverride):
+		writeError(w, r, 409, "CODE_REVIEW_OVERRIDE_STALE", "This override link no longer matches the pull request. Turn off the override to request a standard review, or open the override link from the latest review.")
 	case errors.Is(err, codereviewsvc.ErrRecheckUnavailable):
 		writeError(w, r, 409, "CODE_REVIEW_RECHECK_UNAVAILABLE", "Evidence could not be captured. Try again or request a full review.")
 	default:

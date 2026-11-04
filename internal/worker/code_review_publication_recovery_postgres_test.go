@@ -208,12 +208,14 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 		t.Skip("set TEST_DATABASE_URL for PostgreSQL recovery proof")
 	}
 	tests := []struct {
-		name          string
-		wrongIdentity bool
-		wantErr       bool
+		name            string
+		overrideApplied bool
+		wrongIdentity   bool
+		wantErr         bool
 	}{
 		{name: "confirmed receipt recovers failed metadata after PR head moves"},
-		{name: "controller identity mismatch fails closed", wrongIdentity: true, wantErr: true},
+		{name: "confirmed receipt preserves an applied override after PR head moves", overrideApplied: true},
+		{name: "controller identity mismatch fails closed", overrideApplied: true, wrongIdentity: true, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -242,6 +244,12 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 			receipt, err := fullAssessmentPublicationReceipt(assessment, inputDigest, "old-head", &reviewID, &reviewURL, nil, nil)
 			require.NoError(t, err, "build immutable confirmed publication receipt")
 			outcome := json.RawMessage(`{"coverage_complete":false,"description_assessments":[]}`)
+			if tt.overrideApplied {
+				outcome, err = fullAssessmentOutcome(nil, models.CodeReviewDecisionEvaluation{
+					OverriddenSizeLimits: []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 17, Limit: 10}},
+				}, false)
+				require.NoError(t, err, "encode the applied override with the staged review outcome")
+			}
 			body := "Published review for old-head"
 			_, err = pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,repository_full_name,pull_request_id,metadata_id,session_id,policy_id,generation,base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,coverage_complete,status,result_origin,decision,acceptable,risk_reason_details,structured_outcome,rendered_body,publication_key,publication_state,publication_receipt,github_review_id,github_review_url,submitted_commit_sha) VALUES($1,$2,$3,$4,$5,$6,$7,$8,1,'base','main','old-head',2,'code','contract','intent','visual','request','gate',$9,'{}','full','initial_full',false,'publishing','executed','blocked',false,'[]',$10,$11,$12,'confirmed',$13,$14,$15,'old-head')`, assessment, org, repo, repoName, pr, metadata, session, policy, inputDigest, outcome, body, key, receipt, reviewID, reviewURL)
 			require.NoError(t, err, "seed staged full assessment with confirmed receipt")
@@ -270,7 +278,8 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 			var status, decision, finalBody, failureReason string
 			var additions, deletions int
 			var storedReviewID *int64
-			err = pool.QueryRow(ctx, `SELECT status,COALESCE(decision,''),COALESCE(final_review_body,''),COALESCE(failure_reason,''),additions,deletions,github_review_id FROM code_review_session_metadata WHERE org_id=$1 AND session_id=$2`, org, session).Scan(&status, &decision, &finalBody, &failureReason, &additions, &deletions, &storedReviewID)
+			var overrideApplied bool
+			err = pool.QueryRow(ctx, `SELECT status,COALESCE(decision,''),COALESCE(final_review_body,''),COALESCE(failure_reason,''),additions,deletions,github_review_id,size_limit_override_applied FROM code_review_session_metadata WHERE org_id=$1 AND session_id=$2`, org, session).Scan(&status, &decision, &finalBody, &failureReason, &additions, &deletions, &storedReviewID, &overrideApplied)
 			require.NoError(t, err, "load legacy metadata after recovery")
 			got, err := stores.CodeReviewAssessments.GetByID(ctx, org, assessment)
 			require.NoError(t, err, "load assessment after recovery")
@@ -280,6 +289,7 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 			require.NoError(t, err, "load settled scheduler state")
 			if tt.wantErr {
 				require.Equal(t, "failed", status, "identity mismatch must leave terminal metadata unchanged")
+				require.False(t, overrideApplied, "identity mismatch must not record an applied override")
 				require.Equal(t, models.CodeReviewAssessmentPublishing, got.Status, "identity mismatch must retain staged assessment")
 				require.Equal(t, &assessment, activeID, "identity mismatch must not settle scheduler")
 				return
@@ -291,6 +301,7 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 			require.Equal(t, 17, additions, "stored additions should not be replaced by current PR changes")
 			require.Equal(t, 4, deletions, "stored deletions should not be replaced by current PR changes")
 			require.Equal(t, &reviewID, storedReviewID, "confirmed GitHub receipt should remain on legacy metadata")
+			require.Equal(t, tt.overrideApplied, overrideApplied, "recovery should record the staged override even after the head moves")
 			require.Equal(t, models.CodeReviewAssessmentCompleted, got.Status, "assessment should complete from staged outcome")
 			require.Equal(t, models.CodeReviewPublicationConfirmed, got.PublicationState, "assessment receipt should remain confirmed")
 			require.JSONEq(t, string(receipt), string(got.PublicationReceipt), "publication receipt must not be rewritten")

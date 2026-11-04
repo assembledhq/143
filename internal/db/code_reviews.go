@@ -1247,15 +1247,16 @@ func (s *CodeReviewStore) markStale(ctx context.Context, orgID, sessionID uuid.U
 }
 
 type CompleteCodeReviewParams struct {
-	SessionID         uuid.UUID
-	Decision          models.CodeReviewDecision
-	Acceptable        bool
-	GitHubReviewID    *int64
-	GitHubReviewURL   *string
-	FinalReviewBody   string
-	Additions         *int
-	Deletions         *int
-	RiskReasonDetails []models.CodeReviewRiskReason
+	SessionID                uuid.UUID
+	Decision                 models.CodeReviewDecision
+	Acceptable               bool
+	GitHubReviewID           *int64
+	GitHubReviewURL          *string
+	FinalReviewBody          string
+	Additions                *int
+	Deletions                *int
+	RiskReasonDetails        []models.CodeReviewRiskReason
+	SizeLimitOverrideApplied bool
 }
 
 func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, params CompleteCodeReviewParams) (models.CodeReviewSessionMetadata, error) {
@@ -1296,6 +1297,7 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 		    additions = COALESCE(@additions, additions),
 		    deletions = COALESCE(@deletions, deletions),
 		    risk_reason_details = @risk_reason_details,
+		    size_limit_override_applied = @size_limit_override_applied,
 		    failure_reason = NULL,
 		    status_code = NULL,
 		    status_message = NULL,
@@ -1306,16 +1308,17 @@ func (s *CodeReviewStore) CompleteReview(ctx context.Context, orgID uuid.UUID, p
 		WHERE org_id = @org_id
 		  AND session_id = @session_id
 		RETURNING `+codeReviewMetadataColumns, pgx.NamedArgs{
-		"org_id":              orgID,
-		"session_id":          params.SessionID,
-		"decision":            params.Decision,
-		"acceptable":          params.Acceptable,
-		"github_review_id":    params.GitHubReviewID,
-		"github_review_url":   params.GitHubReviewURL,
-		"final_review_body":   params.FinalReviewBody,
-		"additions":           params.Additions,
-		"deletions":           params.Deletions,
-		"risk_reason_details": encodedReasonDetails,
+		"org_id":                      orgID,
+		"session_id":                  params.SessionID,
+		"decision":                    params.Decision,
+		"acceptable":                  params.Acceptable,
+		"github_review_id":            params.GitHubReviewID,
+		"github_review_url":           params.GitHubReviewURL,
+		"final_review_body":           params.FinalReviewBody,
+		"additions":                   params.Additions,
+		"deletions":                   params.Deletions,
+		"risk_reason_details":         encodedReasonDetails,
+		"size_limit_override_applied": params.SizeLimitOverrideApplied,
 	})
 	if err != nil {
 		return models.CodeReviewSessionMetadata{}, fmt.Errorf("complete code review: %w", err)

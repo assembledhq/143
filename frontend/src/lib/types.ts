@@ -201,6 +201,7 @@ export interface CodeReviewPolicyConfig {
     blocked_path_patterns?: string[];
     require_up_to_date: boolean;
     allow_forks: boolean;
+    allow_size_limit_override?: boolean;
     eligible_authors?: string[];
     eligible_author_teams?: string[];
     required_checks?: string[];

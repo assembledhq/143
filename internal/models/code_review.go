@@ -505,6 +505,7 @@ type CodeReviewRiskPolicy struct {
 	BlockedPathPatterns           []string `json:"blocked_path_patterns,omitempty"`
 	RequireUpToDate               bool     `json:"require_up_to_date"`
 	AllowForks                    bool     `json:"allow_forks"`
+	AllowSizeLimitOverride        bool     `json:"allow_size_limit_override,omitempty"`
 	EligibleAuthors               []string `json:"eligible_authors,omitempty"`
 	EligibleAuthorTeams           []string `json:"eligible_author_teams,omitempty"`
 	RequiredChecks                []string `json:"required_checks,omitempty"`
@@ -760,6 +761,7 @@ func ResolveCodeReviewPolicyConfig(config *CodeReviewPolicyConfig) CodeReviewPol
 	}
 	defaults.RiskPolicy.RequireUpToDate = config.RiskPolicy.RequireUpToDate
 	defaults.RiskPolicy.AllowForks = config.RiskPolicy.AllowForks
+	defaults.RiskPolicy.AllowSizeLimitOverride = config.RiskPolicy.AllowSizeLimitOverride
 	if len(config.RiskPolicy.EligibleAuthors) > 0 {
 		defaults.RiskPolicy.EligibleAuthors = config.RiskPolicy.EligibleAuthors
 	}
@@ -1371,6 +1373,7 @@ func CodeReviewAutomatedApprovalExamples() []CodeReviewAutomatedApprovalExampleO
 }
 
 type CodeReviewRiskInput struct {
+	OverrideSizeLimits    bool
 	FilesChanged          int
 	Additions             int
 	Deletions             int
@@ -1692,9 +1695,10 @@ func CodeReviewRiskReasonMessages(reasons []CodeReviewRiskReason) []string {
 }
 
 type CodeReviewRiskEvaluation struct {
-	Acceptable    bool                   `json:"acceptable"`
-	Reasons       []string               `json:"reasons"`
-	ReasonDetails []CodeReviewRiskReason `json:"reason_details,omitempty"`
+	Acceptable           bool                   `json:"acceptable"`
+	Reasons              []string               `json:"reasons"`
+	ReasonDetails        []CodeReviewRiskReason `json:"reason_details,omitempty"`
+	OverriddenSizeLimits []CodeReviewRiskReason `json:"-"`
 }
 
 func (e *CodeReviewRiskEvaluation) AddReason(reason CodeReviewRiskReason) {
@@ -1704,25 +1708,27 @@ func (e *CodeReviewRiskEvaluation) AddReason(reason CodeReviewRiskReason) {
 }
 
 type CodeReviewDecisionEvaluation struct {
-	Decision          CodeReviewDecision     `json:"decision"`
-	Acceptable        bool                   `json:"acceptable"`
-	RiskReasons       []string               `json:"risk_reasons,omitempty"`
-	RiskReasonDetails []CodeReviewRiskReason `json:"risk_reason_details,omitempty"`
+	Decision             CodeReviewDecision     `json:"decision"`
+	Acceptable           bool                   `json:"acceptable"`
+	RiskReasons          []string               `json:"risk_reasons,omitempty"`
+	RiskReasonDetails    []CodeReviewRiskReason `json:"risk_reason_details,omitempty"`
+	OverriddenSizeLimits []CodeReviewRiskReason `json:"-"`
 }
 
 func EvaluateCodeReviewDecision(policy CodeReviewPolicyConfig, risk CodeReviewRiskEvaluation) CodeReviewDecisionEvaluation {
+	decision := CodeReviewDecisionEvaluation{
+		Decision:             CodeReviewDecisionCommentOnly,
+		Acceptable:           risk.Acceptable,
+		OverriddenSizeLimits: append([]CodeReviewRiskReason(nil), risk.OverriddenSizeLimits...),
+	}
 	if !risk.Acceptable {
-		return CodeReviewDecisionEvaluation{
-			Decision:          CodeReviewDecisionNeedsHumanReview,
-			Acceptable:        false,
-			RiskReasons:       append([]string(nil), risk.Reasons...),
-			RiskReasonDetails: append([]CodeReviewRiskReason(nil), risk.ReasonDetails...),
-		}
+		decision.Decision = CodeReviewDecisionNeedsHumanReview
+		decision.RiskReasons = append([]string(nil), risk.Reasons...)
+		decision.RiskReasonDetails = append([]CodeReviewRiskReason(nil), risk.ReasonDetails...)
+	} else if policy.ApprovalMode == CodeReviewApprovalModeApproveAcceptable {
+		decision.Decision = CodeReviewDecisionApproved
 	}
-	if policy.ApprovalMode == CodeReviewApprovalModeApproveAcceptable {
-		return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionApproved, Acceptable: true}
-	}
-	return CodeReviewDecisionEvaluation{Decision: CodeReviewDecisionCommentOnly, Acceptable: true}
+	return decision
 }
 
 func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) CodeReviewRiskEvaluation {
@@ -1737,14 +1743,13 @@ func EvaluateCodeReviewRisk(policy CodeReviewPolicyConfig, input CodeReviewRiskI
 	if input.HeadSHAChanged {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonHeadChanged})
 	}
-	if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: input.FilesChanged, Limit: policy.RiskPolicy.MaxFilesChanged})
-	}
-	if input.Additions > policy.RiskPolicy.MaxAdditions {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: input.Additions, Limit: policy.RiskPolicy.MaxAdditions})
-	}
-	if input.Deletions > policy.RiskPolicy.MaxDeletions {
-		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: input.Deletions, Limit: policy.RiskPolicy.MaxDeletions})
+	sizeLimitReasons := codeReviewSizeLimitReasons(policy, input)
+	if input.OverrideSizeLimits && policy.RiskPolicy.AllowSizeLimitOverride {
+		risk.OverriddenSizeLimits = sizeLimitReasons
+	} else {
+		for _, reason := range sizeLimitReasons {
+			risk.AddReason(reason)
+		}
 	}
 	if policy.RiskPolicy.RequirePassingChecks && !input.ChecksPassing {
 		risk.AddReason(CodeReviewRiskReason{Code: CodeReviewRiskReasonChecksFailing})
@@ -1846,6 +1851,30 @@ func CodeReviewAuthorAllowed(author, authorClass string, allowed []string) bool 
 		}
 	}
 	return false
+}
+
+func codeReviewSizeLimitReasons(policy CodeReviewPolicyConfig, input CodeReviewRiskInput) []CodeReviewRiskReason {
+	var reasons []CodeReviewRiskReason
+	if input.FilesChanged > policy.RiskPolicy.MaxFilesChanged {
+		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: input.FilesChanged, Limit: policy.RiskPolicy.MaxFilesChanged})
+	}
+	if input.Additions > policy.RiskPolicy.MaxAdditions {
+		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: input.Additions, Limit: policy.RiskPolicy.MaxAdditions})
+	}
+	if input.Deletions > policy.RiskPolicy.MaxDeletions {
+		reasons = append(reasons, CodeReviewRiskReason{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: input.Deletions, Limit: policy.RiskPolicy.MaxDeletions})
+	}
+	return reasons
+}
+
+// IsCodeReviewSizeLimitRiskReason reports whether a size override can clear the reason.
+func IsCodeReviewSizeLimitRiskReason(code CodeReviewRiskReasonCode) bool {
+	switch code {
+	case CodeReviewRiskReasonFilesLimitExceeded, CodeReviewRiskReasonLinesLimitExceeded, CodeReviewRiskReasonAdditionsLimitExceeded, CodeReviewRiskReasonDeletionsLimitExceeded:
+		return true
+	default:
+		return false
+	}
 }
 
 func codeReviewAuthorTeamAllowed(authorTeams, allowedTeams []string) bool {

@@ -822,11 +822,21 @@ func TestCodeReviewStore_CompleteReviewPublishesUpdate(t *testing.T) {
 	require.NoError(t, err, "subscribe should succeed against miniredis")
 	defer sub.Close()
 
-	mock.ExpectQuery(regexp.QuoteMeta("UPDATE code_review_session_metadata")).
+	mock.ExpectQuery(`(?s)UPDATE code_review_session_metadata.*size_limit_override_applied = @size_limit_override_applied.*WHERE org_id = @org_id.*AND session_id = @session_id`).
 		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgx.NamedArgs{
+				"org_id":                      orgID,
+				"session_id":                  sessionID,
+				"decision":                    decisionApproved,
+				"acceptable":                  acceptableTrue,
+				"github_review_id":            (*int64)(nil),
+				"github_review_url":           (*string)(nil),
+				"final_review_body":           finalBody,
+				"additions":                   (*int)(nil),
+				"deletions":                   (*int)(nil),
+				"risk_reason_details":         []byte("[]"),
+				"size_limit_override_applied": false,
+			},
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
@@ -1274,11 +1284,23 @@ func TestCodeReviewStore_CompleteReviewStoresGitHubReviewEvidence(t *testing.T) 
 	require.NoError(t, err, "pgxmock should initialize")
 	defer mock.Close()
 
-	mock.ExpectQuery("UPDATE code_review_session_metadata").
+	additions := 125
+	deletions := 55
+	mock.ExpectQuery(`(?s)UPDATE code_review_session_metadata.*size_limit_override_applied = @size_limit_override_applied.*WHERE org_id = @org_id.*AND session_id = @session_id`).
 		WithArgs(
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-			pgxmock.AnyArg(), pgxmock.AnyArg(),
+			pgx.NamedArgs{
+				"org_id":                      orgID,
+				"session_id":                  sessionID,
+				"decision":                    decision,
+				"acceptable":                  acceptable,
+				"github_review_id":            &reviewID,
+				"github_review_url":           &reviewURL,
+				"final_review_body":           body,
+				"additions":                   &additions,
+				"deletions":                   &deletions,
+				"risk_reason_details":         []byte("[]"),
+				"size_limit_override_applied": true,
+			},
 		).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "org_id", "session_id", "repository_id", "pull_request_id", "policy_id",
@@ -1286,18 +1308,17 @@ func TestCodeReviewStore_CompleteReviewStoresGitHubReviewEvidence(t *testing.T) 
 			"superseded_by_session_id", "review_output_key", "prompt_record_key", "github_review_id", "github_review_url", "final_review_body", "failure_reason", "completed_at", "created_at",
 		}).AddRow(metadataID, orgID, sessionID, repoID, prID, policyID, "base", "head", false, models.CodeReviewTriggerSourceAppReviewer, models.CodeReviewSessionStatusCompleted, nil, nil, nil, nil, nil, false, &decision, &acceptable, false, nil, "key", nil, &reviewID, &reviewURL, &body, nil, &now, now))
 
-	additions := 125
-	deletions := 55
 	metadata, err := NewCodeReviewStore(mock).CompleteReview(context.Background(), orgID, CompleteCodeReviewParams{
-		SessionID:         sessionID,
-		Decision:          models.CodeReviewDecisionApproved,
-		Acceptable:        true,
-		GitHubReviewID:    &reviewID,
-		GitHubReviewURL:   &reviewURL,
-		FinalReviewBody:   body,
-		Additions:         &additions,
-		Deletions:         &deletions,
-		RiskReasonDetails: []models.CodeReviewRiskReason{},
+		SessionID:                sessionID,
+		Decision:                 models.CodeReviewDecisionApproved,
+		Acceptable:               true,
+		GitHubReviewID:           &reviewID,
+		GitHubReviewURL:          &reviewURL,
+		FinalReviewBody:          body,
+		Additions:                &additions,
+		Deletions:                &deletions,
+		RiskReasonDetails:        []models.CodeReviewRiskReason{},
+		SizeLimitOverrideApplied: true,
 	})
 
 	require.NoError(t, err, "CompleteReview should persist final review evidence")

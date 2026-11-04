@@ -341,6 +341,7 @@ var codeReviewPolicyFieldLabels = map[string]string{
 	"risk_policy.blocked_path_patterns":            "Blocked paths",
 	"risk_policy.require_up_to_date":               "Require up-to-date branch",
 	"risk_policy.allow_forks":                      "Allow forks",
+	"risk_policy.allow_size_limit_override":        "Allow size limit overrides",
 	"risk_policy.eligible_authors":                 "Eligible authors",
 	"risk_policy.eligible_author_teams":            "Eligible author teams",
 	"risk_policy.required_checks":                  "Required checks",

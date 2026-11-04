@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -65,6 +66,123 @@ func TestEvaluateCodeReviewIndependentSizeLimits(t *testing.T) {
 			require.Equal(t, len(tt.expected) == 0, risk.Acceptable, "only exceeding an individual limit should block approval")
 		})
 	}
+}
+
+func TestEvaluateCodeReviewSizeLimitOverride(t *testing.T) {
+	t.Parallel()
+	overLimits := []CodeReviewRiskReason{
+		{Code: CodeReviewRiskReasonFilesLimitExceeded, Actual: 2, Limit: 1},
+		{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 101, Limit: 100},
+		{Code: CodeReviewRiskReasonDeletionsLimitExceeded, Actual: 901, Limit: 900},
+	}
+	tests := []struct {
+		name       string
+		allowed    bool
+		requested  bool
+		expected   []CodeReviewRiskReason
+		overridden []CodeReviewRiskReason
+	}{
+		{name: "limits apply by default", expected: overLimits},
+		{name: "policy allows but the request did not opt in", allowed: true, expected: overLimits},
+		{name: "request opts in but the policy does not allow it", requested: true, expected: overLimits},
+		{name: "allowed opt-in skips the limits", allowed: true, requested: true, overridden: overLimits},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			policy := DefaultCodeReviewPolicyConfig()
+			policy.RiskPolicy.MaxFilesChanged, policy.RiskPolicy.MaxAdditions, policy.RiskPolicy.MaxDeletions = 1, 100, 900
+			policy.RiskPolicy.AllowSizeLimitOverride = tt.allowed
+			input := CodeReviewRiskInput{FilesChanged: 2, Additions: 101, Deletions: 901, DescriptionPassed: true, OverrideSizeLimits: tt.requested}
+			risk := EvaluateCodeReviewRisk(policy, input)
+			require.Equal(t, tt.expected, risk.ReasonDetails, "only an allowed opt-in should skip the size limits")
+			require.Equal(t, len(tt.expected) == 0, risk.Acceptable, "skipping the size limits should leave the diff eligible for approval")
+			require.Equal(t, tt.overridden, risk.OverriddenSizeLimits, "the risk result should record exactly the limits the override skipped")
+			require.Equal(t, tt.overridden, EvaluateCodeReviewDecision(policy, risk).OverriddenSizeLimits, "the decision should preserve skipped limits")
+		})
+	}
+}
+
+func TestCodeReviewSizeLimitOverrideKeepsOtherSafeguards(t *testing.T) {
+	t.Parallel()
+	policy := DefaultCodeReviewPolicyConfig()
+	policy.RiskPolicy.MaxAdditions = 100
+	policy.RiskPolicy.AllowSizeLimitOverride = true
+	risk := EvaluateCodeReviewRisk(policy, CodeReviewRiskInput{Additions: 101, DescriptionPassed: true, BlockingFindings: 1, OverrideSizeLimits: true})
+	require.Equal(t, []CodeReviewRiskReason{{Code: CodeReviewRiskReasonBlockingFindings}}, risk.ReasonDetails, "an override should leave other safeguards in force")
+	require.False(t, risk.Acceptable, "blocking findings should still prevent approval")
+}
+
+func TestCodeReviewOverriddenSizeLimitsIgnoresDiffsWithinLimits(t *testing.T) {
+	t.Parallel()
+	policy := DefaultCodeReviewPolicyConfig()
+	policy.RiskPolicy.AllowSizeLimitOverride = true
+	risk := EvaluateCodeReviewRisk(policy, CodeReviewRiskInput{Additions: 1, OverrideSizeLimits: true})
+	require.Empty(t, risk.OverriddenSizeLimits, "a diff within its limits should not record an applied override")
+}
+
+func TestCodeReviewAllowSizeLimitOverridePolicyRoundTrip(t *testing.T) {
+	t.Parallel()
+	require.False(t, DefaultCodeReviewPolicyConfig().RiskPolicy.AllowSizeLimitOverride, "overrides should be off by default")
+
+	patched, err := ApplyCodeReviewPolicyMergePatch(DefaultCodeReviewPolicyConfig(), json.RawMessage(`{"risk_policy":{"allow_size_limit_override":true}}`))
+	require.NoError(t, err, "enabling overrides should be a valid patch")
+	require.True(t, patched.RiskPolicy.AllowSizeLimitOverride, "the patch should enable overrides")
+
+	cleared, err := ApplyCodeReviewPolicyMergePatch(patched, json.RawMessage(`{"risk_policy":{"allow_size_limit_override":false}}`))
+	require.NoError(t, err, "disabling overrides should be a valid patch")
+	require.False(t, cleared.RiskPolicy.AllowSizeLimitOverride, "the patch should disable overrides")
+}
+
+func TestCodeReviewSizeLimitOverrideInFinalReviewBody(t *testing.T) {
+	t.Parallel()
+	const overrideURL = "https://143.dev/code-reviews?override_size_limits=true&review_now=review"
+	const link = "[Override size limits](" + overrideURL + ")"
+	additions := CodeReviewRiskReason{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 900, Limit: 750}
+	tests := []struct {
+		name         string
+		input        CodeReviewFinalReviewInput
+		expectLink   bool
+		expectNotice bool
+	}{
+		{
+			name:       "size blocker offers the override",
+			input:      CodeReviewFinalReviewInput{Decision: CodeReviewDecisionNeedsHumanReview, RiskReasons: []CodeReviewRiskReason{additions}},
+			expectLink: true,
+		},
+		{
+			name:  "other blockers do not offer it",
+			input: CodeReviewFinalReviewInput{Decision: CodeReviewDecisionNeedsHumanReview, RiskReasons: []CodeReviewRiskReason{{Code: CodeReviewRiskReasonBlockingFindings}}},
+		},
+		{
+			name:         "approved override is disclosed",
+			input:        CodeReviewFinalReviewInput{Decision: CodeReviewDecisionApproved, Acceptable: true, OverriddenSizeLimits: []CodeReviewRiskReason{additions}},
+			expectNotice: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.input.SizeLimitOverrideURL = overrideURL
+			tt.input.SessionURL = "https://143.dev/sessions/review"
+			body := BuildCodeReviewFinalReviewBody(tt.input)
+			require.Equal(t, tt.expectLink, strings.Contains(body, link), "only a size blocker should offer the override")
+			require.Equal(t, tt.expectNotice, strings.Contains(body, "**Size limits overridden for this review:** This change has 900 additions; the policy limit is 750."), "an applied override should be visible on the review")
+		})
+	}
+}
+
+func TestCodeReviewCommentFooterRoundTripsSizeLimitOverride(t *testing.T) {
+	t.Parallel()
+	footer := CodeReviewCommentFooter{
+		DetailURL:            "https://143.dev/sessions/review",
+		DetailLabel:          "View full review",
+		ReviewNowURL:         "https://143.dev/code-reviews?review_now=review",
+		SizeLimitOverrideURL: "https://143.dev/code-reviews?override_size_limits=true&review_now=review",
+	}
+	body, actual := SplitCodeReviewCommentFooter(WithCodeReviewCommentFooter("Review result.", footer), footer.DetailURL)
+	require.Equal(t, "Review result.", body, "the footer should be removed from the review body")
+	require.Equal(t, footer, actual, "status comments should be able to reuse the override link")
 }
 
 func TestCodeReviewSizeLimitValidation(t *testing.T) {

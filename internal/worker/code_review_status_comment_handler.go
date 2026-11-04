@@ -223,6 +223,7 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 		}
 		if !codeReviewCommentNeedsNoAction(metadata) {
 			footer.EvidenceRecheckURL = savedFooter.EvidenceRecheckURL
+			footer.SizeLimitOverrideURL = savedFooter.SizeLimitOverrideURL
 			if footer.EvidenceRecheckURL == "" {
 				footer.ReviewNowURL = reviewNowURL
 			}
@@ -299,6 +300,41 @@ func codeReviewAvailableReviewNowURL(services *Services, sessionID uuid.UUID) st
 		return codeReviewNowURL(services.FrontendURL, sessionID)
 	}
 	return ""
+}
+
+func codeReviewOverrideSizeLimits(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse) bool {
+	requestContext := job.RequestContext
+	if requestContext == nil || !requestContext.OverrideSizeLimits ||
+		requestContext.OverrideSizeLimitsHeadSHA == "" || requestContext.OverrideSizeLimitsBaseSHA == "" ||
+		requestContext.OverrideSizeLimitsBaseRef == "" ||
+		!strings.EqualFold(requestContext.OverrideSizeLimitsHeadSHA, strings.TrimSpace(job.HeadSHA)) {
+		return false
+	}
+	// The scheduler verifies the live base ref before execution and validates
+	// the original target at dispatch. Also check the base SHA from the PR
+	// refresh, which can observe a change after the scheduling check.
+	baseSHA := strings.TrimSpace(stringPtrValue(pr.BaseSHA))
+	if baseSHA != "" && !strings.EqualFold(baseSHA, requestContext.OverrideSizeLimitsBaseSHA) {
+		return false
+	}
+	if health != nil && strings.TrimSpace(health.BaseSHA) != "" {
+		return strings.EqualFold(strings.TrimSpace(health.BaseSHA), requestContext.OverrideSizeLimitsBaseSHA)
+	}
+	return baseSHA != ""
+}
+
+func codeReviewSizeLimitOverrideURL(policy models.CodeReviewPolicyConfig, reviewNowURL string) string {
+	if !policy.RiskPolicy.AllowSizeLimitOverride {
+		return ""
+	}
+	target, err := url.Parse(reviewNowURL)
+	if err != nil || target.Host == "" {
+		return ""
+	}
+	query := target.Query()
+	query.Set("override_size_limits", "true")
+	target.RawQuery = query.Encode()
+	return target.String()
 }
 
 // This is a read-only destination. The authenticated page requires a separate

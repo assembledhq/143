@@ -4676,7 +4676,7 @@ func TestCodeReviewStableDeterministicRisk(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			actual := codeReviewStableDeterministicRisk(policy, runCodeReviewPayload{}, models.PullRequest{AuthoredBy: models.GitIdentitySourceUser}, tt.files, tt.available)
+			actual := codeReviewStableDeterministicRisk(policy, runCodeReviewPayload{}, models.PullRequest{AuthoredBy: models.GitIdentitySourceUser}, nil, tt.files, tt.available)
 
 			require.Equal(t, tt.expectedReasonDetails, actual.ReasonDetails, "early evaluation should publish only stable deterministic failures")
 			require.Equal(t, len(tt.expectedReasonDetails) == 0, actual.Acceptable, "early evaluation acceptability should reflect stable failures")
@@ -4695,6 +4695,7 @@ func TestCodeReviewStableDeterministicRiskIncludesSensitivePaths(t *testing.T) {
 		policy,
 		runCodeReviewPayload{},
 		models.PullRequest{AuthoredBy: models.GitIdentitySourceUser},
+		nil,
 		[]codereview.PullRequestFile{{Filename: "internal/auth/session.go", Additions: 2}},
 		true,
 	)
@@ -4903,6 +4904,7 @@ func TestCodeReviewStableDeterministicRiskDefersTeamMembershipGate(t *testing.T)
 		policy,
 		runCodeReviewPayload{PullRequestAuthor: "sam"},
 		models.PullRequest{AuthoredBy: models.GitIdentitySourceUser},
+		nil,
 		[]codereview.PullRequestFile{{Filename: "internal/api.go", Additions: 2}},
 		true,
 	)

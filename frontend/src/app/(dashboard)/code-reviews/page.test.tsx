@@ -3103,6 +3103,7 @@ describe("CodeReviewsPage", () => {
       "Require up-to-date branch",
       "Block reviewer disagreement",
       "Allow fork PRs",
+      "Allow size limit overrides",
       "Stop after stable policy blockers",
     ]) {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
@@ -4012,6 +4013,19 @@ describe("CodeReviewsPage", () => {
     await user.click(screen.getByRole("button", { name: "Remove user build-helper[bot]" }));
     await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual(policy.config.risk_policy));
     expect(screen.queryByText("build-helper[bot]")).not.toBeInTheDocument();
+  });
+
+  it("saves the size limit override setting", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+    await user.click(await screen.findByRole("button", { name: /Quality gates/i }));
+
+    await user.click(await screen.findByRole("switch", { name: "Allow size limit overrides" }));
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy,
+      allow_size_limit_override: true,
+    }));
   });
 
   it("saves independent additions and deletions limits", async () => {

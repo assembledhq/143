@@ -108,6 +108,7 @@ type ReviewRequestedInput struct {
 	PullRequestTitle  string
 	PullRequestAuthor string
 	BaseSHA           string
+	BaseRef           string
 	HeadSHA           string
 	FromFork          bool
 	RequestedLogin    string
@@ -116,14 +117,18 @@ type ReviewRequestedInput struct {
 	RequestContext    *ReviewRequestContext
 }
 
-// ReviewRequestContext is the human-authored GitHub comment that explicitly
-// requested a review. It is carried only to the orchestrator synthesis prompt;
-// reviewer agents still inspect the PR independently.
+// ReviewRequestContext carries the reason and options for an explicit review.
+// Only the orchestrator synthesis prompt receives the request text.
 type ReviewRequestContext struct {
-	Source      string `json:"source"`
-	AuthorLogin string `json:"author_login,omitempty"`
-	Body        string `json:"body"`
-	URL         string `json:"url,omitempty"`
+	Source                    string     `json:"source"`
+	AuthorLogin               string     `json:"author_login,omitempty"`
+	Body                      string     `json:"body"`
+	URL                       string     `json:"url,omitempty"`
+	OverrideSizeLimits        bool       `json:"override_size_limits,omitempty"`
+	OverrideReviewSessionID   *uuid.UUID `json:"override_review_session_id,omitempty"`
+	OverrideSizeLimitsHeadSHA string     `json:"override_size_limits_head_sha,omitempty"`
+	OverrideSizeLimitsBaseSHA string     `json:"override_size_limits_base_sha,omitempty"`
+	OverrideSizeLimitsBaseRef string     `json:"override_size_limits_base_ref,omitempty"`
 }
 
 type ReviewMentionedInput struct {
@@ -352,9 +357,10 @@ func (s *Service) retryReview(ctx context.Context, input RetryReviewInput, curre
 			Code: RetryReviewConflictPRClosed, Message: "This pull request is no longer open.",
 		}
 	}
-	var currentHead, currentBase string
+	var currentHead, currentBase, currentBaseRef string
 	if currentSnapshot != nil {
 		currentHead, currentBase = strings.TrimSpace(currentSnapshot.HeadSHA), strings.TrimSpace(currentSnapshot.BaseSHA)
+		currentBaseRef = currentSnapshot.BaseRef
 	} else {
 		health, err := s.pullRequests.GetHealthCurrent(ctx, input.OrgID, failed.PullRequestID)
 		if err != nil {
@@ -385,6 +391,7 @@ func (s *Service) retryReview(ctx context.Context, input RetryReviewInput, curre
 		PullRequestTitle:  pr.Title,
 		PullRequestAuthor: codeReviewRevisionContextString(priorSession.RevisionContext, "pull_request_author"),
 		BaseSHA:           currentBase,
+		BaseRef:           currentBaseRef,
 		HeadSHA:           currentHead,
 		FromFork:          failed.FromFork,
 		RequestedLogin:    codeReviewRevisionContextString(priorSession.RevisionContext, "requested_reviewer_login"),
@@ -1121,6 +1128,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 			return ReviewRequestedResult{Processed: true, Deferred: true, TriggerSource: source, IgnoredReason: "sandbox_capacity"}, nil
 		}
 	}
+	requestContext := reviewRequestContextForComparison(input.RequestContext, input.HeadSHA, input.BaseSHA, input.BaseRef)
 	title := fmt.Sprintf("Code review for %s#%d", input.GitHubRepo, input.GitHubPRNumber)
 	modelOverride := resolved.Config.AgentRoster.OrchestratorModel
 	reasoningEffort := resolved.Config.AgentRoster.ReasoningEffort
@@ -1132,6 +1140,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		"pull_request_title":       input.PullRequestTitle,
 		"pull_request_author":      input.PullRequestAuthor,
 		"base_sha":                 input.BaseSHA,
+		"base_ref":                 input.BaseRef,
 		"head_sha":                 input.HeadSHA,
 		"from_fork":                input.FromFork,
 		"requested_reviewer_login": strings.TrimSpace(input.RequestedLogin),
@@ -1142,7 +1151,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		"change_reason":            strings.TrimSpace(opts.changeReason),
 		"change_key":               strings.TrimSpace(opts.changeKey),
 		"github_delivery_id":       strings.TrimSpace(input.DeliveryID),
-		"request_context":          normalizeReviewRequestContext(input.RequestContext),
+		"request_context":          requestContext,
 		"triggering_dispute_id":    opts.triggeringDisputeID,
 	}
 	if opts.changeReason == captureIdentityChangeReason {
@@ -1227,7 +1236,7 @@ func (s *Service) startReview(ctx context.Context, input ReviewRequestedInput, o
 		OutputKey:               outputKey,
 		RequestedReviewerLogin:  input.RequestedLogin,
 		RequestedTeamSlug:       input.RequestedTeam,
-		RequestContext:          normalizeReviewRequestContext(input.RequestContext),
+		RequestContext:          requestContext,
 		PreviousOutputKey:       opts.previousOutputKey,
 		PreviousReviewDecision:  opts.previousReviewDecision,
 		PreviousReviewDecidedAt: opts.previousReviewDecidedAt,
@@ -1456,17 +1465,58 @@ func HasGitHubTeamMention(body string) bool {
 	return len(githubTeamMentions(body)) > 0
 }
 
+// bindSizeLimitOverrideToComparison records the original comparison once.
+// Previously bound requests, including head-only legacy requests, keep their scope.
+func bindSizeLimitOverrideToComparison(input *ReviewRequestContext, snapshot ghservice.CodeReviewPullRequestSnapshot) *ReviewRequestContext {
+	if input == nil || !input.OverrideSizeLimits || input.OverrideSizeLimitsHeadSHA != "" ||
+		input.OverrideSizeLimitsBaseSHA != "" || input.OverrideSizeLimitsBaseRef != "" {
+		return input
+	}
+	bound := *input
+	bound.OverrideSizeLimitsHeadSHA = strings.TrimSpace(snapshot.HeadSHA)
+	bound.OverrideSizeLimitsBaseSHA = strings.TrimSpace(snapshot.BaseSHA)
+	bound.OverrideSizeLimitsBaseRef = strings.TrimSpace(snapshot.BaseRef)
+	return &bound
+}
+
+// reviewRequestContextForComparison keeps the request text when the override
+// no longer applies or the dispatch path cannot verify the complete comparison.
+func reviewRequestContextForComparison(input *ReviewRequestContext, headSHA, baseSHA, baseRef string) *ReviewRequestContext {
+	context := normalizeReviewRequestContext(input)
+	if context == nil || !context.OverrideSizeLimits {
+		return context
+	}
+	if context.OverrideSizeLimitsHeadSHA != "" && strings.EqualFold(context.OverrideSizeLimitsHeadSHA, strings.TrimSpace(headSHA)) &&
+		context.OverrideSizeLimitsBaseSHA != "" && strings.EqualFold(context.OverrideSizeLimitsBaseSHA, strings.TrimSpace(baseSHA)) &&
+		context.OverrideSizeLimitsBaseRef != "" && context.OverrideSizeLimitsBaseRef == strings.TrimSpace(baseRef) {
+		return context
+	}
+	if context.Body == "" {
+		return nil
+	}
+	context.OverrideSizeLimits = false
+	context.OverrideSizeLimitsHeadSHA = ""
+	context.OverrideSizeLimitsBaseSHA = ""
+	context.OverrideSizeLimitsBaseRef = ""
+	return context
+}
+
 func normalizeReviewRequestContext(input *ReviewRequestContext) *ReviewRequestContext {
 	if input == nil {
 		return nil
 	}
 	normalized := &ReviewRequestContext{
-		Source:      strings.TrimSpace(input.Source),
-		AuthorLogin: strings.TrimSpace(input.AuthorLogin),
-		Body:        strings.TrimSpace(input.Body),
-		URL:         strings.TrimSpace(input.URL),
+		Source:                    strings.TrimSpace(input.Source),
+		AuthorLogin:               strings.TrimSpace(input.AuthorLogin),
+		Body:                      strings.TrimSpace(input.Body),
+		URL:                       strings.TrimSpace(input.URL),
+		OverrideSizeLimits:        input.OverrideSizeLimits,
+		OverrideReviewSessionID:   input.OverrideReviewSessionID,
+		OverrideSizeLimitsHeadSHA: strings.TrimSpace(input.OverrideSizeLimitsHeadSHA),
+		OverrideSizeLimitsBaseSHA: strings.TrimSpace(input.OverrideSizeLimitsBaseSHA),
+		OverrideSizeLimitsBaseRef: strings.TrimSpace(input.OverrideSizeLimitsBaseRef),
 	}
-	if normalized.Body == "" {
+	if normalized.Body == "" && !normalized.OverrideSizeLimits {
 		return nil
 	}
 	runes := []rune(normalized.Body)
