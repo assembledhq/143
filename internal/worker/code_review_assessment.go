@@ -54,13 +54,18 @@ func captureFreshFullAssessment(ctx context.Context, services *Services, job run
 	if services == nil || services.CodeReviewInputCapture == nil {
 		return codereviewsvc.AssessmentInputCaptureResult{}, fmt.Errorf("assessment freshness capture unavailable")
 	}
-	fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, AssessmentID: assessment.ID, RequestContext: job.RequestContext, Fresh: true})
+	var baseline codereviewsvc.ReviewInputManifest
+	if json.Unmarshal(assessment.InputManifest, &baseline) != nil || baseline.InputDigest != assessment.InputDigest {
+		return codereviewsvc.AssessmentInputCaptureResult{}, errFullAssessmentInputsChanged
+	}
+	fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{
+		OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, AssessmentID: assessment.ID,
+		RequestContext: job.RequestContext, Fresh: true, CapturedContract: &baseline.Contract,
+	})
 	if err != nil {
 		return fresh, classifyGitHubJobError(err, job.SessionID.String())
 	}
-	var baseline codereviewsvc.ReviewInputManifest
-	if json.Unmarshal(assessment.InputManifest, &baseline) != nil || baseline.InputDigest != assessment.InputDigest ||
-		!fullAssessmentNonVisualAnalysisUnchanged(baseline, fresh.Manifest) || fresh.Manifest.Code.HeadSHA != assessment.HeadSHA || fresh.Manifest.Code.BaseSHA != assessment.BaseSHA || fresh.Manifest.Code.BaseRef != assessment.BaseRef || fresh.Policy.ID != assessment.PolicyID {
+	if !fullAssessmentNonVisualAnalysisUnchanged(baseline, fresh.Manifest) || fresh.Manifest.Code.HeadSHA != assessment.HeadSHA || fresh.Manifest.Code.BaseSHA != assessment.BaseSHA || fresh.Manifest.Code.BaseRef != assessment.BaseRef || fresh.Policy.ID != assessment.PolicyID {
 		return fresh, errFullAssessmentInputsChanged
 	}
 	if baseline.VisualDigest == "" || baseline.VisualDigest != fresh.Manifest.VisualDigest {

@@ -174,7 +174,14 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 			return failCodeReviewRecheck(ctx, stores, services, a, err.Error(), false)
 		}
 		requestContext := &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText, UseReviewHistory: manifest.Request.UseReviewHistory}
-		capture, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: requestContext})
+		captureRequest := codereviewsvc.AssessmentInputCaptureRequest{
+			OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID,
+			Fresh: true, RequestContext: requestContext,
+		}
+		if dispatchErr == nil {
+			captureRequest.CapturedContract = &manifest.Contract
+		}
+		capture, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, captureRequest)
 		if err != nil {
 			if errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
 				return failCodeReviewRecheck(ctx, stores, services, a, "assessment inputs cannot establish reusable coverage", false)
@@ -263,7 +270,8 @@ func newRunCodeReviewRecheckHandler(stores *Stores, services *Services, logger z
 		}
 		// Fresh capture rediscovers sources and downloads bytes without restoring
 		// or replacing this assessment's immutable evidence checkpoint.
-		fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: requestContext})
+		captureRequest.CapturedContract = &manifest.Contract
+		fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, captureRequest)
 		if err != nil {
 			if errors.Is(err, codereviewsvc.ErrAssessmentReuseUnavailable) {
 				return failCodeReviewRecheck(ctx, stores, services, a, "assessment inputs cannot establish reusable coverage", false)
@@ -517,7 +525,11 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 			// The PR publication lock serializes this check with our other
 			// publishers. Re-read after acquiring it: waiting for another
 			// publisher must not preserve permission to send stale inputs.
-			fresh, captureErr := services.CodeReviewInputCapture.CaptureAssessmentInputs(lockCtx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID, Fresh: true, RequestContext: &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText, UseReviewHistory: manifest.Request.UseReviewHistory}})
+			fresh, captureErr := services.CodeReviewInputCapture.CaptureAssessmentInputs(lockCtx, codereviewsvc.AssessmentInputCaptureRequest{
+				OrgID: a.OrgID, RepositoryID: a.RepositoryID, PullRequestID: a.PullRequestID, SessionID: a.SessionID, AssessmentID: a.ID,
+				Fresh: true, CapturedContract: &manifest.Contract,
+				RequestContext: &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText, UseReviewHistory: manifest.Request.UseReviewHistory},
+			})
 			if errors.Is(captureErr, models.ErrInvalidCodeReviewGuidanceFile) && current.PublicationState == models.CodeReviewPublicationReserved {
 				// No send has started, so a permanent file error can fail safely.
 				// Uncertain sends must still reconcile their possible receipt.

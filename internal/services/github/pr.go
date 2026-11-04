@@ -4165,6 +4165,17 @@ func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method
 }
 
 func (s *PRService) doGitHubRequestWithResponseHeaders(ctx context.Context, token, method, path string, body any, accept string) ([]byte, http.Header, error) {
+	response, err := s.doGitHubRESTRequest(ctx, token, method, path, body, accept, "")
+	return response.body, response.header, err
+}
+
+type githubRESTResponse struct {
+	body   []byte
+	status int
+	header http.Header
+}
+
+func (s *PRService) doGitHubRESTRequest(ctx context.Context, token, method, path string, body any, accept, etag string) (githubRESTResponse, error) {
 	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(ctx, token))
 	jsonResponse := strings.Contains(accept, "json") && !strings.Contains(accept, ".raw") && !strings.Contains(accept, ".diff") && !strings.Contains(accept, ".patch") && !strings.Contains(accept, ".html")
 	if jsonResponse {
@@ -4174,31 +4185,34 @@ func (s *PRService) doGitHubRequestWithResponseHeaders(ctx context.Context, toke
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return nil, nil, err
+			return githubRESTResponse{}, err
 		}
 		bodyReader = bytes.NewReader(b)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, s.baseURL+path, bodyReader)
 	if err != nil {
-		return nil, nil, err
+		return githubRESTResponse{}, err
 	}
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Accept", accept)
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {
-		return nil, nil, NewGitHubRequestError(ctx, err)
+		return githubRESTResponse{}, NewGitHubRequestError(ctx, err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		githubtelemetry.ObserveJSONResponse(ctx, err)
-		return nil, nil, NewGitHubResponseReadError(ctx, method, path, resp, respBody, err)
+		return githubRESTResponse{}, NewGitHubResponseReadError(ctx, method, path, resp, respBody, err)
 	}
 	var decodeErr error
 	if jsonResponse {
@@ -4215,7 +4229,7 @@ func (s *PRService) doGitHubRequestWithResponseHeaders(ctx context.Context, toke
 		}
 	}
 	if resp.StatusCode >= 400 {
-		return nil, nil, &GitHubAPIError{
+		return githubRESTResponse{}, &GitHubAPIError{
 			Method:     method,
 			Path:       path,
 			StatusCode: resp.StatusCode,
@@ -4223,7 +4237,7 @@ func (s *PRService) doGitHubRequestWithResponseHeaders(ctx context.Context, toke
 			Header:     resp.Header.Clone(),
 		}
 	}
-	return respBody, resp.Header, decodeErr
+	return githubRESTResponse{body: respBody, status: resp.StatusCode, header: resp.Header}, decodeErr
 }
 
 // doGitHubGraphQL POSTs a GraphQL query to the GitHub GraphQL endpoint and
