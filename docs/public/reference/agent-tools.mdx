@@ -731,10 +731,15 @@ For a Slack-only workflow, the request file can contain:
 | `github_label` | `pr_number`, `head_sha` | Repository and label |
 | `github_team_review` | `pr_number`, `head_sha` | Repository and team slug |
 | `github_issue_comment` | `pr_number`, `head_sha`, `text` | Repository |
+| `github_issue_comment_update` | `pr_number`, `head_sha`, `text`, `source_action_id` | Repository |
 | `notion_tracking_row` | `properties`: property names mapped to string values | Data source and allowed property names/types |
 | `slack_notification` | `text` | Channel ID |
 
 GitHub actions require an open PR at the supplied full lowercase head SHA in the session's configured repository. Slack and Notion can omit PR/head preconditions in every run mode, allowing pending steps to resume across pushes. Supply a precondition when the content must remain valid for a specific commit; it is always enforced on resume. In continuous target sessions, any supplied PR must match that target.
+
+The **Update this automation’s GitHub PR comments** grant authorizes edits separately from comment creation. Supply the UUID of the original successful `github_issue_comment` receipt as `source_action_id`. You can find the UUID in the original receipt or in the prior comment's raw body in the server marker `<!-- 143-automation-action:UUID -->`. The server matches the receipt to the current organization, automation, repository, PR, and action scope, then verifies the comment's ownership and expected body. The server updates that comment in place, preserves the original marker, and adds a marker for the current update. Send the new body in `text` without the reserved 143 server markers. The update has no GitHub comment ID field or fallback to comment creation.
+
+Keep the same original `source_action_id` across intentional revisions and give each revision its own action key within the operation. If a revision is interrupted, inspect its status and use the original keys and frozen request when resuming. An uncertain edit requires reconciliation.
 
 Notion supports `title`, `rich_text`, `url`, `date` (`YYYY-MM-DD`), and `select` properties. Include the configured title property; select options must already exist. No schema changes are made. Slack text is escaped to prevent mention/link markup injection.
 

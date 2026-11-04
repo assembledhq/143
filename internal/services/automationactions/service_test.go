@@ -20,6 +20,14 @@ type testStore struct {
 	actions                         []models.AutomationAction
 	resolveErr, claimErr, finishErr error
 	claims                          int
+	commentTarget                   models.AutomationActionCommentTarget
+	commentTargetErr                error
+	commentResolutions              int
+}
+
+func (s *testStore) ResolveCommentTarget(context.Context, uuid.UUID, models.AutomationActionScope, models.AutomationActionRequest) (models.AutomationActionCommentTarget, error) {
+	s.commentResolutions++
+	return s.commentTarget, s.commentTargetErr
 }
 
 func (s *testStore) Resolve(context.Context, uuid.UUID, models.AutomationActionActor) (models.AutomationActionScope, error) {
@@ -337,4 +345,59 @@ func TestActionConfigOrderDoesNotChangeDigest(t *testing.T) {
 	require.NoError(t, err, "order-only edits preserve action identity")
 	require.True(t, result.Reused, "return original receipt")
 	require.Equal(t, 1, p.sends, "do not resend after a checkbox reorder")
+}
+
+func TestCommentUpdateBindingAndResume(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		lookupErr     error
+		sendErr       error
+		claimOnResume error
+		wantErr       error
+		wantStatus    models.AutomationActionStatus
+		wantSends     int
+	}{
+		{name: "success reuses receipt without rebinding", wantStatus: models.AutomationActionSucceeded, wantSends: 1},
+		{name: "definite failure resumes frozen target", sendErr: &SendFailure{Code: "DENIED", Definitive: true}, wantStatus: models.AutomationActionSucceeded, wantSends: 2},
+		{name: "unknown delivery cannot resend", sendErr: context.DeadlineExceeded, wantStatus: models.AutomationActionUnknown, wantSends: 1},
+		{name: "receipt outside scope rejected before reservation", lookupErr: db.ErrAutomationActionUnauthorized, wantErr: db.ErrAutomationActionUnauthorized},
+		{name: "changed binding rejected at claim", sendErr: &SendFailure{Code: "DENIED", Definitive: true}, claimOnResume: db.ErrAutomationActionConflict, wantErr: db.ErrAutomationActionConflict, wantStatus: models.AutomationActionFailed, wantSends: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store, provider, request := actionFixture()
+			sourceID := uuid.New()
+			request.Kind, request.PRNumber, request.HeadSHA, request.SourceActionID = models.AutomationActionCommentUpdate, 42, provider.head, sourceID.String()
+			target := models.AutomationActionCommentTarget{SourceActionID: sourceID, CommentID: "12345", PreviousActionID: sourceID, PreviousText: "Original review"}
+			store.commentTarget, store.commentTargetErr, provider.sendErr = target, tt.lookupErr, tt.sendErr
+			svc := New(store, provider, zerolog.Nop())
+			actor := models.AutomationActionActor{OrgID: uuid.New(), RunID: uuid.New()}
+			_, err := svc.Execute(context.Background(), actor, request.AutomationActionKey, &request)
+			if tt.lookupErr != nil {
+				require.ErrorIs(t, err, tt.wantErr, "unowned comment is rejected before reservation")
+				require.Empty(t, store.actions, "an unauthorized source creates no durable action")
+				require.Equal(t, 0, provider.sends, "an unauthorized source never reaches the provider")
+				return
+			}
+			require.NoError(t, err, "first update attempt records its outcome")
+			var frozen Payload
+			require.NoError(t, json.Unmarshal(store.actions[0].Payload, &frozen), "reservation stores a readable frozen payload")
+			require.Equal(t, Payload{Request: request, CommentTarget: &target}, frozen, "reservation freezes the server-resolved comment and previous body")
+			store.commentTarget = models.AutomationActionCommentTarget{SourceActionID: uuid.New(), CommentID: "99999"}
+			store.commentTargetErr = errors.New("lookup must not run again")
+			store.claimErr, provider.sendErr = tt.claimOnResume, nil
+			result, err := svc.Execute(context.Background(), actor, request.AutomationActionKey, nil)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr, "claim rejects a target changed since reservation")
+			} else {
+				require.NoError(t, err, "resume uses the stored target and certainty rules")
+			}
+			require.Equal(t, tt.wantStatus, result.Actions[0].Status, "resume preserves the expected durable outcome")
+			require.Equal(t, tt.wantSends, provider.sends, "resume sends only after definitive failure and a valid claim")
+			require.Equal(t, 1, store.commentResolutions, "same-key resume never chooses a new comment target")
+			require.Equal(t, &target, provider.sent.CommentTarget, "provider receives the original frozen binding")
+		})
+	}
 }

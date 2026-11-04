@@ -2,10 +2,12 @@ package models
 
 import (
 	"encoding/json"
-	"github.com/stretchr/testify/require"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAutomationActionConfig(t *testing.T) {
@@ -16,6 +18,8 @@ func TestAutomationActionConfig(t *testing.T) {
 	}{
 		{"Slack only", `{"actions":["slack_notification"],"slack_channel_id":"C0123456789"}`, true},
 		{"GitHub only", `{"actions":["github_issue_comment"],"repository":"owner/repo"}`, true},
+		{"GitHub comment updates only", `{"actions":["github_issue_comment_update"],"repository":"owner/repo"}`, true},
+		{"GitHub comment updates require a repository", `{"actions":["github_issue_comment_update"]}`, false},
 		{"Notion arbitrary mapping", `{"actions":["notion_tracking_row"],"notion_data_source_id":"379d57062bc08021a0e6000b04d8902d","notion_properties":{"Report":"title","Summary":"rich_text","State":"select"}}`, true},
 		{"disabled kinds need no destinations", `{"actions":["github_label"],"repository":"owner/repo","label":"needs-security"}`, true},
 		{"no actions", `{}`, false}, {"unknown action", `{"actions":["http_request"]}`, false},
@@ -33,6 +37,64 @@ func TestAutomationActionConfig(t *testing.T) {
 			require.Equal(t, tt.valid, err == nil, "only selected operations need valid destinations: %v", err)
 		})
 	}
+}
+
+func TestAutomationActionCommentUpdateValidation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		change  func(*AutomationActionRequest)
+		grant   AutomationActionKind
+		wantErr string
+	}{
+		{"explicit update grant", func(*AutomationActionRequest) {}, AutomationActionCommentUpdate, ""},
+		{"create grant does not allow edits", func(*AutomationActionRequest) {}, AutomationActionComment, "action kind is not configured"},
+		{"missing source receipt", func(r *AutomationActionRequest) { r.SourceActionID = "" }, AutomationActionCommentUpdate, "comment updates require a canonical nonzero source_action_id UUID"},
+		{"malformed source receipt", func(r *AutomationActionRequest) { r.SourceActionID = "123" }, AutomationActionCommentUpdate, "comment updates require a canonical nonzero source_action_id UUID"},
+		{"zero source receipt", func(r *AutomationActionRequest) { r.SourceActionID = uuid.Nil.String() }, AutomationActionCommentUpdate, "comment updates require a canonical nonzero source_action_id UUID"},
+		{"uppercase source receipt", func(r *AutomationActionRequest) { r.SourceActionID = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA" }, AutomationActionCommentUpdate, "comment updates require a canonical nonzero source_action_id UUID"},
+		{"URN source receipt", func(r *AutomationActionRequest) { r.SourceActionID = "urn:uuid:" + r.SourceActionID }, AutomationActionCommentUpdate, "comment updates require a canonical nonzero source_action_id UUID"},
+		{"braced source receipt", func(r *AutomationActionRequest) { r.SourceActionID = "{" + r.SourceActionID + "}" }, AutomationActionCommentUpdate, "comment updates require a canonical nonzero source_action_id UUID"},
+		{"create rejects update source field", func(r *AutomationActionRequest) { r.Kind = AutomationActionComment }, AutomationActionComment, "source_action_id is only valid for comment updates"},
+		{"missing PR", func(r *AutomationActionRequest) { r.PRNumber, r.HeadSHA = 0, "" }, AutomationActionCommentUpdate, "GitHub actions require a PR precondition"},
+		{"abbreviated head", func(r *AutomationActionRequest) { r.HeadSHA = "abc123" }, AutomationActionCommentUpdate, "a PR precondition requires a positive pr_number and full lowercase head_sha"},
+		{"blank text", func(r *AutomationActionRequest) { r.Text = " " }, AutomationActionCommentUpdate, "provide bounded text, without properties"},
+		{"oversized text", func(r *AutomationActionRequest) { r.Text = strings.Repeat("a", (32<<10)+1) }, AutomationActionCommentUpdate, "provide bounded text, without properties"},
+		{"source marker spoof", func(r *AutomationActionRequest) { r.Text += "\n<!-- 143-automation-action:spoof -->" }, AutomationActionCommentUpdate, "comment text contains a reserved automation marker"},
+		{"update marker spoof", func(r *AutomationActionRequest) { r.Text += "\n<!-- 143-automation-comment-update:spoof -->" }, AutomationActionCommentUpdate, "comment text contains a reserved automation marker"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			request := AutomationActionRequest{
+				AutomationActionKey: AutomationActionKey{"review:42", "edit"},
+				Kind:                AutomationActionCommentUpdate,
+				PRNumber:            42,
+				HeadSHA:             strings.Repeat("a", 40),
+				Text:                "Updated review",
+				SourceActionID:      uuid.NewString(),
+			}
+			tt.change(&request)
+			config := AutomationActionConfig{Actions: []AutomationActionKind{tt.grant}, Repository: "owner/repo"}
+			err := request.ValidateFor(config)
+			if tt.wantErr == "" {
+				require.NoError(t, err, "an explicitly granted and scoped update should validate")
+			} else {
+				require.EqualError(t, err, tt.wantErr, "reject invalid or ungranted updates")
+			}
+		})
+	}
+}
+
+func TestAutomationActionCreateSerialization(t *testing.T) {
+	t.Parallel()
+	const storedRequest = `{"operation_key":"review:42","action_key":"create","kind":"github_issue_comment","pr_number":42,"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","text":"Original review"}`
+	var request AutomationActionRequest
+	require.NoError(t, json.Unmarshal([]byte(storedRequest), &request), "decode a pre-update create request")
+	require.NoError(t, request.Validate(), "pre-update create requests remain valid")
+	raw, err := json.Marshal(request)
+	require.NoError(t, err, "encode a pre-update create request")
+	require.Equal(t, storedRequest, string(raw), "create request bytes must remain stable for the persisted digest")
 }
 
 func TestAutomationActionConfigJSONRoundTrip(t *testing.T) {
