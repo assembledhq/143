@@ -37,6 +37,7 @@ describe("review link from a GitHub comment", () => {
     renderWithProviders(<ReviewNowFromComment canManage />, { searchParams: { review_now: sessionID, ...linkParams }, nuqsHasMemory: true });
     const dialog = await screen.findByRole("dialog", { name: "Request full review" });
     const optIn = await within(dialog).findByRole("checkbox", { name: "Use earlier review history (experimental)" });
+    expect(optIn).toHaveAccessibleDescription(/retrieve earlier review reports and session excerpts/i);
     if (toggle) await user.click(optIn);
     expect(optIn).toHaveAttribute("aria-checked", String(history));
     expect(within(dialog).getByText(history ? /Starts a new full review/ : /may be reused/)).toBeInTheDocument();
@@ -110,6 +111,7 @@ describe("review link from a GitHub comment", () => {
     renderWithProviders(<ReviewNowFromComment canManage />, { searchParams: { review_now: sessionID, ...linkParams }, nuqsHasMemory: true });
     const dialog = await screen.findByRole("dialog", { name: "Request full review" });
     const optIn = await within(dialog).findByRole("checkbox", { name: "Override size limits for this review" });
+    expect(optIn).toHaveAccessibleDescription(/waives the files, additions, and deletions limits/i);
     if (toggle) await user.click(optIn);
     await user.click(await within(dialog).findByRole("button", { name: "Request full review" }));
     const expected = override ? { override_size_limits: true, override_review_session_id: sessionID } : {};

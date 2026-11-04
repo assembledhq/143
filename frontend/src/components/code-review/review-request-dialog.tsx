@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { StatusLabel } from "@/components/status-label";
@@ -53,6 +53,7 @@ function resultCopy(result: CodeReviewRequestResponse, mode: RequestMode) {
 
 /** Shared confirmation and receipt for the read-only GitHub action links. */
 export function ReviewRequestDialog({ open, onClose, mode, target, loading, error, unavailable, assessmentID, overrideReviewSessionID, defaultOverrideSizeLimits = false, reviewHistoryAvailable = false, defaultUseReviewHistory = false }: ReviewRequestDialogProps) {
+  const id = useId();
   const client = useQueryClient();
   const requestID = useRef<string | null>(null);
   const [overrideSizeLimits, setOverrideSizeLimits] = useState(defaultOverrideSizeLimits);
@@ -116,25 +117,25 @@ export function ReviewRequestDialog({ open, onClose, mode, target, loading, erro
             : useReviewHistory ? "Starts a new full review unless one with this option is already running."
             : "A running or completed review may be reused if it already covers these changes."}</p> : null}
           {!isRecheck && reviewHistoryAvailable && target && !loading && !error ? <div className="flex items-start gap-2">
-            <Checkbox id="use-review-history" className="mt-0.5" checked={reviewHistorySelected} disabled={mutation.isPending} onCheckedChange={(checked) => {
+            <Checkbox id={`${id}-use-review-history`} aria-describedby={`${id}-use-review-history-description`} className="mt-0.5" checked={reviewHistorySelected} disabled={mutation.isPending} onCheckedChange={(checked) => {
               setReviewHistorySelected(checked === true);
               requestID.current = null;
               mutation.reset();
             }} />
             <div className="space-y-1">
-              <Label htmlFor="use-review-history">Use earlier review history (experimental)</Label>
-              <p className="text-xs text-muted-foreground">143 can retrieve earlier review reports and session excerpts for this pull request and reconcile them with the current code.</p>
+              <Label htmlFor={`${id}-use-review-history`}>Use earlier review history (experimental)</Label>
+              <p id={`${id}-use-review-history-description`} className="text-xs text-muted-foreground">143 can retrieve earlier review reports and session excerpts for this pull request and reconcile them with the current code.</p>
             </div>
           </div> : null}
           {overrideSessionID && target && !loading && !error ? <div className="flex items-start gap-2">
-            <Checkbox id="override-size-limits" className="mt-0.5" checked={overrideSizeLimits} disabled={mutation.isPending} onCheckedChange={(checked) => {
+            <Checkbox id={`${id}-override-size-limits`} aria-describedby={`${id}-override-size-limits-description`} className="mt-0.5" checked={overrideSizeLimits} disabled={mutation.isPending} onCheckedChange={(checked) => {
               setOverrideSizeLimits(checked === true);
               requestID.current = null;
               mutation.reset();
             }} />
             <div className="space-y-1">
-              <Label htmlFor="override-size-limits">Override size limits for this review</Label>
-              <p className="text-xs text-muted-foreground">The override applies only to the linked review&apos;s head and base. It waives the files, additions, and deletions limits. All other safeguards still apply.</p>
+              <Label htmlFor={`${id}-override-size-limits`}>Override size limits for this review</Label>
+              <p id={`${id}-override-size-limits-description`} className="text-xs text-muted-foreground">The override applies only to the linked review&apos;s head and base. It waives the files, additions, and deletions limits. All other safeguards still apply.</p>
             </div>
           </div> : null}
           {unavailable && !loading && !error ? <p role="status" className="text-sm text-muted-foreground">{unavailable}</p> : null}
