@@ -118,6 +118,12 @@ func TestAutomationTurnReviewActionGuidance(t *testing.T) {
 	enabled := AutomationTurnPrompt(AutomationTurnPromptData{Goal: "Review", ActionsEnabled: true})
 	require.Contains(t, enabled, "143-tools automation action-status", "inspect durable state first")
 	require.Contains(t, enabled, "--resume", "resume saved content")
+	for _, guidance := range []string{enabled, AutomationActionInstructions()} {
+		require.Contains(t, guidance, "github_issue_comment_update", "describe the separately granted comment update")
+		require.Contains(t, guidance, "source_action_id, the UUID of the original successful github_issue_comment receipt", "reference the original creation receipt")
+		require.Contains(t, guidance, "<!-- 143-automation-action:UUID -->", "identify the creation receipt marker on the prior comment")
+		require.Contains(t, guidance, "report it without creating a replacement comment", "keep blocked updates from causing duplicate comments")
+	}
 	require.Contains(t, enabled, "never retry using direct provider APIs", "uncertainty cannot bypass duplicate protection")
 	require.NotContains(t, AutomationTurnPrompt(AutomationTurnPromptData{Goal: "Review"}), "## Resumable automation actions", "ungranted turns must not receive write guidance")
 }

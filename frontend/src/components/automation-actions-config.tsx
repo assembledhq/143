@@ -13,6 +13,7 @@ const kinds = [
   ["github_label", "Add a GitHub label"],
   ["github_team_review", "Request a GitHub team review"],
   ["github_issue_comment", "Comment on a GitHub PR"],
+  ["github_issue_comment_update", "Update this automation’s GitHub PR comments"],
   ["notion_tracking_row", "Create a Notion page"],
   ["slack_notification", "Send a Slack message"],
 ] as const;

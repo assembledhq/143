@@ -29,6 +29,7 @@ type Store interface {
 	ResolveStatus(context.Context, uuid.UUID, models.AutomationActionActor) (models.AutomationActionScope, error)
 	Expire(context.Context, uuid.UUID, models.AutomationActionScope, string) error
 	List(context.Context, uuid.UUID, models.AutomationActionScope, string) ([]models.AutomationAction, error)
+	ResolveCommentTarget(context.Context, uuid.UUID, models.AutomationActionScope, models.AutomationActionRequest) (models.AutomationActionCommentTarget, error)
 	Reserve(context.Context, uuid.UUID, models.AutomationActionActor, models.AutomationActionRequest, string, models.AutomationActionConfig, json.RawMessage) (models.AutomationAction, error)
 	Claim(context.Context, uuid.UUID, models.AutomationActionActor, uuid.UUID) (models.AutomationAction, error)
 	Finish(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.AutomationActionStatus, string, string, string) error
@@ -41,8 +42,9 @@ type PullRequest struct {
 	Author string `json:"author"`
 }
 type Payload struct {
-	Request models.AutomationActionRequest `json:"request"`
-	PR      PullRequest                    `json:"pr"`
+	Request       models.AutomationActionRequest        `json:"request"`
+	PR            PullRequest                           `json:"pr"`
+	CommentTarget *models.AutomationActionCommentTarget `json:"comment_target,omitempty"`
 }
 type Receipt struct{ ID, URL string }
 
@@ -157,7 +159,15 @@ func (s *Service) Execute(ctx context.Context, actor models.AutomationActionActo
 			return result, err
 		}
 
-		raw, marshalErr := json.Marshal(Payload{Request: *request})
+		payload := Payload{Request: *request}
+		if request.Kind == models.AutomationActionCommentUpdate {
+			target, targetErr := s.store.ResolveCommentTarget(ctx, actor.OrgID, scope, *request)
+			if targetErr != nil {
+				return result, targetErr
+			}
+			payload.CommentTarget = &target
+		}
+		raw, marshalErr := json.Marshal(payload)
 		if marshalErr != nil {
 			return result, marshalErr
 		}

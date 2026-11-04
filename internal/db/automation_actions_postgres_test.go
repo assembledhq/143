@@ -3,38 +3,50 @@ package db
 import (
 	"context"
 	"encoding/json"
-	"github.com/assembledhq/143/internal/models"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/assembledhq/143/internal/models"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/require"
 )
 
+var actionPostgresFixtureSlots = make(chan struct{}, 8)
+
 func actionPostgres(t *testing.T, continuous bool) (*pgxpool.Pool, models.AutomationActionActor) {
+	t.Helper()
+	return actionPostgresWithGrant(t, continuous, false)
+}
+
+func actionPostgresWithGrant(t *testing.T, continuous, commentUpdates bool) (*pgxpool.Pool, models.AutomationActionActor) {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("set TEST_DATABASE_URL for reservation and lease fencing proof")
 	}
+	// Each fixture may hold one admin connection and up to four pooled connections.
+	actionPostgresFixtureSlots <- struct{}{}
+	t.Cleanup(func() { <-actionPostgresFixtureSlots })
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, dsn)
 	require.NoError(t, err, "connect database")
+	t.Cleanup(func() { require.NoError(t, admin.Close(ctx), "close admin") })
 	schema := "actions_" + strings.ReplaceAll(uuid.NewString(), "-", "")
 	_, err = admin.Exec(ctx, "CREATE SCHEMA "+schema)
 	require.NoError(t, err, "create isolated schema")
 	t.Cleanup(func() {
 		_, err := admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
 		require.NoError(t, err, "remove isolated schema")
-		require.NoError(t, admin.Close(ctx), "close admin")
 	})
 	cfg, err := pgxpool.ParseConfig(dsn)
 	require.NoError(t, err, "parse connection")
+	cfg.MaxConns = 4
 	cfg.ConnConfig.RuntimeParams["search_path"] = schema
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	require.NoError(t, err, "create pool")
@@ -52,14 +64,19 @@ func actionPostgres(t *testing.T, continuous bool) (*pgxpool.Pool, models.Automa
  CREATE TABLE agent_capability_policies(id uuid PRIMARY KEY,org_id uuid,automation_id uuid,active boolean DEFAULT true,policy_type text DEFAULT 'automation');
  CREATE TABLE agent_capability_policy_grants(id uuid PRIMARY KEY,org_id uuid,policy_id uuid,capability_id text DEFAULT 'automation_actions',enabled boolean DEFAULT true,access_level text DEFAULT 'write',config jsonb);`)
 	require.NoError(t, err, "create authorization fixture tables")
-	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000292_automation_actions.up.sql"))
-	require.NoError(t, err, "read actual migration")
-	_, err = pool.Exec(ctx, string(migration))
-	require.NoError(t, err, "apply actual action migration")
+	for _, name := range []string{"000292_automation_actions.up.sql", "000396_automation_comment_updates.up.sql"} {
+		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
+		require.NoError(t, err, "read migration %s", name)
+		_, err = pool.Exec(ctx, string(migration))
+		require.NoError(t, err, "apply migration %s", name)
+	}
 	a := models.AutomationActionActor{OrgID: uuid.New(), RepositoryID: uuid.New(), SessionID: uuid.New(), ThreadID: uuid.New(), RunID: uuid.New(), AttemptToken: uuid.New(), JobID: uuid.New()}
 	automation, target, generation, policy := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	// The configuration form includes empty Notion fields even when Notion is disabled.
 	raw := json.RawMessage(`{"actions":["slack_notification","github_issue_comment"],"repository":"owner/repo","slack_channel_id":"C0123456789","notion_properties":{},"notion_data_source_id":""}`)
+	if commentUpdates {
+		raw = json.RawMessage(`{"actions":["slack_notification","github_issue_comment","github_issue_comment_update"],"repository":"owner/repo","slack_channel_id":"C0123456789"}`)
+	}
 	batch := &pgx.Batch{}
 	batch.Queue(`INSERT INTO organizations VALUES($1)`, a.OrgID)
 	batch.Queue(`INSERT INTO automations(id,org_id) VALUES($1,$2)`, automation, a.OrgID)

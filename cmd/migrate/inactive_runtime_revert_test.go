@@ -54,12 +54,13 @@ func TestRuntimeRevertMigrationPreflight(t *testing.T) {
 		{name: "older schema checked after upgrade", ledger: fakeDirtyMigrationRepairer{version: 345}},
 		{name: "partial clean schema checked after upgrade", ledger: fakeDirtyMigrationRepairer{version: 391}},
 		{name: "dirty schema rejected before writes", ledger: fakeDirtyMigrationRepairer{version: 392, dirty: true}, refusal: "dirty migration ledger"},
-		{name: "unknown newer schema", ledger: fakeDirtyMigrationRepairer{version: 396}, refusal: "schema through 395 only"},
+		{name: "unknown newer schema", ledger: fakeDirtyMigrationRepairer{version: 397}, refusal: "schema through 396 only"},
 		{name: "ledger error", ledger: fakeDirtyMigrationRepairer{versionErr: errors.New("synthetic read failure")}, refusal: "synthetic read failure"},
 		{name: "392 requires real inspection", ledger: fakeDirtyMigrationRepairer{version: 392}, refusal: "invalid rollback database connection settings"},
 		{name: "393 requires real inspection", ledger: fakeDirtyMigrationRepairer{version: 393}, refusal: "invalid rollback database connection settings"},
 		{name: "394 requires real inspection", ledger: fakeDirtyMigrationRepairer{version: 394}, refusal: "invalid rollback database connection settings"},
 		{name: "395 requires real inspection", ledger: fakeDirtyMigrationRepairer{version: 395}, refusal: "invalid rollback database connection settings"},
+		{name: "396 requires real inspection", ledger: fakeDirtyMigrationRepairer{version: 396}, refusal: "invalid rollback database connection settings"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
