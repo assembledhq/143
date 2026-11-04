@@ -63,6 +63,7 @@ func (assessmentFilesFixture) ListPullRequestFiles(context.Context, PullRequestF
 type assessmentSnapshotFixture struct {
 	guidance                          *models.CodeReviewRepositoryGuidance
 	guidanceErr                       error
+	guidanceCalls                     int
 	snapshot                          ghservice.CodeReviewPullRequestSnapshot
 	changeDuringCapture               bool
 	calls, snapshotCalls, healthCalls int
@@ -76,6 +77,7 @@ type assessmentSnapshotFixture struct {
 }
 
 func (f *assessmentSnapshotFixture) CaptureCodeReviewRepositoryGuidance(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewRepositoryGuidance, error) {
+	f.guidanceCalls++
 	if f.guidance != nil {
 		return *f.guidance, f.guidanceErr
 	}
@@ -240,6 +242,17 @@ func TestAssessmentInputCaptureBracketsMutableSources(t *testing.T) {
 			require.NoError(t, err, "same-head review must recapture current default branch guidance")
 			require.Equal(t, snapshots.guidance, updatedGuidance.Manifest.Contract.RepositoryGuidance, "captured manifest must preserve actual guidance bytes")
 			require.Equal(t, RecheckReasonContractChanged, RecheckBaselineChange(updatedGuidance.Manifest, result.Manifest), "guidance updates must force a full review without a rebase")
+			calls := snapshots.guidanceCalls
+			snapshots.guidanceErr = errors.New("live guidance is unavailable after reviewers start")
+			for _, contract := range []ReviewContractInput{result.Manifest.Contract, {}} {
+				in.CapturedContract = &contract
+				pinned, err := s.CaptureAssessmentInputs(ctx, in)
+				require.NoError(t, err, "post-start capture should preserve pinned and historical guidance")
+				require.Equal(t, contract.RepositoryGuidance, pinned.Manifest.Contract.RepositoryGuidance, "post-start capture must keep the exact guidance used by reviewers")
+				require.Equal(t, calls, snapshots.guidanceCalls, "post-start capture must avoid the repository guidance endpoint")
+			}
+			in.CapturedContract = nil
+			snapshots.guidanceErr = nil
 			s.SetExternalContextResolver(assessmentExternalFixture{digest: "changed-integration-tools"})
 			changed, err := s.CaptureAssessmentInputs(context.Background(), in)
 			require.NoError(t, err, "changed external prompt context should remain capturable")
