@@ -112,3 +112,65 @@ func TestProvidersGitHubReview(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderReconcilesOnlyTrustedGitHubReview(t *testing.T) {
+	t.Parallel()
+	const url = "https://github.com/owner/repo/pull/42#pullrequestreview-314"
+	head := strings.Repeat("a", 40)
+	tests := []struct {
+		name     string
+		change   func(*githubReviewResponse)
+		want     Receipt
+		paginate bool
+	}{
+		{name: "verified bot and marker", want: Receipt{ID: "314", URL: url}},
+		{name: "verified receipt on later page", want: Receipt{ID: "314", URL: url}, paginate: true},
+		{name: "matching app ID after a slug change", change: func(r *githubReviewResponse) { r.User.Login, r.App.ID = "new-slug[bot]", 143 }, want: Receipt{ID: "314", URL: url}},
+		{name: "other app with copied marker", change: func(r *githubReviewResponse) { r.App.ID = 144 }},
+		{name: "human with copied marker via the same app", change: func(r *githubReviewResponse) { r.User.Type, r.App.ID = "User", 143 }},
+		{name: "marker belongs to a different action", change: func(r *githubReviewResponse) {
+			r.Body = models.AutomationReviewMarkedBody("Another review", uuid.New())
+		}},
+		{name: "incorrect commit", change: func(r *githubReviewResponse) { r.CommitID = strings.Repeat("b", 40) }},
+		{name: "incorrect PR", change: func(r *githubReviewResponse) {
+			r.URL = "https://github.com/owner/repo/pull/43#pullrequestreview-314"
+		}},
+		{name: "incorrect review state", change: func(r *githubReviewResponse) { r.State = "APPROVED" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			scope := providerScope()
+			action := models.AutomationAction{ID: uuid.New(), Kind: models.AutomationActionGitHubReview, PRNumber: 42, HeadSHA: head}
+			review := githubReviewResponse{ID: 314, URL: url, CommitID: head, State: "COMMENTED", Body: models.AutomationReviewMarkedBody("Posted review", action.ID)}
+			review.User.Login, review.User.Type = "review-bot[bot]", "Bot"
+			if tt.change != nil {
+				tt.change(&review)
+			}
+			var pages []string
+			client := &http.Client{Transport: actionRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				require.Equal(t, "GET", req.Method, "reconciliation never sends a write")
+				require.Equal(t, "api.github.com", req.URL.Host, "read from the fixed GitHub API")
+				require.Equal(t, "/repos/owner/repo/pulls/42/reviews", req.URL.Path, "read only reviews for the original pull request")
+				page := req.URL.Query().Get("page")
+				pages = append(pages, page)
+				reviews := []githubReviewResponse{review}
+				if tt.paginate && page == "1" {
+					reviews = make([]githubReviewResponse, 50)
+				}
+				body, err := json.Marshal(reviews)
+				require.NoError(t, err, "encode the provider review page")
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+			})}
+			provider := NewProviders(testTokens{}, nil, nil, WithGitHubHTTPClient(client), WithGitHubAppIdentity(143, "review-bot"))
+			got, err := provider.ReconcileGitHubReview(t.Context(), scope, action)
+			require.NoError(t, err, "missing or untrusted review is not an error")
+			require.Equal(t, tt.want, got, "recover only a matching receipt from the configured GitHub App")
+			wantPages := []string{"1"}
+			if tt.paginate {
+				wantPages = append(wantPages, "2")
+			}
+			require.Equal(t, wantPages, pages, "stop reading once a matching review or the end of the list is found")
+		})
+	}
+}

@@ -6,6 +6,17 @@ import (
 	"github.com/google/uuid"
 )
 
+func IsAutomationReviewFromApp(appID int64, appSlug string, providedAppID int64, login, authorType string) bool {
+	if appID <= 0 {
+		return false
+	}
+	if providedAppID > 0 {
+		return providedAppID == appID
+	}
+	slug := strings.TrimSpace(appSlug)
+	return slug != "" && strings.EqualFold(authorType, "Bot") && strings.EqualFold(login, slug+"[bot]")
+}
+
 func AutomationReviewMarkedBody(text string, actionID uuid.UUID) string {
 	return text + "\n\n" + AutomationActionReviewMarkerPrefix + actionID.String() + " -->"
 }
@@ -56,5 +67,7 @@ func (f AutomationActionReviewFeedback) Matches(request AutomationActionRequest,
 }
 
 func normalizeAutomationReviewBody(body string) string {
-	return strings.ReplaceAll(body, "\r\n", "\n")
+	return strings.TrimSpace(automationReviewLineEndings.Replace(body))
 }
+
+var automationReviewLineEndings = strings.NewReplacer("\r\n", "\n", "\r", "\n")

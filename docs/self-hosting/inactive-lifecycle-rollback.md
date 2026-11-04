@@ -105,3 +105,31 @@ revision with the retained schema before separately authorizing deployment. The
 binary-only rollback command above requires an explicit pin to 392 or 393 and a
 guard image that supports that version. It does not infer compatibility with
 future schemas or enable lifecycle participation.
+
+### Rolling back a release with inline automation reviews
+
+Application releases that predate schema 398 support neither the inline review
+action nor an enabled **Resumable automation actions** grant that includes it.
+One unsupported action invalidates the whole grant, including otherwise
+supported actions such as Slack notifications.
+
+1. Keep the schema-398-compatible API, frontend and workers running while you
+   pause each automation that has **Post an advisory GitHub PR review with
+   inline comments** enabled. Let in-flight actions settle and retain their
+   receipts, including any uncertain sends.
+2. As an organization admin, open **Configure actions** for each affected
+   automation, clear the inline review action, and save the other selections.
+   If inline review was the only selection, disable **Resumable automation
+   actions** for that automation. Reopen each affected automation and verify
+   its enabled grant contains only actions supported by the rollback target.
+3. Use a separately reviewed application rollback procedure that retains schema
+   398 and its action receipts. An older migrator refuses schema 398, and the
+   binary-only rollback procedure above supports only schemas 392 and 393.
+   Migration 398 down refuses to remove inline review support while an enabled
+   inline review grant or an inline review receipt exists. Removing a grant does
+   not remove its receipts.
+
+If an older release is already running with an incompatible grant, restore a
+schema-398-compatible release, clean up the grants, and verify the remaining
+actions on a fresh run before attempting the rollback again. Keep existing
+receipts throughout recovery so pending and uncertain sends can be reconciled.

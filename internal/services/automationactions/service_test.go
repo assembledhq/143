@@ -53,7 +53,7 @@ func (s *testStore) Reserve(_ context.Context, _ uuid.UUID, a models.AutomationA
 	if err != nil {
 		return models.AutomationAction{}, err
 	}
-	out := models.AutomationAction{ID: uuid.New(), OperationKey: r.OperationKey, ActionKey: r.ActionKey, Kind: r.Kind, HeadSHA: r.HeadSHA, RequestDigest: digest, Destination: dest, Payload: p, Status: models.AutomationActionPending, CreatedRunID: a.RunID}
+	out := models.AutomationAction{ID: uuid.New(), OperationKey: r.OperationKey, ActionKey: r.ActionKey, Kind: r.Kind, PRNumber: r.PRNumber, HeadSHA: r.HeadSHA, RequestDigest: digest, Destination: dest, Payload: p, Status: models.AutomationActionPending, CreatedRunID: a.RunID}
 	s.actions = append(s.actions, out)
 	return out, nil
 }
@@ -98,6 +98,8 @@ type testProvider struct {
 	closed                            bool
 	inspectErr, preflightErr, sendErr error
 	sent                              Payload
+	reconciliations                   int
+	recoveredReview                   Receipt
 }
 
 func (p *testProvider) Inspect(context.Context, models.AutomationActionScope) (PullRequest, error) {
@@ -112,6 +114,10 @@ func (p *testProvider) Send(_ context.Context, _ models.AutomationActionScope, _
 	p.sends++
 	p.sent = payload
 	return Receipt{ID: "receipt"}, p.sendErr
+}
+func (p *testProvider) ReconcileGitHubReview(_ context.Context, _ models.AutomationActionScope, _ models.AutomationAction) (Receipt, error) {
+	p.reconciliations++
+	return p.recoveredReview, nil
 }
 func actionFixture() (*testStore, *testProvider, models.AutomationActionRequest) {
 	return &testStore{scope: models.AutomationActionScope{RepositoryName: "owner/repo", Config: models.AutomationActionConfig{Actions: models.AutomationActionKinds(), Repository: "owner/repo", SlackChannelID: "C0123456789"}}}, &testProvider{head: strings.Repeat("a", 40)}, models.AutomationActionRequest{AutomationActionKey: models.AutomationActionKey{OperationKey: "daily:2026-09-22", ActionKey: "notify"}, Kind: models.AutomationActionSlack, Text: "Daily summary"}
@@ -197,6 +203,32 @@ func TestGitHubReviewActionReplay(t *testing.T) {
 			require.Equal(t, 1, provider.sends, "changed content must not trigger a provider request")
 		})
 	}
+}
+
+func TestGitHubReviewReconciliationAfterHeadMoves(t *testing.T) {
+	t.Parallel()
+	store, provider, request := actionFixture()
+	store.scope.PRNumber, store.scope.HeadSHA = 42, provider.head
+	request.Kind, request.PRNumber, request.HeadSHA = models.AutomationActionGitHubReview, 42, provider.head
+	request.Comments = []models.AutomationActionReviewComment{{Path: "ui/Card.tsx", Line: 12, Body: "Use the shared Card."}}
+	provider.sendErr = context.DeadlineExceeded
+	service := New(store, provider, zerolog.Nop())
+	actor := models.AutomationActionActor{OrgID: uuid.New(), RunID: uuid.New()}
+	result, err := service.Execute(t.Context(), actor, request.AutomationActionKey, &request)
+	require.NoError(t, err, "record the uncertain outcome")
+	require.Equal(t, models.AutomationActionNeedsAttention, result.Status, "do not infer delivery from a timeout")
+
+	store.scope.HeadSHA = strings.Repeat("b", 40)
+	actor.RunID = uuid.New()
+	provider.recoveredReview = Receipt{ID: "314", URL: "https://github.com/owner/repo/pull/42#pullrequestreview-314"}
+	result, err = service.Execute(t.Context(), actor, request.AutomationActionKey, nil)
+	require.NoError(t, err, "recover a verified receipt on the same PR after a push")
+	require.Equal(t, models.AutomationActionDelivered, result.Status, "record the recovered review as delivered")
+	require.True(t, result.Reused, "report a receipt without a new send")
+	require.Equal(t, &provider.recoveredReview.ID, result.Actions[0].ProviderObjectID, "retain the verified provider review ID")
+	require.Equal(t, 1, provider.reconciliations, "read GitHub once to reconcile the unknown send")
+	require.Equal(t, 1, provider.sends, "never submit the review again")
+	require.Equal(t, 1, store.claims, "reuse the original send token without claiming another attempt")
 }
 
 func TestActionAdmissionAndFencing(t *testing.T) {

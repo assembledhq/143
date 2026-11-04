@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/url"
 	"regexp"
@@ -325,6 +326,9 @@ func (r AutomationActionRequest) validateGitHubReview() error {
 	if strings.Contains(r.Text, reservedMarker) {
 		return errors.New("review text contains a reserved automation marker")
 	}
+	if strings.ContainsRune(html.UnescapeString(r.Text), '@') {
+		return errors.New("review text must leave mentions to the server")
+	}
 
 	type anchor struct {
 		path string
@@ -340,6 +344,9 @@ func (r AutomationActionRequest) validateGitHubReview() error {
 		}
 		if strings.Contains(comment.Body, reservedMarker) {
 			return fmt.Errorf("inline comment %d contains a reserved automation marker", i+1)
+		}
+		if strings.ContainsRune(html.UnescapeString(comment.Body), '@') {
+			return fmt.Errorf("inline comment %d must leave mentions to the server", i+1)
 		}
 		key := anchor{path: comment.Path, line: comment.Line}
 		if seen[key] {

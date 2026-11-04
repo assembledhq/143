@@ -39,9 +39,17 @@ type Providers struct {
 	client               *http.Client
 	githubClient         *http.Client
 	githubURL, notionURL string
+	githubAppID          int64
+	githubAppSlug        string
 }
 
 type ProviderOption func(*Providers)
+
+func WithGitHubAppIdentity(id int64, slug string) ProviderOption {
+	return func(p *Providers) {
+		p.githubAppID, p.githubAppSlug = id, slug
+	}
+}
 
 // WithGitHubHTTPClient retains the action adapter's bounded, non-redirecting
 // requests while sharing production GitHub telemetry and cooldown control.

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -99,22 +100,35 @@ func TestWebhook_GitHubReviewIsOwnApp(t *testing.T) {
 
 	tests := []struct {
 		name       string
+		slug       string
 		app        *ghservice.FeedbackGitHubAppIdentity
 		login      string
 		authorType string
+		marked     bool
 		want       bool
+		wantWarn   bool
 	}{
-		{name: "verified app ID", app: &ghservice.FeedbackGitHubAppIdentity{ID: 143}, want: true},
-		{name: "signed bot author without app metadata", login: "review-bot[bot]", authorType: "Bot", want: true},
-		{name: "different app ID takes precedence", app: &ghservice.FeedbackGitHubAppIdentity{ID: 314}, login: "review-bot[bot]", authorType: "Bot"},
-		{name: "different bot", login: "other-app[bot]", authorType: "Bot"},
-		{name: "human login", login: "review-bot[bot]", authorType: "User"},
+		{name: "verified app ID without a slug", app: &ghservice.FeedbackGitHubAppIdentity{ID: 143}, want: true},
+		{name: "verified app ID with a stale slug", slug: "previous-name", app: &ghservice.FeedbackGitHubAppIdentity{ID: 143}, login: "review-bot[bot]", authorType: "Bot", want: true},
+		{name: "signed bot author without app metadata", slug: "review-bot", login: "review-bot[bot]", authorType: "Bot", want: true},
+		{name: "different app ID takes precedence", slug: "review-bot", app: &ghservice.FeedbackGitHubAppIdentity{ID: 314}, login: "review-bot[bot]", authorType: "Bot", marked: true},
+		{name: "unattributed marked review without a slug", login: "review-bot[bot]", authorType: "Bot", marked: true, wantWarn: true},
+		{name: "unattributed marked review with a stale slug", slug: "previous-name", login: "review-bot[bot]", authorType: "Bot", marked: true, wantWarn: true},
+		{name: "unrelated bot review", slug: "review-bot", login: "other-app[bot]", authorType: "Bot"},
+		{name: "human with a copied marker", slug: "review-bot", login: "review-bot[bot]", authorType: "User", marked: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			handler := &WebhookHandler{cfg: &config.Config{GitHubAppID: 143, GitHubAppSlug: "review-bot"}}
-			require.Equal(t, tt.want, handler.githubReviewIsOwnApp(tt.app, tt.login, tt.authorType), "verify app provenance from the signed review author")
+			handler := &WebhookHandler{cfg: &config.Config{GitHubAppID: 143, GitHubAppSlug: tt.slug}}
+			body := "A review finding."
+			if tt.marked {
+				body = models.AutomationReviewMarkedBody(body, uuid.New())
+			}
+			var logs bytes.Buffer
+			ctx := zerolog.New(&logs).WithContext(context.Background())
+			require.Equal(t, tt.want, handler.githubReviewIsOwnApp(ctx, tt.app, tt.login, tt.authorType, body), "verify app provenance from the signed review author")
+			require.Equal(t, tt.wantWarn, strings.Contains(logs.String(), "did not match GITHUB_APP_SLUG"), "warn about unverifiable marked bot reviews")
 		})
 	}
 }

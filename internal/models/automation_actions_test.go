@@ -128,6 +128,9 @@ func TestAutomationActionGitHubReviewValidation(t *testing.T) {
 		{"properties", func(r *AutomationActionRequest) { r.Properties = map[string]string{} }, AutomationActionGitHubReview, "GitHub PR reviews accept optional bounded summary text, without properties"},
 		{"source action", func(r *AutomationActionRequest) { r.SourceActionID = uuid.NewString() }, AutomationActionGitHubReview, "source_action_id is only valid for comment updates"},
 		{"spoofed summary marker", func(r *AutomationActionRequest) { r.Text = AutomationActionReviewMarkerPrefix + "spoof -->" }, AutomationActionGitHubReview, "review text contains a reserved automation marker"},
+		{"summary team mention", func(r *AutomationActionRequest) { r.Text = "Ask @owner/team" }, AutomationActionGitHubReview, "review text must leave mentions to the server"},
+		{"finding user mention", func(r *AutomationActionRequest) { r.Comments[0].Body = "Ask @someone" }, AutomationActionGitHubReview, "inline comment 1 must leave mentions to the server"},
+		{"encoded finding mention", func(r *AutomationActionRequest) { r.Comments[0].Body = "Ask &#64;someone" }, AutomationActionGitHubReview, "inline comment 1 must leave mentions to the server"},
 		{"spoofed finding marker", func(r *AutomationActionRequest) {
 			r.Comments[0].Body += AutomationActionCommentMarkerPrefix + "spoof -->"
 		}, AutomationActionGitHubReview, "inline comment 1 contains a reserved automation marker"},

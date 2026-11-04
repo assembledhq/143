@@ -125,6 +125,7 @@ func TestAutomationTurnReviewActionGuidance(t *testing.T) {
 		require.Contains(t, guidance, "report it without creating a replacement comment", "keep blocked updates from causing duplicate comments")
 		require.Contains(t, guidance, "github_pull_request_review submits an advisory GitHub COMMENT review", "describe the scoped inline review grant")
 		require.Contains(t, guidance, "right side of the current", "anchor findings on the current diff")
+		require.Contains(t, guidance, "searches GitHub for the existing review without sending again", "reconcile unknown review delivery without a new send")
 	}
 	require.Contains(t, enabled, "never retry using direct provider APIs", "uncertainty cannot bypass duplicate protection")
 	require.NotContains(t, AutomationTurnPrompt(AutomationTurnPromptData{Goal: "Review"}), "## Resumable automation actions", "ungranted turns must not receive write guidance")

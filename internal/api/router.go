@@ -222,6 +222,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		} else {
 			ghSvc.SetRateLimitController(githubRateLimitController, logger)
 			automationActionTokens = ghSvc
+			if strings.TrimSpace(cfg.GitHubAppSlug) == "" {
+				logger.Warn().Msg("GITHUB_APP_SLUG is unset. Automation review attribution requires an App ID in GitHub's review payloads")
+			}
 			prService = ghservice.NewPRService(
 				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, repoStore, jobStore, logger,
@@ -1199,6 +1202,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		// (design doc 125) is enforced server-side on every call.
 		toolGate := handlers.NewInternalToolGate(cfg.SessionSecret)
 		automationActions := automationactions.New(db.NewAutomationActionStore(pool), automationactions.NewProviders(automationActionTokens, credentialStore, ingestion.NewSlackAPIClient(logger),
+			automationactions.WithGitHubAppIdentity(cfg.GitHubAppID, cfg.GitHubAppSlug),
 			automationactions.WithGitHubHTTPClient(githubtelemetry.NewControlledHTTPClient(4*time.Second, logger, githubRateLimitController, "automation_action"))), logger)
 		automationActionHandler := handlers.NewInternalAutomationActionHandler(sessionStore, automationActions, cfg.SessionSecret)
 		r.Route("/api/v1/internal", func(r chi.Router) {

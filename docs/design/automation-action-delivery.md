@@ -63,12 +63,16 @@ relative file path, a right-side diff line, and a body at the supplied PR head.
 Optional summary text and each comment body are limited to 4 KiB. The server
 adds the verified PR author mention, submits a single GitHub `COMMENT` review,
 and persists the GitHub review ID and permalink in the action receipt.
+Generated summary text and inline bodies reserve mentions for the server.
 
 Migration 398 extends the `automation_actions.kind` constraint and retains the
 existing tenant, target, and action-key scope. The server adds an action marker
 to the summary and inline bodies for provider reconciliation and suppresses
-feedback from that review for the automation that published it. The rollback
-refuses to remove the kind while a review action remains in the table.
+feedback from that review for the automation that published it. Explicitly
+resuming an unknown review looks for its marker on a review by the configured
+GitHub App at the original PR head. A match restores the receipt. An absent
+match or interrupted lookup leaves the send unknown. The rollback refuses to
+remove the kind while a current grant or review action exists.
 
 ## Authority
 

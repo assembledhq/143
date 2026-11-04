@@ -426,15 +426,20 @@ func (h *WebhookHandler) codeReviewCommentIsAutomated(performedViaGitHubApp *ghs
 		performedViaGitHubApp.ID == h.cfg.GitHubAppID
 }
 
-func (h *WebhookHandler) githubReviewIsOwnApp(app *ghservice.FeedbackGitHubAppIdentity, login, authorType string) bool {
+func (h *WebhookHandler) githubReviewIsOwnApp(ctx context.Context, app *ghservice.FeedbackGitHubAppIdentity, login, authorType, body string) bool {
 	if h.cfg == nil || h.cfg.GitHubAppID <= 0 {
 		return false
 	}
-	if app != nil && app.ID > 0 {
-		return app.ID == h.cfg.GitHubAppID
+	var appID int64
+	if app != nil {
+		appID = app.ID
 	}
-	slug := strings.TrimSpace(h.cfg.GitHubAppSlug)
-	return slug != "" && strings.EqualFold(authorType, "Bot") && strings.EqualFold(login, slug+"[bot]")
+	own := models.IsAutomationReviewFromApp(h.cfg.GitHubAppID, h.cfg.GitHubAppSlug, appID, login, authorType)
+	if !own && appID <= 0 && strings.EqualFold(authorType, "Bot") &&
+		(models.AutomationActionReviewFeedback{Body: body}).ActionID() != uuid.Nil {
+		zerolog.Ctx(ctx).Warn().Str("github_login", login).Msg("GitHub bot review with an automation marker omitted App ID and did not match GITHUB_APP_SLUG")
+	}
+	return own
 }
 
 func codeReviewMentionAuthorTrusted(event ghservice.IssueCommentEvent) bool {
@@ -837,7 +842,7 @@ func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.
 		event.OwnerOrgID = &owner.OrgID
 	}
 
-	event.OwnAppReview = h.githubReviewIsOwnApp(event.Review.PerformedViaGitHubApp, event.Review.User.Login, event.Review.User.Type)
+	event.OwnAppReview = h.githubReviewIsOwnApp(r.Context(), event.Review.PerformedViaGitHubApp, event.Review.User.Login, event.Review.User.Type, event.Review.Body)
 	if err := h.prService.HandlePullRequestReviewEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_EVENT_FAILED", "failed to process pull_request_review event", err)
 		return
@@ -875,7 +880,7 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 	if (event.Action == "created" || event.Action == "edited") && event.Comment.InReplyToID != nil && h.codeReviewDisputes != nil && h.pullRequests != nil {
 		event.RecordOnly = h.handleCodeReviewInlineDispute(r, event, owner)
 	}
-	event.OwnAppReview = h.githubReviewIsOwnApp(event.Comment.PerformedViaGitHubApp, event.Comment.User.Login, event.Comment.User.Type)
+	event.OwnAppReview = h.githubReviewIsOwnApp(r.Context(), event.Comment.PerformedViaGitHubApp, event.Comment.User.Login, event.Comment.User.Type, event.Comment.Body)
 	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event", err)
 		return
