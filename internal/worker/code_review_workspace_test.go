@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"reflect"
 	"testing"
 	"time"
 
@@ -213,13 +212,20 @@ func TestEnsureCodeReviewWorkspaceReadyFallsBackWhenPreparationCannotServe(t *te
 
 func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 	t.Parallel()
+	workerNodeID, containerID := "worker-1", "container-1"
 	tests := []struct {
 		name           string
+		generation     int64
+		workerNodeID   *string
+		containerID    *string
+		wantTarget     *string
 		correlated     bool
 		existing       bool
 		afterPreflight bool
 	}{
-		{name: "controller identity is captured", correlated: true},
+		{name: "unowned cold preparation captures controller identity", correlated: true},
+		{name: "cold preparation ignores stale worker ownership", workerNodeID: &workerNodeID, generation: 3},
+		{name: "existing container pins preparation to its owner", workerNodeID: &workerNodeID, containerID: &containerID, wantTarget: &workerNodeID},
 		{name: "legacy caller keeps polling"},
 		{name: "existing preparation avoids duplicate enqueue", correlated: true, existing: true},
 		{name: "active preparation after preflight still gates reviewer launch", correlated: true, existing: true, afterPreflight: true},
@@ -240,7 +246,7 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 				expectedControllerID = &controllerID
 			}
 			job := runCodeReviewPayload{OrgID: orgID, SessionID: sessionID, MetadataID: reviewID, HeadSHA: "head-1"}
-			key := codeReviewWorkspacePreparationKey(reviewID, sessionID, 0)
+			key := codeReviewWorkspacePreparationKey(reviewID, sessionID, tt.generation)
 			mock.ExpectQuery("SELECT s.container_id, s.worker_node_id, s.workspace_generation").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "review_id": reviewID, "session_id": sessionID, "head_sha": job.HeadSHA}).
 				WillReturnRows(pgxmock.NewRows([]string{"container_id", "worker_node_id", "workspace_generation"}))
@@ -253,6 +259,9 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 					models.CodeReviewSessionStatusRunning, nil, nil, nil, nil, nil, false,
 					nil, nil, false, nil, "output-key", nil, nil, nil, nil, nil, nil, now))
 			sessionRow := workerSessionRow(sessionID, uuid.Nil, orgID, models.SessionStatusRunning, 0, nil, nil)
+			setWorkerSessionColumn(sessionRow, "workspace_generation", tt.generation)
+			setWorkerSessionColumn(sessionRow, "container_id", tt.containerID)
+			setWorkerSessionColumn(sessionRow, "worker_node_id", tt.workerNodeID)
 			setWorkerSessionColumn(sessionRow, "origin", models.SessionOriginCodeReview)
 			setWorkerSessionColumn(sessionRow, "repository_id", &repositoryID)
 			mock.ExpectQuery("FROM sessions").WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
@@ -266,12 +275,22 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 			mock.ExpectQuery("SELECT status, last_error FROM jobs").WithArgs(orgID, "agent", key).WillReturnRows(statusRows)
 			mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).WillReturnRows(startedRows)
 			if !tt.existing {
-				mock.ExpectQuery("WITH candidates AS").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
-					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("worker-1"))
-				mock.ExpectQuery("INSERT INTO jobs").WithArgs(
-					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), preparedWorkspacePayloadArg{expected: prepareCodeReviewWorkspacePayload{OrgID: orgID, MetadataID: reviewID, SessionID: sessionID, ControllerJobID: expectedControllerID}},
-					pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-				).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+				payload, err := json.Marshal(prepareCodeReviewWorkspacePayload{
+					OrgID: orgID, MetadataID: reviewID, SessionID: sessionID, ControllerJobID: expectedControllerID,
+					ExpectedGeneration: tt.generation,
+				})
+				require.NoError(t, err, "marshal the expected preparation job payload")
+				args := pgx.NamedArgs{
+					"org_id": orgID, "queue": "agent", "job_type": models.JobTypePrepareCodeReviewWorkspace,
+					"payload": payload, "priority": 6, "dedupe_key": &key, "max_attempts": 8,
+				}
+				columns := "org_id, queue, job_type, payload, priority, dedupe_key"
+				if tt.wantTarget != nil {
+					columns += ", target_node_id"
+					args["target_node_id"] = tt.wantTarget
+				}
+				mock.ExpectQuery(`INSERT INTO jobs \(` + columns + `, max_attempts\)`).WithArgs(args).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 				mock.ExpectQuery("SELECT created_at[\\s\\S]*FROM jobs").WithArgs(orgID, "agent", key).
 					WillReturnRows(pgxmock.NewRows([]string{"created_at"}).AddRow(now))
 			}
@@ -303,19 +322,6 @@ func TestEnsureCodeReviewWorkspaceReadyEnqueuesColdPreparation(t *testing.T) {
 	}
 }
 
-type preparedWorkspacePayloadArg struct {
-	expected prepareCodeReviewWorkspacePayload
-}
-
-func (a preparedWorkspacePayloadArg) Match(value any) bool {
-	raw, ok := value.([]byte)
-	if !ok {
-		return false
-	}
-	var payload prepareCodeReviewWorkspacePayload
-	return json.Unmarshal(raw, &payload) == nil && reflect.DeepEqual(a.expected, payload)
-}
-
 func TestCodeReviewControllerWaitLetsReadinessGateOwnDeadline(t *testing.T) {
 	t.Parallel()
 	startedAt := time.Now().Add(-codeReviewWorkspaceWaitLimit + time.Second)
@@ -323,4 +329,43 @@ func TestCodeReviewControllerWaitLetsReadinessGateOwnDeadline(t *testing.T) {
 	require.Equal(t, startedAt, *retry.RetryWindowStartedAt, "controller wait should remain anchored to the first durable preparation enqueue")
 	timedOut, _ := retryableDurationExceeded(startedAt, retry, time.Now())
 	require.False(t, timedOut, "worker should not dead-letter the review before the next readiness check can fall back")
+}
+
+func TestRetryCodeReviewWorkspaceAfterCapacityRejection(t *testing.T) {
+	t.Parallel()
+	alternate := "worker-2"
+	tests := []struct {
+		name      string
+		target    *string
+		selectErr error
+		wantClear bool
+	}{
+		{name: "alternate worker gets the pin", target: &alternate},
+		{name: "no alternate clears the pin", wantClear: true},
+		{name: "selector failure clears the pin", selectErr: errors.New("lookup failed"), wantClear: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create an isolated worker selection mock")
+			defer mock.Close()
+			query := mock.ExpectQuery("WITH candidates AS").WithArgs(pgxmock.AnyArg(), "worker-1")
+			rows := pgxmock.NewRows([]string{"id"})
+			if tt.target != nil {
+				rows.AddRow(*tt.target)
+			}
+			if tt.selectErr != nil {
+				query.WillReturnError(tt.selectErr)
+			} else {
+				query.WillReturnRows(rows)
+			}
+			retry := retryCodeReviewWorkspaceAfterCapacityRejection(context.Background(), db.NewJobStore(mock), zerolog.Nop(), "worker-1", agent.ErrSandboxCapacityReached)
+			require.Equal(t, tt.target, retry.TargetNodeID, "capacity retry should pin only a selected alternate")
+			require.Equal(t, tt.wantClear, retry.ClearTargetNodeID, "capacity retry without an alternate should clear stale affinity")
+			require.Equal(t, durationPtr(codeReviewWorkspaceWait), retry.RetryAfter, "capacity retry should retain its delay")
+			require.Equal(t, durationPtr(codeReviewWorkspaceWaitLimit), retry.MaxRetryDuration, "capacity retry should retain its wait limit")
+			require.NoError(t, mock.ExpectationsWereMet(), "capacity rejection should query alternate workers")
+		})
+	}
 }

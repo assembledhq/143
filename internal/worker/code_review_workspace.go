@@ -202,11 +202,9 @@ func ensureCodeReviewWorkspaceReadyWithFallback(ctx context.Context, stores *Sto
 		// The unique dedupe owner is already preparing this generation.
 	default:
 		target := session.WorkerNodeID
-		if session.ContainerID == nil || target == nil {
-			target, err = stores.Jobs.SelectWorkerWithSandboxCapacity(ctx, "")
-			if err != nil {
-				return fmt.Errorf("choose review workspace worker: %w", err)
-			}
+		if session.ContainerID == nil {
+			// The next healthy worker can claim preparation when no container exists.
+			target = nil
 		}
 		_, err = stores.Jobs.EnqueueWithOpts(ctx, job.OrgID, db.EnqueueOpts{
 			Queue: "agent", JobType: models.JobTypePrepareCodeReviewWorkspace,
@@ -367,18 +365,7 @@ func newPrepareCodeReviewWorkspaceHandler(stores *Stores, services *Services, lo
 				return codeReviewPreparationFailure(err)
 			}
 			if errors.Is(err, agent.ErrSandboxCapacityReached) {
-				log.Warn().Err(err).Str("current_node_id", ownerNodeID).
-					Msg("review workspace preparation rejected by local sandbox capacity")
-				alternate, selectErr := stores.Jobs.SelectWorkerWithSandboxCapacity(ctx, ownerNodeID)
-				if selectErr != nil {
-					log.Warn().Err(selectErr).Msg("could not select alternate review workspace worker after capacity rejection")
-				} else if alternate != nil {
-					delay := codeReviewWorkspaceWait
-					limit := codeReviewWorkspaceWaitLimit
-					log.Info().Str("target_node_id", *alternate).Msg("redirecting cold review preparation to available worker")
-					return &RetryableError{Err: err, RetryAfter: &delay, TargetNodeID: alternate, MaxRetryDuration: &limit}
-				}
-				return codeReviewWorkspaceWaitError("worker sandbox capacity reached")
+				return retryCodeReviewWorkspaceAfterCapacityRejection(ctx, stores.Jobs, log, ownerNodeID, err)
 			}
 			return err
 		}
@@ -460,4 +447,21 @@ func codeReviewSavedResultsComplete(policy models.CodeReviewPolicyConfig, result
 	}
 	_, usableSynthesis := codeReviewOrchestratorEvidence(results)
 	return codeReviewReviewerRosterTerminal(policy, results, false) && codeReviewHasUsableReviewerOutput(results) && usableSynthesis
+}
+
+func retryCodeReviewWorkspaceAfterCapacityRejection(ctx context.Context, jobs *db.JobStore, log zerolog.Logger, ownerNodeID string, capacityErr error) *RetryableError {
+	log.Warn().Err(capacityErr).Str("current_node_id", ownerNodeID).
+		Msg("review workspace preparation rejected by local sandbox capacity")
+	alternate, selectErr := jobs.SelectWorkerWithSandboxCapacity(ctx, ownerNodeID)
+	if selectErr != nil {
+		log.Warn().Err(selectErr).Msg("could not select alternate review workspace worker after capacity rejection")
+	} else if alternate != nil {
+		delay := codeReviewWorkspaceWait
+		limit := codeReviewWorkspaceWaitLimit
+		log.Info().Str("target_node_id", *alternate).Msg("redirecting cold review preparation to available worker")
+		return &RetryableError{Err: capacityErr, RetryAfter: &delay, TargetNodeID: alternate, MaxRetryDuration: &limit}
+	}
+	retry := codeReviewWorkspaceWaitError("worker sandbox capacity reached")
+	retry.ClearTargetNodeID = true
+	return retry
 }
