@@ -81,6 +81,7 @@ fi
 printf '%s:retired\n' "$host" >> "$state/trace"
 `
 			require.NoError(t, os.WriteFile(filepath.Join(scripts, "deploy.sh"), []byte(fake), 0o755), "fixture should replace host access with an isolated fake")
+			writeFleetAdmissionFixtures(t, scripts)
 			state := filepath.Join(directory, "state")
 			require.NoError(t, os.Mkdir(state, 0o755), "fixture should create isolated completion state")
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -219,6 +220,7 @@ esac
 record retired
 `
 			require.NoError(t, os.WriteFile(filepath.Join(scripts, "deploy.sh"), []byte(fake), 0o755), "fixture should replace host access with an isolated fake")
+			writeFleetAdmissionFixtures(t, scripts)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			outputPath := filepath.Join(directory, "output")

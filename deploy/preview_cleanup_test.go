@@ -14,17 +14,14 @@ func TestDeployPrunePreservesManagedPreviewOwnership(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		role        string
-		enabled     string
-		volumePrune string
-		want        []string
+		name, role, enabled, volumePrune  string
+		workerCID, executorCID, failQuery string
+		want                              []string
 	}{
 		{
 			name: "worker keeps managed infrastructure for reconciliation",
 			role: "worker", enabled: "1",
 			want: []string{
-				"image prune -af --filter until=24h",
 				"builder prune -af --filter until=24h",
 			},
 		},
@@ -32,7 +29,6 @@ func TestDeployPrunePreservesManagedPreviewOwnership(t *testing.T) {
 			name: "opt-in worker volume prune preserves managed data",
 			role: "worker", enabled: "1", volumePrune: "1",
 			want: []string{
-				"image prune -af --filter until=24h",
 				"builder prune -af --filter until=24h",
 				"volume prune -f --filter label!=com.143.preview.infrastructure",
 			},
@@ -41,6 +37,8 @@ func TestDeployPrunePreservesManagedPreviewOwnership(t *testing.T) {
 			name: "app never enables worker volume prune",
 			role: "app", enabled: "1", volumePrune: "1",
 			want: []string{
+				"ps -aq --filter label=com.docker.compose.service=worker",
+				"ps -aq --filter label=com.143.role=session-executor",
 				"container prune -f --filter until=24h --filter label!=com.143.preview.infrastructure",
 				"image prune -af --filter until=24h",
 				"builder prune -af --filter until=24h",
@@ -50,9 +48,42 @@ func TestDeployPrunePreservesManagedPreviewOwnership(t *testing.T) {
 			name: "app preserves preview ownership on a shared Docker host",
 			role: "app", enabled: "1",
 			want: []string{
+				"ps -aq --filter label=com.docker.compose.service=worker",
+				"ps -aq --filter label=com.143.role=session-executor",
 				"container prune -f --filter until=24h --filter label!=com.143.preview.infrastructure",
 				"image prune -af --filter until=24h",
 				"builder prune -af --filter until=24h",
+			},
+		},
+		{
+			name: "app preserves stopped workers and tagged or untagged rollback images",
+			role: "app", enabled: "1", workerCID: "stopped-worker",
+			want: []string{
+				"ps -aq --filter label=com.docker.compose.service=worker",
+				"ps -aq --filter label=com.143.role=session-executor",
+				"builder prune -af --filter until=24h",
+			},
+		},
+		{
+			name: "app preserves executor-only daemon until ownership-aware collection",
+			role: "app", enabled: "1", executorCID: "terminal-executor",
+			want: []string{
+				"ps -aq --filter label=com.docker.compose.service=worker",
+				"ps -aq --filter label=com.143.role=session-executor",
+				"builder prune -af --filter until=24h",
+			},
+		},
+		{
+			name: "worker ownership lookup failure preserves all resources",
+			role: "app", enabled: "1", failQuery: "worker",
+			want: []string{"ps -aq --filter label=com.docker.compose.service=worker"},
+		},
+		{
+			name: "executor ownership lookup failure preserves all resources",
+			role: "app", enabled: "1", failQuery: "executor",
+			want: []string{
+				"ps -aq --filter label=com.docker.compose.service=worker",
+				"ps -aq --filter label=com.143.role=session-executor",
 			},
 		},
 		{name: "operator can disable pruning", role: "worker", enabled: "0", want: []string{}},
@@ -63,7 +94,20 @@ func TestDeployPrunePreservesManagedPreviewOwnership(t *testing.T) {
 			dir := t.TempDir()
 			capture := filepath.Join(dir, "calls")
 			require.NoError(t, os.WriteFile(capture, nil, 0o600), "should initialize isolated command capture")
-			stub := "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$*\" >> \"$PREVIEW_PRUNE_CAPTURE\"\n"
+			stub := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$PREVIEW_PRUNE_CAPTURE"
+case "$*" in
+  'ps -aq --filter label=com.docker.compose.service=worker')
+    [ "$PRUNE_FAIL_QUERY" != worker ] || exit 1
+    printf '%s' "$PRUNE_WORKER_CID"
+    ;;
+  'ps -aq --filter label=com.143.role=session-executor')
+    [ "$PRUNE_FAIL_QUERY" != executor ] || exit 1
+    printf '%s' "$PRUNE_EXECUTOR_CID"
+    ;;
+esac
+`
 			require.NoError(t, os.WriteFile(filepath.Join(dir, "docker"), []byte(stub), 0o700), "should create a hermetic Docker stub")
 			script, err := os.ReadFile("scripts/deploy.sh")
 			require.NoError(t, err, "should load the production prune helper")
@@ -79,6 +123,9 @@ func TestDeployPrunePreservesManagedPreviewOwnership(t *testing.T) {
 				"DEPLOY_DOCKER_VOLUME_PRUNE=" + tt.volumePrune,
 				"DOCKER_PRUNE_UNTIL=24h",
 				"IMAGE_TAG=",
+				"PRUNE_WORKER_CID=" + tt.workerCID,
+				"PRUNE_EXECUTOR_CID=" + tt.executorCID,
+				"PRUNE_FAIL_QUERY=" + tt.failQuery,
 			}
 			out, err := cmd.CombinedOutput()
 			require.NoError(t, err, "prune helper should execute safely: %s", out)

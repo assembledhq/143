@@ -91,14 +91,33 @@ if [ "$REQUESTED_ROLES" != app,worker ] || [ "${DEPLOY_MODE:-routine}" != routin
   WORKER_DEPLOY_JOBS=1
 fi
 
-# Read FLEET_HOSTS from env var, or decrypt from SOPS.
-if [ -z "${FLEET_HOSTS:-}" ]; then
+# Resolve advisory admission from the same bundle as deploy.sh, before any
+# host work. Only the inventory and four capacity settings are imported;
+# nonempty caller values retain the same precedence as worker deployment.
+fleet_config_required=0
+if [ -z "${FLEET_HOSTS:-}" ]; then fleet_config_required=1; fi
+if should_deploy_role worker && [ "${DEPLOY_MODE:-routine}" = routine ]; then
+  for setting in WORKER_BLUE_GREEN_MIN_FREE_DISK_MB WORKER_BLUE_GREEN_MIN_FREE_INODES WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB WORKER_BLUE_GREEN_PULL_INODE_BUDGET; do
+    if [ -z "${!setting:-}" ]; then fleet_config_required=1; fi
+  done
+fi
+if [ "$fleet_config_required" = 1 ]; then
   SECRETS_DIR="$("$SCRIPT_DIR/resolve-secrets-dir.sh" "$PROJECT_DIR")"
   ENC_FILE="$SECRETS_DIR/.env.production.enc"
   if [ -f "$ENC_FILE" ]; then
-    echo "Decrypting fleet hosts from .env.production.enc..."
-    FLEET_HOSTS="$(sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE" \
-      | grep '^FLEET_HOSTS=' | cut -d= -f2- || true)"
+    if ! fleet_config="$(sops --decrypt --input-type dotenv --output-type dotenv "$ENC_FILE" 2>/dev/null)"; then
+      echo "ERROR: fleet configuration unavailable; no fleet deployment was started." >&2
+      exit 1
+    fi
+    while IFS= read -r line; do
+      case "$line" in
+        FLEET_HOSTS=*|WORKER_BLUE_GREEN_MIN_FREE_DISK_MB=*|WORKER_BLUE_GREEN_MIN_FREE_INODES=*|WORKER_BLUE_GREEN_PULL_DISK_BUDGET_MB=*|WORKER_BLUE_GREEN_PULL_INODE_BUDGET=*)
+          key="${line%%=*}"
+          if [ -z "${!key:-}" ]; then export "$key=${line#*=}"; fi
+          ;;
+      esac
+    done <<< "$fleet_config"
+    unset fleet_config line key
   fi
 fi
 
@@ -251,6 +270,23 @@ deploy_group() {
 export -f deploy_one
 export -f deploy_group
 export SCRIPT_DIR SSH_KEY TAG LOG_DIR
+
+# Reject predictable worker blockers before the app migration/deployment barrier.
+# This is advisory admission, not a capacity reservation; locked per-host gates
+# remain authoritative immediately before host mutation and image pulls.
+if [ "${DEPLOY_MODE:-routine}" = routine ]; then
+  for group_file in "${POST_APP_GROUP_FILES[@]}"; do
+    while IFS= read -r target; do
+      [ "${target%%:*}" = worker ] || continue
+      worker_host="${target#*:}"
+      admission_log="$LOG_DIR/worker-${worker_host//[^A-Za-z0-9_.-]/_}-admission.log"
+      if ! bash "$SCRIPT_DIR/deploy-worker-admission.sh" "$worker_host" "$SSH_KEY" >"$admission_log" 2>&1; then
+        echo "ERROR: worker admission failed; no fleet deployment was started. Inspect private admission logs." >&2
+        exit 1
+      fi
+    done < "$group_file"
+  done
+fi
 
 if [ "${#APP_TARGETS[@]}" -gt 0 ]; then
   echo "Deploying ${#APP_TARGETS[@]} app node(s) serially before the worker fleet (logs: $LOG_DIR)."

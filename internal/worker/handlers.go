@@ -1062,6 +1062,8 @@ type Services struct {
 	// workers set this so a startup wiring regression cannot silently reintroduce
 	// deploy-sensitive inline long-running sessions.
 	RequireSessionExecutorDispatcher bool
+	// ExecutorContainerGC runs once per worker process, independently of deploys.
+	ExecutorContainerGC *ExecutorContainerGC
 
 	CodeReviewWorkspacePreparer interface {
 		PrepareCodeReviewWorkspace(ctx context.Context, session *models.Session, expectedHead string) (*agent.Sandbox, error)

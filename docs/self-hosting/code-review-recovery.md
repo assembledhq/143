@@ -4,7 +4,7 @@ Last verified: 2026-10-14. This is an operator runbook; inspect current state be
 
 ## Establish what failed
 
-1. Inspect the exact deploy run, target SHA, and per-host logs. The app deployment is a barrier before workers start rolling. Routine fleet deployment waits for a completed worker canary. With `WORKER_DEPLOY_JOBS=2`, the remaining worker hosts roll in two slots. Each slot can advance when its previous host completes retirement. Automatic deployment uses two slots, and manual fleet deploys default to one. Maintenance, binary rollback, and forced deploys use one slot. In a parallel rollout, a host failure or an interrupt sent to the fleet command stops new launches. The command waits for the hosts it already started before exiting. Success requires retirement of all previous generations. Inspect the exact host attempt and logs after an incomplete deployment.
+1. Inspect the exact deploy run, target SHA, and per-host logs. Routine fleet deployment checks every selected worker for unresolved rollout intent and disk/inode capacity before deploying the app. This observation does not reserve capacity; fresh checks still run at each worker's pull/start boundaries. The app deployment is a barrier before workers start rolling. Routine fleet deployment waits for a completed worker canary. With `WORKER_DEPLOY_JOBS=2`, the remaining worker hosts roll in two slots. Each slot can advance when its previous host completes retirement. Automatic deployment uses two slots, and manual fleet deploys default to one. Maintenance, binary rollback, and forced deploys use one slot. In a parallel rollout, a host failure or an interrupt sent to the fleet command stops new launches. The command waits for the hosts it already started before exiting. Success requires retirement of all previous generations. Inspect the exact host attempt and logs after an incomplete deployment.
 2. Check each worker's running image, heartbeat, and drain state. A healthy container alone does not establish a healthy database connection or successful rollover.
 3. On an affected host, inspect `df -h`, `df -i`, and `docker system df`. On the database host, also inspect `/proc/meminfo`, `vm.overcommit_memory`, `vm.overcommit_ratio`, and swap. Under strict overcommit accounting, `Committed_AS` can approach `CommitLimit` while `MemAvailable` remains positive.
 4. An incomplete worker attempt leaves a durable host latch and preserves its candidate. Do not rerun the same SHA or delete the latch to bypass an unknown outcome. First reconcile the exact attempt, candidate, retirement seal, and live owners. A full fleet retry can create extra generations and database pressure.
@@ -81,7 +81,12 @@ A candidate can own work before all startup checks finish. Failed health,
 heartbeat, or preview-auth checks therefore retain it and attempt admission
 draining; they do not stop or remove it. The host's exclusive attempt latch
 survives failure, interruption, and unknown outcomes. Resolve that exact attempt
-before another rollout. Intake remains enabled while owned work completes.
+before another rollout. Only the current guardian's initial capacity refusal,
+before readiness or configuration staging, can become a nonblocking rejection:
+it archives its exact failure and capacity receipts while holding both host
+locks. If persistence or archival fails, the latch remains blocking. This does
+not reconcile historical markers, even when their phase says
+`host_disk_capacity_failed`. Intake remains enabled while owned work completes.
 
 Routine retirement uses `worker-deployctl seal-retirement` for the exact old
 node generation. The database serializes new job and preview ownership against
@@ -102,8 +107,11 @@ not delete this evidence automatically. Before image pulls, deployment checks
 free space and inodes on Docker's actual filesystem, reserving review/log
 headroom plus a declared pull/unpack allowance. It checks the reserve again
 before starting a candidate. Unknown measurements or insufficient capacity halt
-the attempt while existing workers keep serving; reconcile its retained latch
-before another attempt.
+the attempt while existing workers keep serving. An archived initial refusal
+can be retried after its cause is resolved; all retained latches require exact
+attempt reconciliation. Capacity receipts distinguish probe errors, invalid
+observations, and byte/inode shortfalls without treating a later measurement as
+proof of the earlier host state.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -131,6 +139,41 @@ receipts, allowlisted identities and needed logs privately and verify their
 hashes. Recheck the exact stopped CID before removal without force or volume
 removal; preserve the receipt and seal. Missing proof means retain it. This is
 an operator procedure; routine deployment performs no such deletion.
+
+Terminal session executors have a separate worker-local retention collector.
+It requires a persistent Compose worker generation on the same Docker daemon,
+rechecked before each removal. Executor-only or unrecognized daemons retain
+their containers; removing the last executor must not erase the only signal
+that protects worker images from app cleanup. The collector selects only
+executor-labeled containers, matches their immutable container
+and tenant/executor/session/job/host/build identity to the database, and requires
+both terminal completion and a stopped Docker finish time older than the
+retention window. Live ownership, missing records, inconsistent identity, recent
+completion, and inspection errors preserve the container. Removal rechecks the
+exact container and uses neither force nor volume removal. The collector runs
+independently of deployment and does not delete worker generations, sandbox or
+preview resources, images, or unidentified volumes.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `SESSION_EXECUTOR_GC_INTERVAL` | `5m` | Interval between host-local collection passes; `0` disables collection |
+| `SESSION_EXECUTOR_RETENTION` | `24h` | Minimum age of both terminal database completion and Docker finish time |
+| `SESSION_EXECUTOR_GC_BATCH_SIZE` | `100` | Maximum candidates inspected per pass, from a rotating local inventory cursor |
+| `SESSION_EXECUTOR_GC_TIMEOUT` | `30s` | Deadline for a collection pass |
+
+Preserve required incident evidence before its retention window expires, or
+disable this collector through the ordinary worker configuration process. A
+missing or inconsistent database record is retained for operator review rather
+than treated as permission to remove a container.
+
+Worker deployment skips generic image pruning because removing a terminal
+executor can release the last Docker reference to a retained image. Database
+image-retention records alone do not protect against Docker's generic prune.
+App deployment also preserves worker containers and images when its Docker
+daemon has worker or executor ownership; an ownership lookup failure skips
+cleanup. Dedicated app hosts retain their existing cache cleanup. Image and
+volume reclamation require a separately verified ownership/retention policy;
+Docker's reported reclaimable bytes are not sufficient proof.
 
 Public Actions output contains compact completion/failure messages. Raw
 production diagnostics stay outside public logs and artifacts; reconcile host
