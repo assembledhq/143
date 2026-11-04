@@ -26,6 +26,16 @@ func actionPostgres(t *testing.T, continuous bool) (*pgxpool.Pool, models.Automa
 
 func actionPostgresWithGrant(t *testing.T, continuous, commentUpdates bool) (*pgxpool.Pool, models.AutomationActionActor) {
 	t.Helper()
+	// The configuration form includes empty Notion fields even when Notion is disabled.
+	raw := json.RawMessage(`{"actions":["slack_notification","github_issue_comment"],"repository":"owner/repo","slack_channel_id":"C0123456789","notion_properties":{},"notion_data_source_id":""}`)
+	if commentUpdates {
+		raw = json.RawMessage(`{"actions":["slack_notification","github_issue_comment","github_issue_comment_update"],"repository":"owner/repo","slack_channel_id":"C0123456789"}`)
+	}
+	return actionPostgresWithConfig(t, continuous, raw)
+}
+
+func actionPostgresWithConfig(t *testing.T, continuous bool, raw json.RawMessage) (*pgxpool.Pool, models.AutomationActionActor) {
+	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("set TEST_DATABASE_URL for reservation and lease fencing proof")
@@ -64,7 +74,7 @@ func actionPostgresWithGrant(t *testing.T, continuous, commentUpdates bool) (*pg
  CREATE TABLE agent_capability_policies(id uuid PRIMARY KEY,org_id uuid,automation_id uuid,active boolean DEFAULT true,policy_type text DEFAULT 'automation');
  CREATE TABLE agent_capability_policy_grants(id uuid PRIMARY KEY,org_id uuid,policy_id uuid,capability_id text DEFAULT 'automation_actions',enabled boolean DEFAULT true,access_level text DEFAULT 'write',config jsonb);`)
 	require.NoError(t, err, "create authorization fixture tables")
-	for _, name := range []string{"000292_automation_actions.up.sql", "000396_automation_comment_updates.up.sql"} {
+	for _, name := range []string{"000292_automation_actions.up.sql", "000396_automation_comment_updates.up.sql", "000398_automation_inline_reviews.up.sql"} {
 		migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", name))
 		require.NoError(t, err, "read migration %s", name)
 		_, err = pool.Exec(ctx, string(migration))
@@ -72,11 +82,6 @@ func actionPostgresWithGrant(t *testing.T, continuous, commentUpdates bool) (*pg
 	}
 	a := models.AutomationActionActor{OrgID: uuid.New(), RepositoryID: uuid.New(), SessionID: uuid.New(), ThreadID: uuid.New(), RunID: uuid.New(), AttemptToken: uuid.New(), JobID: uuid.New()}
 	automation, target, generation, policy := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	// The configuration form includes empty Notion fields even when Notion is disabled.
-	raw := json.RawMessage(`{"actions":["slack_notification","github_issue_comment"],"repository":"owner/repo","slack_channel_id":"C0123456789","notion_properties":{},"notion_data_source_id":""}`)
-	if commentUpdates {
-		raw = json.RawMessage(`{"actions":["slack_notification","github_issue_comment","github_issue_comment_update"],"repository":"owner/repo","slack_channel_id":"C0123456789"}`)
-	}
 	batch := &pgx.Batch{}
 	batch.Queue(`INSERT INTO organizations VALUES($1)`, a.OrgID)
 	batch.Queue(`INSERT INTO automations(id,org_id) VALUES($1,$2)`, automation, a.OrgID)
@@ -325,6 +330,66 @@ func TestAutomationActionPostgresExpiryAndOwnComment(t *testing.T) {
 	require.NoError(t, err, "read rollback")
 	_, err = pool.Exec(ctx, string(down))
 	require.ErrorContains(t, err, "receipts exist", "rollback cannot erase duplicate protection")
+}
+
+func TestAutomationActionPostgresInlineReviewReceipt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		continuous bool
+	}{
+		{name: "per-run"},
+		{name: "continuous target", continuous: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool, actor := actionPostgresWithConfig(t, tt.continuous, json.RawMessage(`{"actions":["github_pull_request_review"],"repository":"owner/repo"}`))
+			store, ctx := NewAutomationActionStore(pool), context.Background()
+			down, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000398_automation_inline_reviews.down.sql"))
+			require.NoError(t, err, "read rollback")
+			_, err = pool.Exec(ctx, string(down))
+			require.NoError(t, err, "rollback can run before any review is reserved")
+			up, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000398_automation_inline_reviews.up.sql"))
+			require.NoError(t, err, "read upgrade")
+			_, err = pool.Exec(ctx, string(up))
+			require.NoError(t, err, "reapply the review action migration")
+
+			scope, err := store.Resolve(ctx, actor.OrgID, actor)
+			require.NoError(t, err, "resolve the configured review grant")
+			request := models.AutomationActionRequest{
+				AutomationActionKey: models.AutomationActionKey{OperationKey: "workflow", ActionKey: "review"},
+				Kind:                models.AutomationActionGitHubReview,
+				PRNumber:            42,
+				HeadSHA:             strings.Repeat("a", 40),
+				Comments: []models.AutomationActionReviewComment{
+					{Path: "src/view.tsx", Line: 8, Body: "Use the documented component."},
+				},
+			}
+			payload, err := json.Marshal(struct {
+				Request models.AutomationActionRequest `json:"request"`
+			}{Request: request})
+			require.NoError(t, err, "encode the review request")
+			digest := strings.Repeat("b", 64)
+			action, err := store.Reserve(ctx, actor.OrgID, actor, request, digest, scope.Config, payload)
+			require.NoError(t, err, "reserve the new action kind")
+			claimed, err := store.Claim(ctx, actor.OrgID, actor, action.ID)
+			require.NoError(t, err, "claim the review once")
+			const reviewURL = "https://github.com/owner/repo/pull/42#pullrequestreview-123"
+			require.NoError(t, store.Finish(ctx, actor.OrgID, action.ID, *claimed.SendToken, models.AutomationActionSucceeded, "123", reviewURL, ""), "record the GitHub review receipt")
+
+			_, err = pool.Exec(ctx, string(down))
+			require.ErrorContains(t, err, "review receipts exist", "rollback must retain delivery receipts")
+			reused, err := store.Reserve(ctx, actor.OrgID, actor, request, digest, scope.Config, payload)
+			require.NoError(t, err, "retry finds the original action after a refused rollback")
+			require.Equal(t, action.ID, reused.ID, "retry reuses the original action identity")
+			require.Equal(t, models.AutomationActionSucceeded, reused.Status, "review remains delivered")
+			require.NotNil(t, reused.ProviderObjectID, "review provider ID remains recorded")
+			require.Equal(t, "123", *reused.ProviderObjectID, "retain the original review ID")
+			_, err = store.Claim(ctx, actor.OrgID, actor, action.ID)
+			require.ErrorIs(t, err, ErrAutomationActionBusy, "a delivered review cannot send twice")
+		})
+	}
 }
 
 func TestAutomationActionPostgresCompletedRunCannotSend(t *testing.T) {

@@ -190,7 +190,7 @@ func (p *Providers) Preflight(ctx context.Context, scope models.AutomationAction
 }
 func (p *Providers) Send(ctx context.Context, scope models.AutomationActionScope, action models.AutomationAction, payload Payload) (Receipt, error) {
 	switch action.Kind {
-	case models.AutomationActionLabel, models.AutomationActionTeam, models.AutomationActionComment, models.AutomationActionCommentUpdate:
+	case models.AutomationActionLabel, models.AutomationActionTeam, models.AutomationActionComment, models.AutomationActionCommentUpdate, models.AutomationActionGitHubReview:
 		return p.sendGitHub(ctx, scope, action, payload)
 	case models.AutomationActionNotion:
 		return p.sendNotion(ctx, scope, payload)
@@ -275,6 +275,8 @@ func (p *Providers) sendGitHub(ctx context.Context, scope models.AutomationActio
 		return Receipt{ID: scope.Config.Team, URL: payload.PR.URL}, nil
 	case models.AutomationActionCommentUpdate:
 		return p.updateGitHubComment(ctx, scope, token, action, payload)
+	case models.AutomationActionGitHubReview:
+		return p.submitGitHubReview(ctx, scope, token, action, payload)
 	case models.AutomationActionComment:
 		var comment struct {
 			ID  int64  `json:"id"`

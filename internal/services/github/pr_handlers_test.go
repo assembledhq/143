@@ -618,6 +618,7 @@ func expectUnknownPullRequestLookup(mock pgxmock.PgxPoolIface, orgID uuid.UUID, 
 func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 	t.Parallel()
 
+	originalReviewLine := 17
 	tests := []struct {
 		name             string
 		events           []models.AutomationGitHubEvent
@@ -637,6 +638,8 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 		wantLabelOnly    bool
 		wantChangedLabel string
 		wantLabelRefresh bool
+
+		wantReviewFeedback *models.AutomationActionReviewFeedback
 	}{
 		{
 			name: "pull request opened",
@@ -898,7 +901,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
-				event := PullRequestReviewEvent{Action: "submitted", OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
+				event := PullRequestReviewEvent{Action: "submitted", OwnerOrgID: &orgID, DeliveryID: "delivery-123", OwnAppReview: true}
 				event.Sender.Login = "reviewer"
 				event.Sender.Type = "User"
 				event.Repository.ID = githubRepoID
@@ -906,6 +909,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				event.PullRequest.Number = 42
 				event.PullRequest.HTMLURL = "https://github.com/acme/app/pull/42"
 				event.PullRequest.Title = "Add checkout"
+				event.PullRequest.User.Login = "pr-author"
 				event.PullRequest.Head.SHA = "head-123"
 				event.Review.ID = 902
 				event.Review.State = "commented"
@@ -918,6 +922,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantLabels:  []string{},
 			wantGroupID: "review:902",
 			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
+			wantReviewFeedback: &models.AutomationActionReviewFeedback{ReviewID: 902, PRAuthor: "pr-author", Body: "Looks close"},
 		},
 		{
 			name:   "inline pull request review comment",
@@ -925,7 +930,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			withPR: true,
 			run: func(t *testing.T, svc *PRService, orgID uuid.UUID, githubRepoID int64, fullName string) {
 				t.Helper()
-				event := PullRequestReviewCommentEvent{Action: "created", OwnerOrgID: &orgID, DeliveryID: "delivery-123"}
+				event := PullRequestReviewCommentEvent{Action: "created", OwnerOrgID: &orgID, DeliveryID: "delivery-123", OwnAppReview: true}
 				event.Sender.Login = "inline-reviewer"
 				event.Sender.Type = "User"
 				event.Repository.ID = githubRepoID
@@ -937,6 +942,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 				event.Comment.ID = 903
 				event.Comment.PullRequestReviewID = 902
 				event.Comment.Path = "src/app.ts"
+				event.Comment.OriginalLine = &originalReviewLine
 				event.Comment.Body = "Please adjust this line"
 				require.NoError(t, svc.HandlePullRequestReviewCommentEvent(context.Background(), event), "review comment webhook should not fail")
 			},
@@ -946,6 +952,9 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			wantLabels:  []string{},
 			wantGroupID: "review:902",
 			wantURL:     "https://github.com/acme/app/pull/42", wantTitle: "Add checkout", wantHeadSHA: "head-123", wantActorType: "User",
+			wantReviewFeedback: &models.AutomationActionReviewFeedback{
+				ReviewID: 902, Body: "Please adjust this line", Inline: true, Path: "src/app.ts", Line: &originalReviewLine,
+			},
 		},
 	}
 
@@ -1016,6 +1025,7 @@ func TestPRService_TriggersGitHubEventAutomationsFromWebhooks(t *testing.T) {
 			require.Equal(t, tt.wantTitle, recordedReq.PullRequestTitle, "automation request should include the target PR title")
 			require.Equal(t, tt.wantHeadSHA, recordedReq.HeadSHA, "automation request should include the evaluated head SHA")
 			require.Equal(t, tt.wantActorType, recordedReq.ActorType, "automation request should include the GitHub actor type")
+			require.Equal(t, tt.wantReviewFeedback, recordedReq.OwnAppReviewFeedback, "automation request should carry verified review ownership inputs")
 			require.Equal(t, tt.wantLabelOnly, recordedReq.RequireLabelFilter, "label-change fan-out should be scoped to label-filtered automations")
 			require.Equal(t, tt.wantChangedLabel, recordedReq.ChangedLabel, "label-change fan-out should carry the changed label")
 			require.Equal(t, "delivery-123", recordedReq.ProviderEventID, "automation request should include the GitHub delivery id")

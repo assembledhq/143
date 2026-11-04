@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -23,6 +25,7 @@ const (
 	AutomationActionTeam          AutomationActionKind = "github_team_review"
 	AutomationActionComment       AutomationActionKind = "github_issue_comment"
 	AutomationActionCommentUpdate AutomationActionKind = "github_issue_comment_update"
+	AutomationActionGitHubReview  AutomationActionKind = "github_pull_request_review"
 	AutomationActionNotion        AutomationActionKind = "notion_tracking_row"
 	AutomationActionSlack         AutomationActionKind = "slack_notification"
 )
@@ -30,10 +33,11 @@ const (
 const (
 	AutomationActionCommentMarkerPrefix       = "<!-- 143-automation-action:"
 	AutomationActionCommentUpdateMarkerPrefix = "<!-- 143-automation-comment-update:"
+	AutomationActionReviewMarkerPrefix        = "<!-- 143-automation-review:"
 )
 
 func AutomationActionKinds() []AutomationActionKind {
-	return []AutomationActionKind{AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionNotion, AutomationActionSlack, AutomationActionCommentUpdate}
+	return []AutomationActionKind{AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionNotion, AutomationActionSlack, AutomationActionCommentUpdate, AutomationActionGitHubReview}
 }
 func (k AutomationActionKind) Validate() error {
 	for _, v := range AutomationActionKinds() {
@@ -156,7 +160,7 @@ func (c AutomationActionConfig) Validate() error {
 		}
 		seen[k] = true
 		switch k {
-		case AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionCommentUpdate:
+		case AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionCommentUpdate, AutomationActionGitHubReview:
 			if !automationActionRepositoryPattern.MatchString(c.Repository) || len(c.Repository) > 256 {
 				return errors.New("repository must be owner/name")
 			}
@@ -223,12 +227,19 @@ func ValidateAutomationOperationKey(key string) error {
 
 type AutomationActionRequest struct {
 	AutomationActionKey
-	Kind           AutomationActionKind `json:"kind"`
-	PRNumber       int                  `json:"pr_number,omitempty"`
-	HeadSHA        string               `json:"head_sha,omitempty"`
-	Text           string               `json:"text,omitempty"`
-	Properties     map[string]string    `json:"properties,omitempty"`
-	SourceActionID string               `json:"source_action_id,omitempty"`
+	Kind           AutomationActionKind            `json:"kind"`
+	PRNumber       int                             `json:"pr_number,omitempty"`
+	HeadSHA        string                          `json:"head_sha,omitempty"`
+	Text           string                          `json:"text,omitempty"`
+	Properties     map[string]string               `json:"properties,omitempty"`
+	SourceActionID string                          `json:"source_action_id,omitempty"`
+	Comments       []AutomationActionReviewComment `json:"comments,omitempty"`
+}
+
+type AutomationActionReviewComment struct {
+	Path string `json:"path"`
+	Line int    `json:"line"`
+	Body string `json:"body"`
 }
 
 // AutomationActionCommentTarget identifies the existing comment through its create receipt
@@ -251,7 +262,7 @@ func (r AutomationActionRequest) Validate() error {
 		return errors.New("a PR precondition requires a positive pr_number and full lowercase head_sha")
 	}
 	switch r.Kind {
-	case AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionCommentUpdate:
+	case AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionCommentUpdate, AutomationActionGitHubReview:
 		if r.PRNumber == 0 {
 			return errors.New("GitHub actions require a PR precondition")
 		}
@@ -266,7 +277,12 @@ func (r AutomationActionRequest) Validate() error {
 	} else if r.SourceActionID != "" {
 		return errors.New("source_action_id is only valid for comment updates")
 	}
+	if r.Kind != AutomationActionGitHubReview && r.Comments != nil {
+		return errors.New("comments are only valid for GitHub PR reviews")
+	}
 	switch r.Kind {
+	case AutomationActionGitHubReview:
+		return r.validateGitHubReview()
 	case AutomationActionComment, AutomationActionCommentUpdate, AutomationActionSlack:
 		limit := 32 << 10
 		if r.Kind == AutomationActionSlack {
@@ -296,6 +312,56 @@ func (r AutomationActionRequest) Validate() error {
 	}
 	return nil
 }
+
+func (r AutomationActionRequest) validateGitHubReview() error {
+	const maxTextBytes = 4 << 10
+	if r.Properties != nil || len(r.Text) > maxTextBytes || !utf8.ValidString(r.Text) {
+		return errors.New("GitHub PR reviews accept optional bounded summary text, without properties")
+	}
+	if len(r.Comments) == 0 || len(r.Comments) > 5 {
+		return errors.New("GitHub PR reviews require one to five inline comments")
+	}
+	const reservedMarker = "<!-- 143-automation-"
+	if strings.Contains(r.Text, reservedMarker) {
+		return errors.New("review text contains a reserved automation marker")
+	}
+
+	type anchor struct {
+		path string
+		line int
+	}
+	seen := make(map[anchor]bool, len(r.Comments))
+	for i, comment := range r.Comments {
+		if comment.Line <= 0 || !validAutomationReviewPath(comment.Path) {
+			return fmt.Errorf("inline comment %d requires a relative file path and positive line", i+1)
+		}
+		if strings.TrimSpace(comment.Body) == "" || len(comment.Body) > maxTextBytes || !utf8.ValidString(comment.Body) {
+			return fmt.Errorf("inline comment %d requires bounded, nonempty text", i+1)
+		}
+		if strings.Contains(comment.Body, reservedMarker) {
+			return fmt.Errorf("inline comment %d contains a reserved automation marker", i+1)
+		}
+		key := anchor{path: comment.Path, line: comment.Line}
+		if seen[key] {
+			return errors.New("inline comments must have distinct file and line anchors")
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func validAutomationReviewPath(path string) bool {
+	if len(path) > 4096 || !utf8.ValidString(path) || strings.ContainsRune(path, '\\') || strings.ContainsFunc(path, unicode.IsControl) {
+		return false
+	}
+	for part := range strings.SplitSeq(path, "/") {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 func (r AutomationActionRequest) ValidateFor(c AutomationActionConfig) error {
 	if err := r.Validate(); err != nil {
 		return err

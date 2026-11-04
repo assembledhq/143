@@ -160,6 +160,45 @@ func TestIndependentActionReplayAndResume(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubReviewActionReplay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		sendError error
+		status    models.AutomationActionStatus
+	}{
+		{name: "reuse delivered review", status: models.AutomationActionSucceeded},
+		{name: "fence uncertain review", sendError: context.DeadlineExceeded, status: models.AutomationActionUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store, provider, request := actionFixture()
+			store.scope.PRNumber, store.scope.HeadSHA = 42, provider.head
+			request.Kind, request.PRNumber, request.HeadSHA = models.AutomationActionGitHubReview, 42, provider.head
+			request.Comments = []models.AutomationActionReviewComment{{Path: "ui/Card.tsx", Line: 12, Body: "Use the shared Card."}}
+			provider.sendErr = tt.sendError
+			service := New(store, provider, zerolog.Nop())
+			actor := models.AutomationActionActor{OrgID: uuid.New(), RunID: uuid.New()}
+			_, err := service.Execute(t.Context(), actor, request.AutomationActionKey, &request)
+			require.NoError(t, err, "persist the review attempt outcome")
+
+			actor.RunID = uuid.New()
+			result, err := service.Execute(t.Context(), actor, request.AutomationActionKey, nil)
+			require.NoError(t, err, "inspect the same frozen review in a later run")
+			require.Equal(t, tt.status, result.Actions[0].Status, "preserve the first send outcome")
+			require.Equal(t, 1, provider.sends, "never submit a second review for a delivered or uncertain action")
+			require.Equal(t, request, provider.sent.Request, "preserve the original inline anchors and bodies")
+
+			request.Comments = []models.AutomationActionReviewComment{{Path: "ui/Card.tsx", Line: 13, Body: "Use the shared Card."}}
+			_, err = service.Execute(t.Context(), actor, request.AutomationActionKey, &request)
+			require.ErrorIs(t, err, db.ErrAutomationActionConflict, "reject a changed inline anchor under the same key")
+			require.Equal(t, 1, provider.sends, "changed content must not trigger a provider request")
+		})
+	}
+}
+
 func TestActionAdmissionAndFencing(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

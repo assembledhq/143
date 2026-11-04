@@ -3642,6 +3642,7 @@ type PullRequestReviewEvent struct {
 	OwnerOrgID       *uuid.UUID              `json:"-"`
 	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	OwnAppReview     bool                    `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
@@ -3714,7 +3715,7 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 	if event.Action != "submitted" {
 		return nil
 	}
-	s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+	request := automationevents.GitHubEventTriggerRequest{
 		Event:             models.AutomationGitHubEventPullRequestReviewSubmitted,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.PullRequest.Number,
@@ -3731,7 +3732,15 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		ReviewState:       event.Review.State,
 		Labels:            githubLabelNames(event.PullRequest.Labels),
 		LabelsKnown:       true,
-	}, event.OwnerOrgID, event.Repository.ID)
+	}
+	if event.OwnAppReview && strings.EqualFold(event.Review.State, "commented") {
+		request.OwnAppReviewFeedback = &models.AutomationActionReviewFeedback{
+			ReviewID: event.Review.ID,
+			PRAuthor: event.PullRequest.User.Login,
+			Body:     event.Review.Body,
+		}
+	}
+	s.triggerGitHubAutomations(ctx, request, event.OwnerOrgID, event.Repository.ID)
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
@@ -3797,6 +3806,7 @@ type PullRequestReviewCommentEvent struct {
 	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
 	RecordOnly       bool                    `json:"-"`
+	OwnAppReview     bool                    `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
@@ -3814,6 +3824,7 @@ type PullRequestReviewCommentEvent struct {
 		AuthorAssociation     string                     `json:"author_association"`
 		InReplyToID           *int64                     `json:"in_reply_to_id"`
 		Line                  *int                       `json:"line"`
+		OriginalLine          *int                       `json:"original_line"`
 		Side                  string                     `json:"side"`
 		DiffHunk              string                     `json:"diff_hunk"`
 		CommitID              string                     `json:"commit_id"`
@@ -3858,7 +3869,7 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 	if event.Action != "created" {
 		return nil
 	}
-	s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+	request := automationevents.GitHubEventTriggerRequest{
 		Event:             models.AutomationGitHubEventPullRequestReviewCommentCreated,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.PullRequest.Number,
@@ -3875,7 +3886,17 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		Path:              event.Comment.Path,
 		Labels:            githubLabelNames(event.PullRequest.Labels),
 		LabelsKnown:       true,
-	}, event.OwnerOrgID, event.Repository.ID)
+	}
+	if event.OwnAppReview && event.Comment.InReplyToID == nil {
+		request.OwnAppReviewFeedback = &models.AutomationActionReviewFeedback{
+			ReviewID: event.Comment.PullRequestReviewID,
+			Body:     event.Comment.Body,
+			Inline:   true,
+			Path:     event.Comment.Path,
+			Line:     event.Comment.OriginalLine,
+		}
+	}
+	s.triggerGitHubAutomations(ctx, request, event.OwnerOrgID, event.Repository.ID)
 	if event.RecordOnly {
 		return nil
 	}

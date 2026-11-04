@@ -20,6 +20,8 @@ func TestAutomationActionConfig(t *testing.T) {
 		{"GitHub only", `{"actions":["github_issue_comment"],"repository":"owner/repo"}`, true},
 		{"GitHub comment updates only", `{"actions":["github_issue_comment_update"],"repository":"owner/repo"}`, true},
 		{"GitHub comment updates require a repository", `{"actions":["github_issue_comment_update"]}`, false},
+		{"GitHub inline review only", `{"actions":["github_pull_request_review"],"repository":"owner/repo"}`, true},
+		{"GitHub inline reviews require a repository", `{"actions":["github_pull_request_review"]}`, false},
 		{"Notion arbitrary mapping", `{"actions":["notion_tracking_row"],"notion_data_source_id":"379d57062bc08021a0e6000b04d8902d","notion_properties":{"Report":"title","Summary":"rich_text","State":"select"}}`, true},
 		{"disabled kinds need no destinations", `{"actions":["github_label"],"repository":"owner/repo","label":"needs-security"}`, true},
 		{"no actions", `{}`, false}, {"unknown action", `{"actions":["http_request"]}`, false},
@@ -95,6 +97,93 @@ func TestAutomationActionCreateSerialization(t *testing.T) {
 	raw, err := json.Marshal(request)
 	require.NoError(t, err, "encode a pre-update create request")
 	require.Equal(t, storedRequest, string(raw), "create request bytes must remain stable for the persisted digest")
+}
+
+func TestAutomationActionGitHubReviewValidation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		change  func(*AutomationActionRequest)
+		grant   AutomationActionKind
+		wantErr string
+	}{
+		{"explicit review grant with optional summary omitted", func(*AutomationActionRequest) {}, AutomationActionGitHubReview, ""},
+		{"comment grant does not allow inline reviews", func(*AutomationActionRequest) {}, AutomationActionComment, "action kind is not configured"},
+		{"missing PR", func(r *AutomationActionRequest) { r.PRNumber, r.HeadSHA = 0, "" }, AutomationActionGitHubReview, "GitHub actions require a PR precondition"},
+		{"missing head", func(r *AutomationActionRequest) { r.HeadSHA = "" }, AutomationActionGitHubReview, "a PR precondition requires a positive pr_number and full lowercase head_sha"},
+		{"missing comments", func(r *AutomationActionRequest) { r.Comments = nil }, AutomationActionGitHubReview, "GitHub PR reviews require one to five inline comments"},
+		{"too many comments", func(r *AutomationActionRequest) {
+			r.Comments = make([]AutomationActionReviewComment, 6)
+		}, AutomationActionGitHubReview, "GitHub PR reviews require one to five inline comments"},
+		{"accepts a distinct comment on the same file", func(r *AutomationActionRequest) {
+			r.Comments = append(r.Comments, AutomationActionReviewComment{Path: r.Comments[0].Path, Line: 2, Body: "Second finding"})
+		}, AutomationActionGitHubReview, ""},
+		{"duplicate file and line", func(r *AutomationActionRequest) {
+			r.Comments = append(r.Comments, AutomationActionReviewComment{Path: r.Comments[0].Path, Line: 1, Body: "Another finding"})
+		}, AutomationActionGitHubReview, "inline comments must have distinct file and line anchors"},
+		{"zero line", func(r *AutomationActionRequest) { r.Comments[0].Line = 0 }, AutomationActionGitHubReview, "inline comment 1 requires a relative file path and positive line"},
+		{"blank finding", func(r *AutomationActionRequest) { r.Comments[0].Body = " \n" }, AutomationActionGitHubReview, "inline comment 1 requires bounded, nonempty text"},
+		{"oversized finding", func(r *AutomationActionRequest) { r.Comments[0].Body = strings.Repeat("é", 2049) }, AutomationActionGitHubReview, "inline comment 1 requires bounded, nonempty text"},
+		{"oversized summary", func(r *AutomationActionRequest) { r.Text = strings.Repeat("é", 2049) }, AutomationActionGitHubReview, "GitHub PR reviews accept optional bounded summary text, without properties"},
+		{"properties", func(r *AutomationActionRequest) { r.Properties = map[string]string{} }, AutomationActionGitHubReview, "GitHub PR reviews accept optional bounded summary text, without properties"},
+		{"source action", func(r *AutomationActionRequest) { r.SourceActionID = uuid.NewString() }, AutomationActionGitHubReview, "source_action_id is only valid for comment updates"},
+		{"spoofed summary marker", func(r *AutomationActionRequest) { r.Text = AutomationActionReviewMarkerPrefix + "spoof -->" }, AutomationActionGitHubReview, "review text contains a reserved automation marker"},
+		{"spoofed finding marker", func(r *AutomationActionRequest) {
+			r.Comments[0].Body += AutomationActionCommentMarkerPrefix + "spoof -->"
+		}, AutomationActionGitHubReview, "inline comment 1 contains a reserved automation marker"},
+		{"timeline comment rejects inline comments", func(r *AutomationActionRequest) {
+			r.Kind = AutomationActionComment
+			r.Text = "Timeline comment"
+		}, AutomationActionComment, "comments are only valid for GitHub PR reviews"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			request := AutomationActionRequest{
+				AutomationActionKey: AutomationActionKey{"review:42", "inline"},
+				Kind:                AutomationActionGitHubReview,
+				PRNumber:            42,
+				HeadSHA:             strings.Repeat("a", 40),
+				Comments:            []AutomationActionReviewComment{{Path: "assets/Écran de test.tsx", Line: 1, Body: "Use the documented component."}},
+			}
+			tt.change(&request)
+			err := request.ValidateFor(AutomationActionConfig{Actions: []AutomationActionKind{tt.grant}, Repository: "owner/repo"})
+			if tt.wantErr == "" {
+				require.NoError(t, err, "an explicitly granted review with valid inline anchors should validate")
+			} else {
+				require.EqualError(t, err, tt.wantErr, "reject invalid or ungranted inline reviews")
+			}
+		})
+	}
+}
+
+func TestAutomationActionReviewPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		path  string
+		valid bool
+	}{
+		{"root file", "README.md", true},
+		{"unicode and spaces", "assets/Écran de test.tsx", true},
+		{"leading dot in a component name", ".github/file.yml", true},
+		{"empty path", "", false},
+		{"absolute path", "/assets/item.tsx", false},
+		{"current directory component", "assets/./item.tsx", false},
+		{"parent directory component", "assets/../item.tsx", false},
+		{"empty component", "assets//item.tsx", false},
+		{"trailing slash", "assets/", false},
+		{"backslash", `assets\item.tsx`, false},
+		{"ASCII control", "assets/item\n.tsx", false},
+		{"unicode control", "assets/item\u0085.tsx", false},
+		{"invalid UTF-8", "assets/item\xff.tsx", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tt.valid, validAutomationReviewPath(tt.path), "only clean relative Git file paths may anchor findings")
+		})
+	}
 }
 
 func TestAutomationActionConfigJSONRoundTrip(t *testing.T) {

@@ -94,6 +94,31 @@ func TestWebhook_CodeReviewCommentIsAutomated(t *testing.T) {
 	}
 }
 
+func TestWebhook_GitHubReviewIsOwnApp(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		app        *ghservice.FeedbackGitHubAppIdentity
+		login      string
+		authorType string
+		want       bool
+	}{
+		{name: "verified app ID", app: &ghservice.FeedbackGitHubAppIdentity{ID: 143}, want: true},
+		{name: "signed bot author without app metadata", login: "review-bot[bot]", authorType: "Bot", want: true},
+		{name: "different app ID takes precedence", app: &ghservice.FeedbackGitHubAppIdentity{ID: 314}, login: "review-bot[bot]", authorType: "Bot"},
+		{name: "different bot", login: "other-app[bot]", authorType: "Bot"},
+		{name: "human login", login: "review-bot[bot]", authorType: "User"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			handler := &WebhookHandler{cfg: &config.Config{GitHubAppID: 143, GitHubAppSlug: "review-bot"}}
+			require.Equal(t, tt.want, handler.githubReviewIsOwnApp(tt.app, tt.login, tt.authorType), "verify app provenance from the signed review author")
+		})
+	}
+}
+
 func (r *webhookAutomationEventRecorder) TriggerGitHubEvent(_ context.Context, req automationevents.GitHubEventTriggerRequest) error {
 	r.calls = append(r.calls, req)
 	return nil

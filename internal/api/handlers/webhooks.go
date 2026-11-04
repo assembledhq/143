@@ -426,6 +426,17 @@ func (h *WebhookHandler) codeReviewCommentIsAutomated(performedViaGitHubApp *ghs
 		performedViaGitHubApp.ID == h.cfg.GitHubAppID
 }
 
+func (h *WebhookHandler) githubReviewIsOwnApp(app *ghservice.FeedbackGitHubAppIdentity, login, authorType string) bool {
+	if h.cfg == nil || h.cfg.GitHubAppID <= 0 {
+		return false
+	}
+	if app != nil && app.ID > 0 {
+		return app.ID == h.cfg.GitHubAppID
+	}
+	slug := strings.TrimSpace(h.cfg.GitHubAppSlug)
+	return slug != "" && strings.EqualFold(authorType, "Bot") && strings.EqualFold(login, slug+"[bot]")
+}
+
 func codeReviewMentionAuthorTrusted(event ghservice.IssueCommentEvent) bool {
 	switch strings.ToUpper(strings.TrimSpace(event.Comment.AuthorAssociation)) {
 	case "OWNER", "MEMBER", "COLLABORATOR":
@@ -826,6 +837,7 @@ func (h *WebhookHandler) handlePullRequestReview(w http.ResponseWriter, r *http.
 		event.OwnerOrgID = &owner.OrgID
 	}
 
+	event.OwnAppReview = h.githubReviewIsOwnApp(event.Review.PerformedViaGitHubApp, event.Review.User.Login, event.Review.User.Type)
 	if err := h.prService.HandlePullRequestReviewEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_EVENT_FAILED", "failed to process pull_request_review event", err)
 		return
@@ -863,6 +875,7 @@ func (h *WebhookHandler) handlePullRequestReviewComment(w http.ResponseWriter, r
 	if (event.Action == "created" || event.Action == "edited") && event.Comment.InReplyToID != nil && h.codeReviewDisputes != nil && h.pullRequests != nil {
 		event.RecordOnly = h.handleCodeReviewInlineDispute(r, event, owner)
 	}
+	event.OwnAppReview = h.githubReviewIsOwnApp(event.Comment.PerformedViaGitHubApp, event.Comment.User.Login, event.Comment.User.Type)
 	if err := h.prService.HandlePullRequestReviewCommentEvent(r.Context(), event); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "REVIEW_COMMENT_EVENT_FAILED", "failed to process pull_request_review_comment event", err)
 		return

@@ -27,7 +27,7 @@ const (
 	codeReviewDisputesDirtyMigrationVersion = 281
 	// Bump only after reviewing compatibility with the inactive runtime.
 	// TestRuntimeRevertSchemaPinMatchesMigrations catches a newer source schema.
-	inactiveRuntimeSchemaVersion = 397
+	inactiveRuntimeSchemaVersion = 398
 )
 
 type dirtyMigrationRepairer interface {
@@ -182,7 +182,7 @@ func verifyInactiveBinaryRollback(ctx context.Context, rawURL string, schema uin
 // verifyInactiveRuntimeSchema shares the retained-history proof with the pinned
 // binary rollback check. The source revert also supports later schemas through
 // inactiveRuntimeSchemaVersion. The package-credential table, review phase
-// constraint, size-limit override flag, automation comment-update support, and
+// constraint, size-limit override flag, automation review actions, and
 // review-history receipt roles leave the inspected caller and lifecycle state intact.
 func verifyInactiveRuntimeSchema(ctx context.Context, rawURL string, expectedSchema uint) (result error) {
 	// Worker DATABASE_URL values include pool options. Parse them as a pool
