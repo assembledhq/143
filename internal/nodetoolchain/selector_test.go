@@ -13,6 +13,7 @@ func TestSelect(t *testing.T) {
 	t.Parallel()
 	defaultToolchain := Toolchain{ID: "node24-npm11", NodeVersion: "24.22.2", NPMVersion: "11.19.1"}
 	node22 := Toolchain{ID: "node22-npm10", NodeVersion: "22.23.4", NPMVersion: "10.9.9"}
+	node22NPM11 := Toolchain{ID: "node22-npm11", NodeVersion: "22.23.4", NPMVersion: "11.21.1", Directory: "22.23.4-npm11.21.1"}
 	tests := []struct {
 		name        string
 		files       map[string]string
@@ -23,6 +24,16 @@ func TestSelect(t *testing.T) {
 		{name: "no declarations selects default", expected: defaultToolchain},
 		{name: "empty manifest selects default", files: map[string]string{"package.json": `{}`}, expected: defaultToolchain},
 		{name: "repository desired versions", files: map[string]string{"package.json": `{"engines":{"node":"^22","npm":"^10"}}`}, expected: node22},
+		{
+			name: "Node 22 and npm 11 for root and nested setup targets",
+			files: map[string]string{
+				".nvmrc":                "v22.23.4\n",
+				"package.json":          `{"engines":{"node":"^22","npm":"^11"},"packageManager":"npm@11.21.1"}`,
+				"frontend/package.json": `{"engines":{"node":"^22","npm":"^11"}}`,
+			},
+			directories: []string{".", "frontend"},
+			expected:    node22NPM11,
+		},
 		{name: "compatible ranges use ordered default", files: map[string]string{"package.json": `{"engines":{"node":">=22 <25","npm":">=10 <12"}}`}, expected: defaultToolchain},
 		{name: "range alternatives", files: map[string]string{"package.json": `{"engines":{"node":"^22 || ^24"}}`}, expected: defaultToolchain},
 		{name: "root and target intersect", files: map[string]string{"package.json": `{"engines":{"node":">=22"}}`, "frontend/package.json": `{"engines":{"npm":"10.x"}}`}, directories: []string{"frontend"}, expected: node22},
@@ -75,11 +86,26 @@ func TestSelect(t *testing.T) {
 
 func TestToolchainPaths(t *testing.T) {
 	t.Parallel()
-	selected, err := Select(map[string]string{".nvmrc": "22"}, nil)
-	require.NoError(t, err, "the supported Node 22 toolchain should be selectable")
-	require.Equal(t, "/opt/143/node/22.23.4/bin", selected.BinDir(), "PATH should reference the selected immutable runtime")
-	require.Equal(t, "/opt/143/node/22.23.4/bin/node", selected.NodePath(), "execution should use the selected Node binary")
-	require.Equal(t, "/opt/143/node/22.23.4/lib/node_modules/npm/bin/npm-cli.js", selected.NPMPath(), "npm should be executed explicitly by the selected Node binary")
+	tests := []struct {
+		name, npmVersion, directory string
+	}{
+		{name: "bundled npm", npmVersion: "10.9.9", directory: "22.23.4"},
+		{name: "alternate npm", npmVersion: "11.21.1", directory: "22.23.4-npm11.21.1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			selected, err := Select(map[string]string{
+				".nvmrc":       "22.23.4",
+				"package.json": `{"packageManager":"npm@` + tt.npmVersion + `"}`,
+			}, nil)
+			require.NoError(t, err, "the exact Node and npm pair should be selectable")
+			prefix := "/opt/143/node/" + tt.directory
+			require.Equal(t, prefix+"/bin", selected.BinDir(), "PATH should reference the selected immutable runtime")
+			require.Equal(t, prefix+"/bin/node", selected.NodePath(), "execution should use the selected Node binary")
+			require.Equal(t, prefix+"/lib/node_modules/npm/bin/npm-cli.js", selected.NPMPath(), "npm should be executed explicitly by the selected Node binary")
+		})
+	}
 }
 
 func TestCatalog(t *testing.T) {
@@ -93,16 +119,22 @@ func TestCatalog(t *testing.T) {
 		} `json:"toolchains"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &catalog), "catalog should be valid JSON")
-	require.Equal(t, 2, len(catalog.Toolchains), "catalog should contain only the reviewed runtime pairs")
+	require.Equal(t, 3, len(catalog.Toolchains), "catalog should contain only the reviewed runtime pairs")
 	hashes := regexp.MustCompile(`^[a-f0-9]{64}$`)
+	paths := make(map[string]bool, len(catalog.Toolchains))
 	for _, entry := range catalog.Toolchains {
+		require.False(t, paths[entry.BinDir()], "each runtime pair should have its own installation directory")
+		paths[entry.BinDir()] = true
 		t.Run(entry.ID, func(t *testing.T) {
 			t.Parallel()
 			require.Equal(t, 2, len(entry.SHA256), "each runtime should pin both supported Linux architectures")
 			require.Regexp(t, hashes, entry.SHA256["linux-x64"], "x64 archive should have a pinned SHA256")
 			require.Regexp(t, hashes, entry.SHA256["linux-arm64"], "arm64 archive should have a pinned SHA256")
-			selected, err := Select(map[string]string{".node-version": entry.NodeVersion}, nil)
-			require.NoError(t, err, "each catalog runtime should be selectable by its exact version")
+			selected, err := Select(map[string]string{
+				".node-version": entry.NodeVersion,
+				"package.json":  `{"packageManager":"npm@` + entry.NPMVersion + `"}`,
+			}, nil)
+			require.NoError(t, err, "each catalog runtime should be selectable by its exact Node and npm versions")
 			require.Equal(t, entry.Toolchain, selected, "the exact catalog runtime should round-trip")
 		})
 	}

@@ -21,12 +21,20 @@ type Toolchain struct {
 	ID          string `json:"id"`
 	NodeVersion string `json:"node_version"`
 	NPMVersion  string `json:"npm_version"`
+	Directory   string `json:"directory,omitempty"`
 }
 
-func (t Toolchain) BinDir() string   { return "/opt/143/node/" + t.NodeVersion + "/bin" }
+func (t Toolchain) BinDir() string {
+	directory := t.Directory
+	if directory == "" {
+		directory = t.NodeVersion
+	}
+	return path.Join("/opt/143/node", directory, "bin")
+}
+
 func (t Toolchain) NodePath() string { return t.BinDir() + "/node" }
 func (t Toolchain) NPMPath() string {
-	return "/opt/143/node/" + t.NodeVersion + "/lib/node_modules/npm/bin/npm-cli.js"
+	return path.Join(path.Dir(t.BinDir()), "lib/node_modules/npm/bin/npm-cli.js")
 }
 
 var (

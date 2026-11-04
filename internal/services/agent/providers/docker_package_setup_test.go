@@ -60,6 +60,7 @@ type npmDockerFixture struct {
 	failInstall, failCleanup             bool
 	npmFailure                           string
 	versionMismatch                      bool
+	expectedToolchainDirectory           string
 	cancelInstall                        context.CancelFunc
 	privateInputs                        []byte
 	publishedBeforeRemoval               bool
@@ -136,6 +137,10 @@ func newNPMDockerFixture(t *testing.T, root, ca, port string) *npmDockerFixture 
 				}
 				script := strings.ReplaceAll(npmSetupInstallPython, "args=[node,npm,", ownedArgs)
 				versionStub := "def version(command):\n pathlib.Path(environment['TMPDIR']).mkdir(parents=True,exist_ok=True)\n (pathlib.Path(environment['TMPDIR'])/'node-compile-cache').mkdir(exist_ok=True)\n return 'v'+node_version if len(command)==2 else npm_version\n"
+				if fixture.expectedToolchainDirectory != "" {
+					prefix := "/opt/143/node/" + fixture.expectedToolchainDirectory
+					versionStub = fmt.Sprintf("assert node == %q\nassert npm == %q\nassert environment['PATH'] == %q\n", prefix+"/bin/node", prefix+"/lib/node_modules/npm/bin/npm-cli.js", prefix+"/bin:/usr/bin:/bin") + versionStub
+				}
 				if fixture.versionMismatch {
 					versionStub = "def version(command):\n return '0.0.0'\n"
 				}
