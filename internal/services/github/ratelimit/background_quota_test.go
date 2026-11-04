@@ -228,6 +228,42 @@ func TestBackgroundQuotaRejectsFailedPrincipalEvidence(t *testing.T) {
 	}
 }
 
+func TestCheckRefreshQuotaObservesOnlyLowHeadersOutsideSweep(t *testing.T) {
+	t.Parallel()
+	client, server, _ := newControllerTestRedis(t)
+	now := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	controller := newQuotaController(t, &now, client, 20, zerolog.Nop())
+	healthy := quotaTestHeaders(now, 4500)
+	healthy.Set("X-RateLimit-Limit", "5000")
+	controller.Observe(t.Context(), Permit{Scope: Scope{InstallationID: 44}}, Observation{StatusCode: http.StatusOK, Header: healthy})
+	controller.Observe(t.Context(), Permit{Scope: Scope{InstallationID: 42}}, Observation{StatusCode: http.StatusOK, Header: healthy})
+	require.False(t, server.Exists(controller.backgroundQuotaKey(44)), "an installation outside the sweep should not write healthy quota evidence")
+	require.True(t, server.Exists(controller.backgroundQuotaKey(42)), "a participating sweep should still record healthy quota evidence")
+}
+
+func TestCheckRefreshQuotaObservationFailureDoesNotReportSweepDegradation(t *testing.T) {
+	t.Parallel()
+	client, _, closeClient := newControllerTestRedis(t)
+	closeClient()
+	now := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	var logs bytes.Buffer
+	controller := newQuotaController(t, &now, client, 20, zerolog.New(&logs))
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		require.NoError(t, provider.Shutdown(context.Background()), "isolated metrics provider should shut down")
+	})
+	counter, err := provider.Meter("check-refresh-quota-test").Int64Counter("github.background_quota.decisions")
+	require.NoError(t, err, "sweep decision counter should initialize")
+	controller.backgroundQuotaDecisions = counter
+	controller.Observe(t.Context(), Permit{Scope: Scope{InstallationID: 44}}, Observation{StatusCode: http.StatusOK, Header: quotaTestHeaders(now, 10)})
+	require.Contains(t, logs.String(), `"github_check_refresh_quota_observation_degraded":true`, "quota observation failures should identify the check refresh budget")
+	require.NotContains(t, logs.String(), `"github_background_quota_degraded"`, "quota observation failures outside the sweep should omit the sweep field")
+	var collected metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(t.Context(), &collected), "sweep metrics should be collectible")
+	require.Empty(t, collected.ScopeMetrics, "quota observation failures outside the sweep should leave the sweep counter untouched")
+}
+
 func TestBackgroundQuotaFailedLaterWindowDoesNotReleaseReserve(t *testing.T) {
 	t.Parallel()
 	client, _, _ := newControllerTestRedis(t)

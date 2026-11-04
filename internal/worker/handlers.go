@@ -11517,7 +11517,11 @@ func newSyncPullRequestStateHandler(stores *Stores, services *Services, logger z
 			}
 			return classifyGitHubJobError(fmt.Errorf("sync pull request state: %w", err), pullRequestID.String())
 		}
-		decision, autoRepairErr := services.PR.MaybeStartAutoRepairForPullRequest(ctx, orgID, pullRequestID, "github_pr_health_updated")
+		autoRepairReason := "github_pr_health_updated"
+		if syncReason == ghservice.PullRequestSyncReasonIncomplete {
+			autoRepairReason = ghservice.PRCheckProjectionAutoRepairReason
+		}
+		decision, autoRepairErr := services.PR.MaybeStartAutoRepairForPullRequest(ctx, orgID, pullRequestID, autoRepairReason)
 		if autoRepairErr != nil {
 			logger.Warn().
 				Err(autoRepairErr).
@@ -11561,19 +11565,19 @@ func newRebuildPullRequestHealthHandler(stores *Stores, services *Services, logg
 		}
 		healthChanged, err := services.PR.RebuildPullRequestHealthFromCheckStates(ctx, orgID, pullRequestID)
 		if err != nil {
-			return fmt.Errorf("rebuild projected pull request health: %w", err)
+			err = fmt.Errorf("rebuild projected pull request health: %w", err)
 		}
 		if !healthChanged {
-			return nil
+			return err
 		}
-		decision, autoRepairErr := services.PR.MaybeStartAutoRepairForPullRequest(ctx, orgID, pullRequestID, "github_pr_check_state_updated")
+		decision, autoRepairErr := services.PR.MaybeStartAutoRepairForPullRequest(ctx, orgID, pullRequestID, ghservice.PRCheckProjectionAutoRepairReason)
 		if autoRepairErr != nil {
 			logger.Warn().
 				Err(autoRepairErr).
 				Str("org_id", orgID.String()).
 				Str("pull_request_id", pullRequestID.String()).
 				Msg("failed to evaluate automatic pull request repair after projected health update")
-			return nil
+			return err
 		}
 		if decision != nil && decision.Status == ghservice.AutoRepairDecisionStarted {
 			logger.Info().
@@ -11583,7 +11587,7 @@ func newRebuildPullRequestHealthHandler(stores *Stores, services *Services, logg
 				Str("head_sha", decision.HeadSHA).
 				Msg("started automatic pull request repair after projected health update")
 		}
-		return nil
+		return err
 	}
 }
 

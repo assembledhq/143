@@ -59,21 +59,22 @@ const (
 	// also reached from the auto-repair coordinator, which both the
 	// sync_pull_request_state and rebuild_pull_request_health job handlers
 	// invoke — letting that path refresh every two minutes would re-request the
-	// readback that checkStateRequiresAuthoritativeSync just avoided. They pass
+	// readback that check projection just avoided. They pass
 	// healthBuildOptions.asyncRefreshAfter instead.
-	prHealthReadStaleAfter    = 2 * time.Minute
-	prHealthSyncQueue         = "default"
-	prHealthSyncJobType       = "sync_pull_request_state"
-	prHealthRebuildJobType    = "rebuild_pull_request_health"
-	prHealthReconcileJobType  = "reconcile_pull_request_state"
-	prHealthEnrichJobType     = "enrich_pull_request_health"
-	prMergeWhenReadyJobType   = "merge_pull_request_when_ready"
-	prHealthWebhookDebounce   = 5 * time.Second
-	prHealthCheckSyncDebounce = 15 * time.Second
-	maxHealthRebuildAttempts  = 3
-	requiredChecksCacheTTL    = 24 * time.Hour
-	noRequiredChecksCacheTTL  = 6 * time.Hour
-	prHealthSyncTimeout       = 2 * time.Minute
+	prHealthReadStaleAfter     = 2 * time.Minute
+	prHealthSyncQueue          = "default"
+	prHealthSyncJobType        = "sync_pull_request_state"
+	prHealthRebuildJobType     = "rebuild_pull_request_health"
+	prHealthReconcileJobType   = "reconcile_pull_request_state"
+	prHealthEnrichJobType      = "enrich_pull_request_health"
+	prMergeWhenReadyJobType    = "merge_pull_request_when_ready"
+	prHealthWebhookDebounce    = 5 * time.Second
+	prHealthCheckBaselineDelay = 15 * time.Second
+	prHealthCheckBatchDelay    = 5 * time.Minute
+	maxHealthRebuildAttempts   = 3
+	requiredChecksCacheTTL     = 24 * time.Hour
+	noRequiredChecksCacheTTL   = 6 * time.Hour
+	prHealthSyncTimeout        = 2 * time.Minute
 )
 
 type PullRequestSyncReason string
@@ -184,12 +185,13 @@ type gitHubPullRequestDetails struct {
 }
 
 type gitHubCheckRunsResponse struct {
-	CheckRuns []gitHubCheckRun `json:"check_runs"`
+	TotalCount int              `json:"total_count"`
+	CheckRuns  []gitHubCheckRun `json:"check_runs"`
 }
 
 type gitHubCombinedStatusResponse struct {
-	State    string               `json:"state"`
-	Statuses []gitHubCommitStatus `json:"statuses"`
+	TotalCount int                  `json:"total_count"`
+	Statuses   []gitHubCommitStatus `json:"statuses"`
 }
 
 type gitHubBranchResponse struct {
@@ -248,6 +250,9 @@ type gitHubCheckRunAnnotation struct {
 // healthBuildOptions tunes how much derived state a health build populates for
 // callers that do not read all of it.
 type healthBuildOptions struct {
+	// A check projection already schedules its own budgeted verification.
+	skipSync bool
+
 	// skipAutoRepairAttemptState omits AutoRepairExhaustedActions, which only
 	// the PR health UI consumes. Populating it costs an organization load, a
 	// session load, a user load, and up to two attempt-count queries, so the
@@ -281,8 +286,8 @@ func (s *PRService) getPullRequestHealth(ctx context.Context, orgID, pullRequest
 		return nil, err
 	}
 
-	needsInlineSync := (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == models.PullRequestStatusOpen
-	needsAsyncRefresh := pr.Status == models.PullRequestStatusOpen && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > opts.staleAfter()
+	needsInlineSync := !opts.skipSync && (pr.GitHubStateSyncedAt == nil || pr.HealthVersion == 0) && pr.Status == models.PullRequestStatusOpen
+	needsAsyncRefresh := !opts.skipSync && pr.Status == models.PullRequestStatusOpen && pr.GitHubStateSyncedAt != nil && time.Since(*pr.GitHubStateSyncedAt) > opts.staleAfter()
 	var linkedRepo *models.Repository
 	if pr.Status == models.PullRequestStatusOpen && s.repos != nil {
 		repo, repoErr := s.repos.GetByFullNameAnyStatus(ctx, orgID, pr.GitHubRepo)
@@ -634,6 +639,9 @@ func checkSummariesHaveFailedCheck(checks []models.PullRequestCheckSummary) bool
 
 func (s *PRService) SyncPullRequestState(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
 	reason := PullRequestSyncReasonFromContext(ctx)
+	if reason == PullRequestSyncReasonIncomplete {
+		return s.syncWebhookPullRequestChecks(ctx, orgID, pullRequestID)
+	}
 	if !reason.coalesces() {
 		s.logger.Info().
 			Str("org_id", orgID.String()).
@@ -813,8 +821,9 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 		return err
 	}
 	commitStatuses, err := s.listCommitStatusesForRef(ctx, token, owner, repoName, details.Head.SHA)
+	checkSetComplete := err == nil
 	if err != nil {
-		if ClassifyRetry(err, time.Now()).Retryable {
+		if errors.Is(err, ErrPullRequestCheckRefreshDeferred) || errors.Is(err, errIncompleteCheckPagination) || ClassifyRetry(err, time.Now()).Retryable {
 			return fmt.Errorf("fetch GitHub commit statuses during pull request health sync: %w", err)
 		}
 		s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).
@@ -841,7 +850,6 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 		return priorErr
 	}
 
-	checkSetComplete := true
 	summary := models.PullRequestHealthSummary{
 		Checks:           make([]models.PullRequestCheckSummary, 0),
 		CheckSetComplete: &checkSetComplete,
@@ -872,7 +880,7 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 			PullRequestID:     pullRequestID,
 			HeadSHA:           details.Head.SHA,
 			Source:            models.PullRequestCheckSourceCheckRun,
-			ExternalKey:       normalizedCheckExternalKey(name, strconv.FormatInt(check.ID, 10)),
+			ExternalKey:       checkRunExternalKey(check.App.Slug, name, check.ID),
 			Name:              checkSummary.Name,
 			Category:          checkSummary.Category,
 			Status:            checkSummary.Status,
@@ -918,7 +926,7 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 			ProviderUpdatedAt: firstProviderTimestamp(status.UpdatedAt, status.CreatedAt),
 		})
 	}
-	summary.ChecksConfirmed = determineChecksConfirmed(summary.Checks, requiredChecksConfigured)
+	summary.ChecksConfirmed = checkSetComplete && determineChecksConfirmed(summary.Checks, requiredChecksConfigured)
 	summary.NeedsAgentAction = summary.HasConflicts || healthSummaryHasRepairableFailedChecks(summary)
 
 	mergeStateIndeterminate, testsIndeterminate := detectIndeterminateSignals(details.Mergeable, details.MergeableState, checkRuns, commitStatuses)
@@ -971,12 +979,11 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 			s.logger.Warn().Err(rebuildErr).
 				Str("pull_request_id", pullRequestID.String()).
 				Str("head_sha", details.Head.SHA).
-				Msg("failed to overlay check webhooks that raced GitHub reconciliation")
+				Msg("failed to reconcile check webhooks that raced GitHub reconciliation")
 		}
 	}
-	// A changed projected rebuild publishes and queues merge processing with the
-	// final aggregate itself. Otherwise expose the authoritative snapshot only
-	// after reconciliation and the race overlay have completed.
+	// A changed projection publishes its final aggregate and schedules any
+	// needed verification. Otherwise expose the authoritative snapshot.
 	if !projectedHealthChanged {
 		s.publishPullRequestUpdated(ctx, pr, current)
 		s.enqueueMergeWhenReadyProcessing(ctx, pr)
@@ -988,39 +995,114 @@ func (s *PRService) syncResolvedPullRequestStateCapturing(ctx context.Context, o
 }
 
 func (s *PRService) RebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error) {
+	projection, err := s.rebuildPullRequestHealthFromCheckStates(ctx, orgID, pullRequestID)
+	if err != nil {
+		return false, err
+	}
+	if projection.refreshDelay > 0 {
+		if err := s.queuePullRequestStateSyncAfter(ctx, projection.pullRequest, PullRequestSyncReasonIncomplete, projection.refreshDelay); err != nil {
+			return projection.healthChanged, err
+		}
+	}
+	return projection.healthChanged, nil
+}
+
+func (s *PRService) refreshPullRequestChecksNeeded(ctx context.Context, orgID, pullRequestID uuid.UUID) (bool, error) {
+	projection, err := s.loadPullRequestCheckProjection(ctx, orgID, pullRequestID)
+	if err != nil || projection.refreshDelay > 0 || !projection.canProject {
+		return projection.refreshDelay > 0, err
+	}
+	if projection.pullRequest.MergeState == models.PullRequestMergeStateMergeabilityPending || projection.pullRequest.MergeState == models.PullRequestMergeStateUnknown {
+		// A previous verification can establish coverage while GitHub is still
+		// computing mergeability. Its retry must still go through admission.
+		return true, nil
+	}
+	// An older repair can run before the rebuild job that would otherwise
+	// expose its coverage gap. Inspect those rows without advancing their
+	// projection watermark or consuming the normal worker's repair trigger.
+	current := projection.current
+	states, err := s.pullRequests.ListCheckStatesAfter(ctx, orgID, pullRequestID, current.HeadSHA, current.CheckStateVersion)
+	if err != nil {
+		return false, err
+	}
+	return projectedStatesAddUnknownChecks(projection.summary.Checks, states), nil
+}
+
+type pullRequestCheckProjection struct {
+	pullRequest   models.PullRequest
+	current       models.PullRequestHealthCurrent
+	summary       models.PullRequestHealthSummary
+	canProject    bool
+	healthChanged bool
+	refreshDelay  time.Duration
+}
+
+func (s *PRService) loadPullRequestCheckProjection(ctx context.Context, orgID, pullRequestID uuid.UUID) (pullRequestCheckProjection, error) {
+	pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
+	if err != nil {
+		return pullRequestCheckProjection{}, err
+	}
+	if pr.Status != models.PullRequestStatusOpen {
+		return pullRequestCheckProjection{}, nil
+	}
+
+	projection := pullRequestCheckProjection{pullRequest: pr}
+	if pr.HeadSHA == nil || strings.TrimSpace(*pr.HeadSHA) == "" {
+		projection.refreshDelay = prHealthCheckBaselineDelay
+		return projection, nil
+	}
+	current, err := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		projection.refreshDelay = prHealthCheckBaselineDelay
+		return projection, nil
+	}
+	if err != nil {
+		return pullRequestCheckProjection{}, err
+	}
+	if current.HeadSHA != *pr.HeadSHA {
+		projection.refreshDelay = prHealthCheckBaselineDelay
+		return projection, nil
+	}
+	var summary models.PullRequestHealthSummary
+	if err := json.Unmarshal(current.SummaryJSON, &summary); err != nil {
+		s.logger.Warn().Err(err).Str("pull_request_id", pr.ID.String()).
+			Msg("pull request health baseline is undecodable; authoritative repair needed")
+		projection.refreshDelay = prHealthCheckBaselineDelay
+		return projection, nil
+	}
+	projection.canProject = true
+	projection.current = current
+	projection.summary = summary
+	if !pullRequestHasHealthBaseline(pr) || summary.CheckSetComplete == nil {
+		projection.refreshDelay = prHealthCheckBaselineDelay
+	} else if !*summary.CheckSetComplete {
+		projection.refreshDelay = prHealthCheckBatchDelay
+	}
+	return projection, nil
+}
+
+func (s *PRService) rebuildPullRequestHealthFromCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID) (pullRequestCheckProjection, error) {
 	for attempt := 0; attempt < maxHealthRebuildAttempts; attempt++ {
-		pr, err := s.pullRequests.GetByID(ctx, orgID, pullRequestID)
-		if err != nil {
-			return false, err
-		}
-		if pr.Status != models.PullRequestStatusOpen || pr.HeadSHA == nil || strings.TrimSpace(*pr.HeadSHA) == "" {
-			return false, nil
+		projection, err := s.loadPullRequestCheckProjection(ctx, orgID, pullRequestID)
+		if err != nil || !projection.canProject {
+			return projection, err
 		}
 
-		current, err := s.pullRequests.GetHealthCurrent(ctx, orgID, pullRequestID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
-		}
+		pr, current := projection.pullRequest, projection.current
+		states, err := s.pullRequests.ListCheckStatesAfter(ctx, orgID, pullRequestID, current.HeadSHA, current.CheckStateVersion)
 		if err != nil {
-			return false, err
+			return pullRequestCheckProjection{}, err
 		}
-		if current.HeadSHA != *pr.HeadSHA {
-			return false, nil
-		}
-
-		states, err := s.pullRequests.ListCheckStatesAfter(ctx, orgID, pullRequestID, *pr.HeadSHA, current.CheckStateVersion)
-		if err != nil {
-			return false, err
-		}
+		// Preserve existing coverage gaps even with no pending rows. A retry after
+		// enqueue failure must still schedule repair for the stored projection.
 		if len(states) == 0 {
-			return false, nil
+			return projection, nil
 		}
 
-		var summary models.PullRequestHealthSummary
-		if err := json.Unmarshal(current.SummaryJSON, &summary); err != nil {
-			return false, fmt.Errorf("decode current pull request health summary for check rebuild: %w", err)
+		summary := rebuildProjectedHealthSummary(projection.summary, states)
+		if projection.refreshDelay == 0 && summary.CheckSetComplete != nil && !*summary.CheckSetComplete {
+			projection.refreshDelay = prHealthCheckBatchDelay
 		}
-		summary = rebuildProjectedHealthSummary(summary, states)
 		appliedCheckStateVersion := latestProjectedCheckStateVersion(states)
 
 		rebuilt, applied, healthChanged, err := s.pullRequests.UpsertProjectedHealthSummary(
@@ -1039,22 +1121,27 @@ func (s *PRService) RebuildPullRequestHealthFromCheckStates(ctx context.Context,
 			},
 		)
 		if err != nil {
-			return false, err
+			return pullRequestCheckProjection{}, err
 		}
 		if !applied {
 			continue
 		}
 		if !healthChanged {
-			return false, nil
+			return projection, nil
 		}
 		if err := s.pullRequests.UpdateCIStatus(ctx, orgID, pullRequestID, models.PullRequestCIStatus(deriveAggregateCIStatus(summary.Checks))); err != nil {
 			s.logger.Warn().Err(err).Str("pull_request_id", pullRequestID.String()).Msg("failed to update CI status during projected pull request health rebuild")
 		}
 		s.publishPullRequestUpdated(ctx, pr, rebuilt)
-		s.enqueueMergeWhenReadyProcessing(ctx, pr)
-		return true, nil
+		// Merge processing performs its own authoritative read. Wake it once the
+		// projected checks settle, or after budgeted verification fills the gap.
+		if projection.refreshDelay == 0 && summary.ChecksConfirmed {
+			s.enqueueMergeWhenReadyProcessing(ctx, pr)
+		}
+		projection.healthChanged = true
+		return projection, nil
 	}
-	return false, fmt.Errorf("pull request health changed concurrently during %d projected rebuild attempts", maxHealthRebuildAttempts)
+	return pullRequestCheckProjection{}, fmt.Errorf("pull request health changed concurrently during %d projected rebuild attempts", maxHealthRebuildAttempts)
 }
 
 func latestProjectedCheckStateVersion(states []models.PullRequestCheckState) int64 {
@@ -2389,29 +2476,80 @@ func (s *PRService) waitForMergeabilityBackoff(ctx context.Context, delay time.D
 }
 
 func (s *PRService) listCheckRunsForRef(ctx context.Context, token, owner, repo, ref string) ([]gitHubCheckRun, error) {
-	path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs?per_page=100", owner, repo, ref)
-	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	path := fmt.Sprintf("/repos/%s/%s/commits/%s/check-runs", owner, repo, url.PathEscape(ref))
+	checks, err := listGitHubCheckPages(ctx, s, token, path, "check runs", func(page gitHubCheckRunsResponse) ([]gitHubCheckRun, int) {
+		return page.CheckRuns, page.TotalCount
+	}, func(check gitHubCheckRun) int64 { return check.ID })
 	if err != nil {
 		return nil, err
 	}
-	var resp gitHubCheckRunsResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("decode GitHub check runs: %w", err)
-	}
-	return dedupeCheckRunsByName(resp.CheckRuns), nil
+	return dedupeCheckRunsByProviderAndName(checks), nil
 }
 
 func (s *PRService) listCommitStatusesForRef(ctx context.Context, token, owner, repo, ref string) ([]gitHubCommitStatus, error) {
-	path := fmt.Sprintf("/repos/%s/%s/commits/%s/status", owner, repo, ref)
-	body, err := s.doGitHubRequest(ctx, token, http.MethodGet, path, nil)
+	path := fmt.Sprintf("/repos/%s/%s/commits/%s/status", owner, repo, url.PathEscape(ref))
+	statuses, err := listGitHubCheckPages(ctx, s, token, path, "commit statuses", func(page gitHubCombinedStatusResponse) ([]gitHubCommitStatus, int) {
+		return page.Statuses, page.TotalCount
+	}, func(status gitHubCommitStatus) int64 { return status.ID })
 	if err != nil {
 		return nil, err
 	}
-	var resp gitHubCombinedStatusResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil, fmt.Errorf("decode GitHub commit statuses: %w", err)
+	return dedupeCommitStatusesByContext(statuses), nil
+}
+
+const maxGitHubCheckPages = 20
+
+var errIncompleteCheckPagination = errors.New("GitHub check inventory pagination incomplete")
+
+func listGitHubCheckPages[Item any, Page any](ctx context.Context, s *PRService, token, path, description string, extract func(Page) ([]Item, int), itemID func(Item) int64) ([]Item, error) {
+	var items []Item
+	totalCount := 0
+	seenIDs := make(map[int64]struct{})
+	for page := 1; page <= maxGitHubCheckPages; page++ {
+		pagePath := path + "?per_page=100"
+		if page > 1 {
+			if err := s.checkRefreshContinuation(ctx); err != nil {
+				return nil, err
+			}
+			// A provider Link only signals that another page exists. Build
+			// the request locally so it cannot select the host or endpoint.
+			pagePath += "&page=" + strconv.Itoa(page)
+		}
+		body, header, err := s.doGitHubRequestWithResponseHeaders(ctx, token, http.MethodGet, pagePath, nil, "application/vnd.github+json")
+		if err != nil {
+			if page > 1 {
+				err = fmt.Errorf("%w: %w", errIncompleteCheckPagination, err)
+			}
+			return nil, err
+		}
+		var decoded Page
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			err = fmt.Errorf("decode GitHub %s: %w", description, err)
+			if page > 1 {
+				err = fmt.Errorf("%w: %w", errIncompleteCheckPagination, err)
+			}
+			return nil, err
+		}
+		entries, count := extract(decoded)
+		totalCount = max(totalCount, count)
+		for _, item := range entries {
+			if id := itemID(item); id > 0 {
+				if _, duplicate := seenIDs[id]; duplicate {
+					return nil, fmt.Errorf("%w: repeated ID in %s", errIncompleteCheckPagination, description)
+				}
+				seenIDs[id] = struct{}{}
+			}
+		}
+		items = append(items, entries...)
+		hasNext := parseNextGitHubPath(strings.Join(header.Values("Link"), ",")) != ""
+		if len(entries) == 0 && (page > 1 || hasNext || totalCount > len(items)) {
+			return nil, fmt.Errorf("%w: empty page in %s", errIncompleteCheckPagination, description)
+		}
+		if !hasNext && len(items) >= totalCount {
+			return items, nil
+		}
 	}
-	return dedupeCommitStatusesByContext(resp.Statuses), nil
+	return nil, fmt.Errorf("%w: %s exceeded %d pages", errIncompleteCheckPagination, description, maxGitHubCheckPages)
 }
 
 func (s *PRService) branchRequiresStatusChecks(ctx context.Context, token, owner, repo, branch string) (bool, error) {
@@ -2482,27 +2620,23 @@ func requiredStatusChecksCacheKey(orgKey, repoFullName, branch string) string {
 	return fmt.Sprintf("github:required-checks:%s:%s:%s", orgKey, repoFullName, branch)
 }
 
-// dedupeCheckRunsByName collapses check runs that share a display name down to
-// the most recent one. GitHub's filter=latest only dedupes within a single
-// workflow run, so a repo whose workflow triggers on both `pull_request` and
-// `push` ends up with two parallel runs on the same SHA — each emits its own
-// "Backend Test", "Frontend Test", etc. and the unfiltered list shows every
-// job twice. Highest ID wins because GitHub allocates check_run IDs
-// monotonically, so the newer workflow run's state replaces the older one.
-func dedupeCheckRunsByName(checkRuns []gitHubCheckRun) []gitHubCheckRun {
+// dedupeCheckRunsByProviderAndName keeps the newest run for each provider and
+// display name. Workflows triggered by both pull_request and push can report
+// the same jobs on the same SHA. The highest ID wins within each provider.
+func dedupeCheckRunsByProviderAndName(checkRuns []gitHubCheckRun) []gitHubCheckRun {
 	if len(checkRuns) <= 1 {
 		return checkRuns
 	}
 	bestIdx := make(map[string]int, len(checkRuns))
 	for i, check := range checkRuns {
-		key := strings.ToLower(strings.TrimSpace(check.Name))
+		key := projectedCheckSummaryKey(models.PullRequestCheckSummary{Provider: check.App.Slug, Name: check.Name})
 		if existing, ok := bestIdx[key]; !ok || checkRuns[i].ID > checkRuns[existing].ID {
 			bestIdx[key] = i
 		}
 	}
 	deduped := make([]gitHubCheckRun, 0, len(bestIdx))
 	for i, check := range checkRuns {
-		key := strings.ToLower(strings.TrimSpace(check.Name))
+		key := projectedCheckSummaryKey(models.PullRequestCheckSummary{Provider: check.App.Slug, Name: check.Name})
 		if bestIdx[key] == i {
 			deduped = append(deduped, check)
 		}
@@ -2558,6 +2692,10 @@ func (s *PRService) enqueuePullRequestStateSync(ctx context.Context, pr models.P
 }
 
 func (s *PRService) queuePullRequestStateSync(ctx context.Context, pr models.PullRequest, reason PullRequestSyncReason) error {
+	return s.queuePullRequestStateSyncAfter(ctx, pr, reason, 0)
+}
+
+func (s *PRService) queuePullRequestStateSyncAfter(ctx context.Context, pr models.PullRequest, reason PullRequestSyncReason, delay time.Duration) error {
 	if s.jobs == nil {
 		return nil
 	}
@@ -2578,13 +2716,13 @@ func (s *PRService) queuePullRequestStateSync(ctx context.Context, pr models.Pul
 	}
 	var jobID uuid.UUID
 	var err error
+	if reason == PullRequestSyncReasonIncomplete {
+		opts.Priority = 3
+	}
 	if reason == PullRequestSyncReasonStaleReconcile || reason == PullRequestSyncReasonMergeabilityWait {
 		jobID, err = s.jobs.EnqueueWithOpts(ctx, pr.OrgID, opts)
 	} else {
-		runAt := time.Now().UTC()
-		if reason == PullRequestSyncReasonIncomplete {
-			runAt = runAt.Add(prHealthCheckSyncDebounce)
-		}
+		runAt := time.Now().UTC().Add(delay)
 		opts.RunAt = &runAt
 		jobID, err = s.jobs.EnqueuePullRequestHealthWork(ctx, pr.OrgID, pr.ID, opts)
 	}
@@ -2601,16 +2739,6 @@ func (s *PRService) queuePullRequestStateSync(ctx context.Context, pr models.Pul
 		event = event.Str("job_id", jobID.String())
 	}
 	event.Msg("github pull request health sync requested")
-	return nil
-}
-
-func (s *PRService) enqueuePullRequestCheckProjection(ctx context.Context, pr models.PullRequest, requiresSync bool) error {
-	if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
-		return err
-	}
-	if requiresSync {
-		return s.queuePullRequestStateSync(ctx, pr, PullRequestSyncReasonIncomplete)
-	}
 	return nil
 }
 
