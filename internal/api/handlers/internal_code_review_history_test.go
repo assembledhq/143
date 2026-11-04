@@ -33,6 +33,8 @@ type priorHistoryStub struct {
 	loads                       int
 	threadFound, cursorValid    bool
 	messageCursor               priorReviewMessageCursor
+	findingsAssessmentID        *uuid.UUID
+	resultsAssessmentID         *uuid.UUID
 }
 
 func (s *priorHistoryStub) AuthorizeSource(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID) error {
@@ -45,13 +47,15 @@ func (s *priorHistoryStub) GetPriorRound(context.Context, uuid.UUID, uuid.UUID, 
 	s.loads++
 	return s.report, s.targetErr
 }
-func (s *priorHistoryStub) ListPriorFindings(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, time.Time, int) ([]db.CodeReviewHistoryFinding, error) {
+func (s *priorHistoryStub) ListPriorFindings(_ context.Context, _, _ uuid.UUID, assessmentID *uuid.UUID, _ time.Time, _ int) ([]db.CodeReviewHistoryFinding, error) {
+	s.findingsAssessmentID = assessmentID
 	return s.findings, nil
 }
 func (s *priorHistoryStub) ListPriorThreads(context.Context, uuid.UUID, uuid.UUID, time.Time, int) ([]db.CodeReviewHistoryThread, error) {
 	return s.threads, nil
 }
-func (s *priorHistoryStub) ListPriorAgentResults(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, time.Time, int) ([]db.CodeReviewHistoryAgentResult, error) {
+func (s *priorHistoryStub) ListPriorAgentResults(_ context.Context, _, _ uuid.UUID, assessmentID *uuid.UUID, _ time.Time, _ int) ([]db.CodeReviewHistoryAgentResult, error) {
+	s.resultsAssessmentID = assessmentID
 	return s.results, nil
 }
 func (s *priorHistoryStub) HasPriorThread(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, time.Time) (bool, error) {
@@ -380,6 +384,144 @@ func TestPriorReviewHistoryInvalidParametersBeforeReceipt(t *testing.T) {
 			require.Equal(t, 0, f.store.loads, "invalid parameters must not read historical content")
 			require.Empty(t, f.store.receipts, "invalid parameters must not create evidence receipts")
 			require.Empty(t, f.store.metadata, "invalid parameters must not persist receipt metadata")
+		})
+	}
+}
+
+func TestPriorReviewHistoryReassessmentReport(t *testing.T) {
+	t.Parallel()
+	f := newPriorHistoryFixture(t)
+	sessionID, baselineID, recheckID, findingID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	scope := models.CodeReviewScopeEvidenceOnly
+	reassessments := []models.CodeReviewFindingReassessment{{FindingID: findingID, Status: models.CodeReviewFindingResolved, Reason: "Updated evidence resolves the original concern", EvidenceCitations: []models.CodeReviewEvidenceCitation{{EvidenceID: "text-1", Quote: "Coverage now includes the boundary case"}}}}
+	raw, err := json.Marshal(reassessments)
+	require.NoError(t, err, "encode the selected recheck's dispositions")
+	f.store.report = db.CodeReviewHistoryReport{CodeReviewHistoryRound: db.CodeReviewHistoryRound{SessionID: sessionID, AssessmentID: &recheckID}, EvidenceAssessmentID: &baselineID, ReviewScope: &scope, FindingReassessments: raw, FinalReviewBody: "Original concern resolved", FinalReviewBodyRunes: 25}
+	f.store.findings = []db.CodeReviewHistoryFinding{{ID: findingID, Summary: "Original concern"}}
+	f.store.results = []db.CodeReviewHistoryAgentResult{{ID: uuid.New(), Output: "Original reviewer output", OutputRunes: 24}}
+	rr := httptest.NewRecorder()
+	f.handler.Get(rr, f.request(t, "/history", map[string]string{"session_id": sessionID.String()}, &f.threadID))
+	require.Equal(t, http.StatusOK, rr.Code, "latest report and original source evidence should be retrievable together")
+	var response models.SingleResponse[priorReviewRoundDetail]
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "decode explicitly separated history evidence")
+	expectedReport := f.store.report
+	expectedReport.FindingReassessments = nil
+	require.Equal(t, models.SingleResponse[priorReviewRoundDetail]{Data: priorReviewRoundDetail{CodeReviewHistoryReport: expectedReport, SourceFindings: f.store.findings, SourceAgentResults: f.store.results, FindingReassessments: reassessments, Threads: f.store.threads}}, response, "original findings must remain visible with their selected recheck dispositions and distinct assessment identities")
+	require.Equal(t, &baselineID, f.store.findingsAssessmentID, "source findings must belong to the original full assessment")
+	require.Equal(t, &baselineID, f.store.resultsAssessmentID, "source reviewer output must belong to the original full assessment")
+	var fields struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &fields), "decode the public field names")
+	require.NotContains(t, fields.Data, "findings", "source findings must not be labeled as the selected assessment's active findings")
+	require.NotContains(t, fields.Data, "agent_results", "original outputs must be explicitly labeled as source evidence")
+}
+
+func TestPriorReviewHistoryFindingReassessments(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		raw     string
+		recheck bool
+		wantErr bool
+	}{
+		{name: "legacy report has no reassessment"},
+		{name: "full report has no reassessment"},
+		{name: "recheck without findings has an explicit empty array", raw: "[]", recheck: true},
+		{name: "recheck cannot omit its dispositions", recheck: true, wantErr: true},
+		{name: "recheck cannot replace dispositions with null", raw: "null", recheck: true, wantErr: true},
+		{name: "malformed outcome is rejected", raw: "{", recheck: true, wantErr: true},
+		{name: "wrong outcome type is rejected", raw: "{}", recheck: true, wantErr: true},
+		{name: "invalid disposition is rejected", raw: `[{"finding_id":"00000000-0000-0000-0000-000000000001","status":"unknown","reason":"Reason"}]`, recheck: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPriorHistoryFixture(t)
+			f.store.report.FindingReassessments = json.RawMessage(tt.raw)
+			if tt.recheck {
+				scope := models.CodeReviewScopeEvidenceOnly
+				f.store.report.ReviewScope = &scope
+			} else if tt.name != "legacy report has no reassessment" {
+				scope := models.CodeReviewScopeFull
+				f.store.report.ReviewScope = &scope
+			}
+			rr := httptest.NewRecorder()
+			f.handler.Get(rr, f.request(t, "/history", map[string]string{"session_id": uuid.NewString()}, &f.threadID))
+			if tt.wantErr {
+				require.Equal(t, http.StatusInternalServerError, rr.Code, "unavailable or malformed dispositions must not look like an unreassessed historical report")
+				require.Empty(t, f.store.receipts, "incomplete historical evidence must not satisfy the retrieval gate")
+				return
+			}
+			require.Equal(t, http.StatusOK, rr.Code, "legacy, full, and explicitly empty recheck evidence should remain readable")
+			var response models.SingleResponse[priorReviewRoundDetail]
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response), "decode successful historical evidence")
+			require.Equal(t, []models.CodeReviewFindingReassessment{}, response.Data.FindingReassessments, "absence of reassessments must be represented as an explicit empty collection")
+		})
+	}
+}
+
+func TestPriorReviewHistoryReassessmentBoundsAndCompleteness(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name               string
+		wantErr, truncated bool
+	}{
+		{name: "retained and resolved dispositions are preserved"},
+		{name: "missing disposition", wantErr: true},
+		{name: "duplicate disposition", wantErr: true},
+		{name: "oversized text and citations", truncated: true},
+		{name: "oversized reordered collection", truncated: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			firstID, secondID := uuid.New(), uuid.New()
+			initial := func() []models.CodeReviewFindingReassessment {
+				return []models.CodeReviewFindingReassessment{
+					{FindingID: firstID, Status: models.CodeReviewFindingResolved, Reason: "Current evidence resolves it", EvidenceCitations: []models.CodeReviewEvidenceCitation{{EvidenceID: "text-1", Quote: "New evidence"}}},
+					{FindingID: secondID, Status: models.CodeReviewFindingRetained, Reason: "Still present", EvidenceCitations: []models.CodeReviewEvidenceCitation{}},
+				}
+			}
+			values, expected := initial(), initial()
+			findings := []db.CodeReviewHistoryFinding{{ID: firstID}, {ID: secondID}}
+			switch tt.name {
+			case "missing disposition":
+				values = values[:1]
+			case "duplicate disposition":
+				values[1] = values[0]
+			case "oversized text and citations":
+				values[0].Reason = strings.Repeat("界", 2001)
+				expected[0].Reason = strings.Repeat("界", 2000)
+				values[0].EvidenceCitations = make([]models.CodeReviewEvidenceCitation, 6)
+				for i := range values[0].EvidenceCitations {
+					values[0].EvidenceCitations[i] = models.CodeReviewEvidenceCitation{EvidenceID: strings.Repeat("a", 201), Quote: strings.Repeat("界", 501)}
+				}
+				expected[0].EvidenceCitations = make([]models.CodeReviewEvidenceCitation, 5)
+				for i := range expected[0].EvidenceCitations {
+					expected[0].EvidenceCitations[i] = models.CodeReviewEvidenceCitation{EvidenceID: strings.Repeat("a", 200), Quote: strings.Repeat("界", 500)}
+				}
+			case "oversized reordered collection":
+				for range 48 {
+					item := models.CodeReviewFindingReassessment{FindingID: uuid.New(), Status: models.CodeReviewFindingRetained, Reason: "Still present", EvidenceCitations: []models.CodeReviewEvidenceCitation{}}
+					values, expected = append(values, item), append(expected, item)
+					findings = append(findings, db.CodeReviewHistoryFinding{ID: item.FindingID})
+				}
+				overflowID := uuid.New()
+				values = append([]models.CodeReviewFindingReassessment{{FindingID: overflowID, Status: models.CodeReviewFindingRetained, Reason: "Overflow item"}}, values...)
+				findings = append(findings, db.CodeReviewHistoryFinding{ID: overflowID})
+			}
+			raw, err := json.Marshal(values)
+			require.NoError(t, err, "encode bounded or invalid test dispositions")
+			scope := models.CodeReviewScopeEvidenceOnly
+			actual, truncated, err := priorReviewFindingReassessments(db.CodeReviewHistoryReport{ReviewScope: &scope, FindingReassessments: raw}, findings)
+			if tt.wantErr {
+				require.Error(t, err, "incomplete or ambiguous dispositions must fail closed")
+				return
+			}
+			require.NoError(t, err, "complete historical dispositions should be exposed")
+			require.Equal(t, expected, actual, "bounded evidence must preserve the finding identities and dispositions exactly")
+			require.Equal(t, tt.truncated, truncated, "omitted collection or text content must be disclosed")
 		})
 	}
 }

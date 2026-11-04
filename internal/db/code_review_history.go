@@ -39,9 +39,11 @@ type CodeReviewHistoryRound struct {
 type CodeReviewHistoryReport struct {
 	EvidenceAssessmentID *uuid.UUID `db:"evidence_assessment_id" json:"source_assessment_id,omitempty"`
 	CodeReviewHistoryRound
-	FinalReviewBody      string    `db:"final_review_body" json:"final_review_body"`
-	FinalReviewBodyRunes int       `db:"final_review_body_runes" json:"final_review_body_runes"`
-	Cutoff               time.Time `db:"cutoff" json:"-"`
+	ReviewScope          *models.CodeReviewScope `db:"review_scope" json:"review_scope,omitempty"`
+	FindingReassessments json.RawMessage         `db:"finding_reassessments" json:"-"`
+	FinalReviewBody      string                  `db:"final_review_body" json:"final_review_body"`
+	FinalReviewBodyRunes int                     `db:"final_review_body_runes" json:"final_review_body_runes"`
+	Cutoff               time.Time               `db:"cutoff" json:"-"`
 }
 
 type CodeReviewHistoryFinding struct {
@@ -122,7 +124,7 @@ const priorRoundScope = `
 	JOIN code_review_session_metadata prior ON prior.org_id = current.org_id
 	  AND prior.repository_id = current.repository_id AND prior.pull_request_id = current.pull_request_id
  LEFT JOIN LATERAL (
-  SELECT a.id, a.source_assessment_id, a.base_sha, a.head_sha, a.policy_id, a.status, a.decision, a.completed_at, a.rendered_body
+  SELECT a.id, a.source_assessment_id, a.base_sha, a.head_sha, a.policy_id, a.status, a.decision, a.completed_at, a.rendered_body, a.review_scope, a.structured_outcome
   FROM code_review_revision_assessments a
   WHERE a.org_id = prior.org_id AND a.session_id = prior.session_id
     AND a.repository_id = prior.repository_id AND a.pull_request_id = prior.pull_request_id
@@ -157,7 +159,8 @@ func (s *CodeReviewHistoryStore) GetPriorRound(ctx context.Context, orgID, repos
 	rows, err := s.db.Query(ctx, `SELECT `+priorRoundColumns+`,
 		left(CASE WHEN assessment.id IS NOT NULL THEN COALESCE(assessment.rendered_body, '') ELSE COALESCE(prior.final_review_body, '') END, 16000) AS final_review_body,
 		char_length(CASE WHEN assessment.id IS NOT NULL THEN COALESCE(assessment.rendered_body, '') ELSE COALESCE(prior.final_review_body, '') END) AS final_review_body_runes,
-		source.created_at AS cutoff, COALESCE(assessment.source_assessment_id, assessment.id) AS evidence_assessment_id`+priorRoundScope+` AND prior.session_id = @prior_session_id`, pgx.NamedArgs{
+		source.created_at AS cutoff, COALESCE(assessment.source_assessment_id, assessment.id) AS evidence_assessment_id,
+		assessment.review_scope, assessment.structured_outcome->'finding_reassessments' AS finding_reassessments`+priorRoundScope+` AND prior.session_id = @prior_session_id`, pgx.NamedArgs{
 		"org_id": orgID, "repository_id": repositoryID, "current_session_id": currentSessionID, "prior_session_id": priorSessionID,
 	})
 	if err != nil {

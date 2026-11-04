@@ -145,6 +145,8 @@ Read-only history commands (scoped by the server to earlier rounds of this same 
 - `143-tools code-review-history prior-round --session-id <session_id>` reads a selected round's findings, final report, reviewer results, and thread references.
 - `143-tools code-review-history prior-messages --session-id <session_id> --thread-id <thread_id> --limit 20` reads conversation excerpts. Follow `meta.next_cursor` with `--cursor` for further excerpts or the remainder of a long message. Respect truncation indicators; an omitted passage is not evidence of absence.
 
+The selected `assessment_id`, `review_scope`, and final report describe that round's latest eligible assessment. `source_findings` and `source_agent_results` preserve the original full-review evidence identified by `source_assessment_id`. For a recheck, match `finding_reassessments` to source findings by `finding_id` to understand which were resolved or retained; an original finding is not proof that it remained active after the recheck. Do not infer a disposition from a truncated or unavailable passage.
+
 Before completing synthesis, read at least the most recent available round and any older rounds needed to understand overlapping findings or conflicting recommendations. Retrieve relevant conversation excerpts when reports do not explain the original decision. Do not load every transcript by default. If history is unavailable, disclose the limitation and report your current-code findings without claiming that you reconciled earlier rounds. When the index contains prior rounds, synthesis remains incomplete until the latest referenced report has been retrieved successfully.
 
 Reconcile earlier findings against the current diff and code:

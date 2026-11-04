@@ -1719,6 +1719,34 @@ func TestCodeReviewVisualEvidencePromptRoleMigrationPreservesRollbackAuditRows(t
 	require.Contains(t, downSQL, "chk_code_review_prompt_artifacts_role", "rollback should narrow the synchronized legacy prompt role constraint")
 }
 
+func TestCodeReviewHistoryPromptRoleMigrationPreservesRollbackAuditRows(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		file             string
+		historyRoleCount int
+		uncheckedCount   int
+	}{
+		{name: "forward admits receipts in both worker generations", file: "000396_code_review_history_prompt_role.up.sql", historyRoleCount: 2},
+		{name: "rollback retains audit rows and narrows new writes", file: "000396_code_review_history_prompt_role.down.sql", uncheckedCount: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			body, err := os.ReadFile("../../migrations/" + tt.file)
+			require.NoError(t, err, "read the review-history role migration")
+			sql := string(body)
+			require.Contains(t, sql, "SET LOCAL lock_timeout = '5s'", "role changes must bound catalog lock waits")
+			require.Contains(t, sql, "chk_code_review_prompt_records_role", "migration must update the current prompt contract")
+			require.Contains(t, sql, "to_regclass('code_review_prompt_artifacts')", "migration must tolerate fresh schemas without the legacy table")
+			require.Contains(t, sql, "chk_code_review_prompt_artifacts_role", "migration must update the synchronized legacy contract")
+			require.Equal(t, tt.historyRoleCount, strings.Count(sql, "'review_history'"), "both role constraints must agree about new receipt writes")
+			require.Equal(t, tt.uncheckedCount, strings.Count(sql, ")) NOT VALID"), "rollback must retain existing audit evidence without validating it against the narrowed write contract")
+			require.NotContains(t, sql, "DELETE FROM", "schema rollback must never discard history audit rows")
+		})
+	}
+}
+
 func TestRenamedOutputTermMigrationsInvertThemselves(t *testing.T) {
 	t.Parallel()
 

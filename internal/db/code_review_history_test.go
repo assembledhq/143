@@ -119,3 +119,44 @@ func TestCodeReviewHistoryListPriorMessages(t *testing.T) {
 		})
 	}
 }
+
+func TestCodeReviewHistoryGetPriorRoundAssessmentProvenance(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		scope models.CodeReviewScope
+	}{
+		{name: "legacy report"},
+		{name: "original full assessment", scope: models.CodeReviewScopeFull},
+		{name: "evidence recheck preserves source and selected identities", scope: models.CodeReviewScopeEvidenceOnly},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create isolated prior-round query mock")
+			t.Cleanup(mock.Close)
+			orgID, repoID, currentID, priorID, policyID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+			cutoff := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+			created, completed := cutoff.Add(-time.Hour), cutoff.Add(-time.Minute)
+			decision := models.CodeReviewDecisionApproved
+			expected := CodeReviewHistoryReport{CodeReviewHistoryRound: CodeReviewHistoryRound{SessionID: priorID, BaseSHA: "base", HeadSHA: "head", PolicyID: policyID, Status: models.CodeReviewSessionStatusCompleted, Decision: &decision, CreatedAt: created, CompletedAt: &completed}, FinalReviewBody: "Latest report", FinalReviewBodyRunes: 13, Cutoff: cutoff}
+			if tt.scope != "" {
+				id := uuid.New()
+				expected.AssessmentID, expected.EvidenceAssessmentID, expected.ReviewScope = &id, &id, &tt.scope
+			}
+			if tt.scope == models.CodeReviewScopeEvidenceOnly {
+				sourceID := uuid.New()
+				expected.EvidenceAssessmentID = &sourceID
+				expected.FindingReassessments = []byte(`[{"finding_id":"00000000-0000-0000-0000-000000000001","status":"resolved","reason":"New evidence"}]`)
+			}
+			mock.ExpectQuery(`(?s)assessment.review_scope, assessment.structured_outcome->'finding_reassessments' AS finding_reassessments.*a.review_scope, a.structured_outcome.*a.org_id = prior.org_id.*current.org_id = @org_id AND current.repository_id = @repository_id AND current.session_id = @current_session_id.*prior.session_id = @prior_session_id`).
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "repository_id": repoID, "current_session_id": currentID, "prior_session_id": priorID}).
+				WillReturnRows(pgxmock.NewRows([]string{"session_id", "assessment_id", "base_sha", "head_sha", "policy_id", "status", "decision", "created_at", "completed_at", "final_review_body", "final_review_body_runes", "cutoff", "evidence_assessment_id", "review_scope", "finding_reassessments"}).AddRow(priorID, expected.AssessmentID, "base", "head", policyID, "completed", &decision, created, &completed, "Latest report", 13, cutoff, expected.EvidenceAssessmentID, expected.ReviewScope, expected.FindingReassessments))
+			actual, err := NewCodeReviewHistoryStore(mock).GetPriorRound(context.Background(), orgID, repoID, currentID, priorID)
+			require.NoError(t, err, "read the selected prior assessment and its disposition provenance")
+			require.Equal(t, expected, actual, "the selected report and reassessments must keep their distinct original evidence identity")
+			require.NoError(t, mock.ExpectationsWereMet(), "assessment disposition retrieval must retain tenant, repository, PR and cutoff scope")
+		})
+	}
+}

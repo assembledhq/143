@@ -18,6 +18,8 @@ import (
 
 const codeReviewHistoryIndexLimit = 10
 
+const codeReviewHistoryInputsChangedMessage = "review history inputs changed before dispatch"
+
 var errCodeReviewHistoryNotRead = errors.New("requested review history was not consulted")
 
 type codeReviewHistoryPromptStore interface {
@@ -26,15 +28,122 @@ type codeReviewHistoryPromptStore interface {
 }
 
 type codeReviewHistoryPromptMetadata struct {
-	ThreadID uuid.UUID                            `json:"review_history_thread_id"`
-	History  *prompts.CodeReviewHistoryPromptData `json:"review_history"`
+	ThreadID             uuid.UUID                            `json:"review_history_thread_id"`
+	History              *prompts.CodeReviewHistoryPromptData `json:"review_history"`
+	AgentModel           string                               `json:"agent_model"`
+	DescriptionInputHash string                               `json:"input_hash"`
+}
+
+type codeReviewHistoryPromptChangedError struct {
+	Record models.CodeReviewPromptRecord
+	Field  string
+}
+
+func (e *codeReviewHistoryPromptChangedError) Error() string {
+	return fmt.Sprintf("%s (%s); request a new full review", codeReviewHistoryInputsChangedMessage, e.Field)
+}
+
+func codeReviewOrchestratorPromptKey(root string, attempt int, provider models.AgentType) string {
+	if attempt > 0 {
+		return fmt.Sprintf("%s/orchestrator-fallback-%02d-%s", root, attempt, provider)
+	}
+	return fmt.Sprintf("%s/orchestrator-%s", root, provider)
+}
+
+// Recover a dispatched turn before resolving live model availability or inputs.
+// The result write can have failed after SendMessage succeeded. Its saved
+// identity and description hash must win; no new prompt or attachments are sent.
+func recoverCodeReviewHistoryOrchestrator(ctx context.Context, stores *Stores, job runCodeReviewPayload, root string, attempt int) (*models.CodeReviewPromptRecord, bool, error) {
+	records, err := stores.CodeReviews.ListPromptRecords(ctx, job.OrgID, job.SessionID)
+	if err != nil {
+		return nil, false, fmt.Errorf("load review history dispatch checkpoints: %w", err)
+	}
+	var checkpoint *models.CodeReviewPromptRecord
+	for _, record := range records {
+		if record.Role != string(models.CodeReviewAgentRoleOrchestrator) || record.RecordKey != codeReviewOrchestratorPromptKey(root, attempt, models.AgentType(record.AgentProvider)) {
+			continue
+		}
+		if checkpoint != nil {
+			return nil, false, errors.New("multiple review history checkpoints for one orchestration attempt")
+		}
+		checkpoint = &record
+	}
+	if checkpoint == nil {
+		return nil, false, nil
+	}
+	var metadata codeReviewHistoryPromptMetadata
+	if err := json.Unmarshal(checkpoint.Metadata, &metadata); err != nil {
+		return nil, false, fmt.Errorf("decode review history dispatch checkpoint: %w", err)
+	}
+	if _, err := validateCodeReviewHistoryPrompt(*checkpoint, job, checkpoint.RecordKey, metadata.ThreadID); err != nil {
+		return nil, false, err
+	}
+	thread, err := stores.SessionThreads.GetByID(ctx, job.OrgID, metadata.ThreadID)
+	if err != nil {
+		return nil, false, fmt.Errorf("load bound review history thread: %w", err)
+	}
+	if thread.OrgID != job.OrgID || thread.SessionID != job.SessionID || metadata.DescriptionInputHash == "" {
+		return nil, false, errors.New("review history dispatch checkpoint does not match its bound thread")
+	}
+	if thread.Status == models.ThreadStatusIdle && thread.CurrentTurn == 0 {
+		return checkpoint, false, nil
+	}
+	if string(thread.AgentType) != checkpoint.AgentProvider || strings.TrimSpace(stringPtrValue(thread.ModelOverride)) != strings.TrimSpace(metadata.AgentModel) {
+		return nil, false, errors.New("dispatched review history thread does not match its saved model")
+	}
+	result, err := codeReviewHistoryCheckpointResult(job, *checkpoint, models.CodeReviewAgentResultStatusRunning, "")
+	if err != nil {
+		return nil, false, err
+	}
+	result.StructuredResult = marshalCodeReviewOrchestratorStructuredResult(codeReviewOrchestratorStructuredResult{
+		ThreadID: metadata.ThreadID.String(), PromptRecordKey: checkpoint.RecordKey, DescriptionInputHash: metadata.DescriptionInputHash,
+		ReadOnly: thread.ExecutionMode == models.ThreadExecutionModeReview && thread.FilesystemMode == models.ThreadFilesystemModeReadOnly,
+	})
+	if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
+		return nil, false, fmt.Errorf("recover dispatched review history orchestrator: %w", err)
+	}
+	return checkpoint, true, nil
+}
+
+func codeReviewHistoryCheckpointResult(job runCodeReviewPayload, record models.CodeReviewPromptRecord, status models.CodeReviewAgentResultStatus, failure string) (*models.CodeReviewAgentResult, error) {
+	var metadata codeReviewHistoryPromptMetadata
+	if err := json.Unmarshal(record.Metadata, &metadata); err != nil {
+		return nil, fmt.Errorf("decode review history result checkpoint: %w", err)
+	}
+	if _, err := validateCodeReviewHistoryPrompt(record, job, record.RecordKey, metadata.ThreadID); err != nil {
+		return nil, err
+	}
+	state := codeReviewOrchestratorStructuredResult{ThreadID: metadata.ThreadID.String(), PromptRecordKey: record.RecordKey, DescriptionInputHash: metadata.DescriptionInputHash}
+	var raw *string
+	if failure != "" {
+		state.Error, state.CompletedAt = failure, time.Now().UTC().Format(time.RFC3339)
+		raw = &failure
+	}
+	var model *string
+	if metadata.AgentModel != "" {
+		model = &metadata.AgentModel
+	}
+	return &models.CodeReviewAgentResult{OrgID: job.OrgID, SessionID: job.SessionID, AgentProvider: record.AgentProvider,
+		AgentModel: model, Role: models.CodeReviewAgentRoleOrchestrator, Status: status, RawOutput: raw,
+		StructuredResult: marshalCodeReviewOrchestratorStructuredResult(state)}, nil
+}
+
+func failCodeReviewHistoryDispatch(ctx context.Context, stores *Stores, job runCodeReviewPayload, record models.CodeReviewPromptRecord, cause error) error {
+	result, err := codeReviewHistoryCheckpointResult(job, record, models.CodeReviewAgentResultStatusFailed, cause.Error())
+	if err != nil {
+		return err
+	}
+	if err := stores.CodeReviews.CreateAgentResult(ctx, result); err != nil {
+		return fmt.Errorf("record changed review history dispatch inputs: %w", err)
+	}
+	return nil
 }
 
 // prepareCodeReviewHistoryPrompt binds permission and references atomically to
 // the exact synthesis thread before it can execute. Retries reuse the original
 // prompt rather than changing what a possibly already-dispatched agent saw.
 func prepareCodeReviewHistoryPrompt(ctx context.Context, records codeReviewHistoryPromptStore, job runCodeReviewPayload, threadID uuid.UUID, record models.CodeReviewPromptRecord, render func(*prompts.CodeReviewHistoryPromptData) string) (string, error) {
-	expectedMetadata := record.Metadata
+	inputRecord := record
 	saved, err := records.GetPromptRecordByKey(ctx, job.OrgID, record.RecordKey)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("load review history prompt: %w", err)
@@ -80,21 +189,29 @@ func prepareCodeReviewHistoryPrompt(ctx context.Context, records codeReviewHisto
 	if _, err := validateCodeReviewHistoryPrompt(saved, job, record.RecordKey, threadID); err != nil {
 		return "", err
 	}
-	// Attachments and the result's description hash are supplied by the caller.
-	// They must still describe the inputs used by the immutable saved prompt.
+	if err := validateCodeReviewHistoryDispatchInputs(saved, inputRecord); err != nil {
+		return "", err
+	}
+	return saved.Content, nil
+}
+
+func validateCodeReviewHistoryDispatchInputs(saved, record models.CodeReviewPromptRecord) error {
+	if saved.RecordKey != record.RecordKey || saved.AgentProvider != record.AgentProvider {
+		return &codeReviewHistoryPromptChangedError{Record: saved, Field: "agent_provider"}
+	}
 	var expected, actual map[string]json.RawMessage
-	if err := json.Unmarshal(expectedMetadata, &expected); err != nil {
-		return "", fmt.Errorf("decode current review history inputs: %w", err)
+	if err := json.Unmarshal(record.Metadata, &expected); err != nil {
+		return fmt.Errorf("decode current review history inputs: %w", err)
 	}
 	if err := json.Unmarshal(saved.Metadata, &actual); err != nil {
-		return "", fmt.Errorf("decode saved review history inputs: %w", err)
+		return fmt.Errorf("decode saved review history inputs: %w", err)
 	}
 	for key, value := range expected {
 		if !reflect.DeepEqual(value, actual[key]) {
-			return "", fmt.Errorf("review history prompt input %s changed; a fresh review is required", key)
+			return &codeReviewHistoryPromptChangedError{Record: saved, Field: key}
 		}
 	}
-	return saved.Content, nil
+	return nil
 }
 
 func validateCodeReviewHistoryPrompt(record models.CodeReviewPromptRecord, job runCodeReviewPayload, key string, threadID uuid.UUID) (*prompts.CodeReviewHistoryPromptData, error) {

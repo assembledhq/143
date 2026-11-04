@@ -110,10 +110,11 @@ func (h *InternalCodeReviewHistoryHandler) List(w http.ResponseWriter, r *http.R
 
 type priorReviewRoundDetail struct {
 	db.CodeReviewHistoryReport
-	Findings     []db.CodeReviewHistoryFinding     `json:"findings"`
-	AgentResults []db.CodeReviewHistoryAgentResult `json:"agent_results"`
-	Threads      []db.CodeReviewHistoryThread      `json:"threads"`
-	Truncated    bool                              `json:"truncated"`
+	SourceFindings       []db.CodeReviewHistoryFinding          `json:"source_findings"`
+	SourceAgentResults   []db.CodeReviewHistoryAgentResult      `json:"source_agent_results"`
+	FindingReassessments []models.CodeReviewFindingReassessment `json:"finding_reassessments"`
+	Threads              []db.CodeReviewHistoryThread           `json:"threads"`
+	Truncated            bool                                   `json:"truncated"`
 }
 
 func (h *InternalCodeReviewHistoryHandler) Get(w http.ResponseWriter, r *http.Request) {
@@ -142,17 +143,84 @@ func (h *InternalCodeReviewHistoryHandler) Get(w http.ResponseWriter, r *http.Re
 		if err != nil {
 			return nil, err
 		}
+		reassessments, reassessmentsTruncated, err := priorReviewFindingReassessments(report, findings)
+		if err != nil {
+			return nil, err
+		}
 		detail := priorReviewRoundDetail{CodeReviewHistoryReport: report,
-			Findings: findings[:min(len(findings), 50)], Threads: threads[:min(len(threads), 50)], AgentResults: results[:min(len(results), 20)],
-			Truncated: report.FinalReviewBodyRunes > utf8.RuneCountInString(report.FinalReviewBody) || len(findings) > 50 || len(threads) > 50 || len(results) > 20}
-		for _, finding := range detail.Findings {
+			SourceFindings: findings[:min(len(findings), 50)], Threads: threads[:min(len(threads), 50)], SourceAgentResults: results[:min(len(results), 20)], FindingReassessments: reassessments,
+			Truncated: reassessmentsTruncated || report.FinalReviewBodyRunes > utf8.RuneCountInString(report.FinalReviewBody) || len(findings) > 50 || len(threads) > 50 || len(results) > 20}
+		for _, finding := range detail.SourceFindings {
 			detail.Truncated = detail.Truncated || finding.BodyRunes > utf8.RuneCountInString(finding.Body)
 		}
-		for _, result := range detail.AgentResults {
+		for _, result := range detail.SourceAgentResults {
 			detail.Truncated = detail.Truncated || result.OutputUnavailable || result.OutputRunes > utf8.RuneCountInString(result.Output)
 		}
 		return models.SingleResponse[priorReviewRoundDetail]{Data: detail}, nil
 	})
+}
+
+// Rechecks retain immutable source findings. Their selected assessment supplies
+// the disposition; a missing or malformed disposition is not an active finding.
+func priorReviewFindingReassessments(report db.CodeReviewHistoryReport, findings []db.CodeReviewHistoryFinding) ([]models.CodeReviewFindingReassessment, bool, error) {
+	reassessments := make([]models.CodeReviewFindingReassessment, 0)
+	if len(report.FindingReassessments) != 0 {
+		if err := json.Unmarshal(report.FindingReassessments, &reassessments); err != nil {
+			return nil, false, fmt.Errorf("decode prior finding reassessments: %w", err)
+		}
+	}
+	isRecheck := report.ReviewScope != nil && *report.ReviewScope == models.CodeReviewScopeEvidenceOnly
+	if isRecheck && (len(report.FindingReassessments) == 0 || reassessments == nil) {
+		return nil, false, errors.New("prior evidence-only assessment is missing finding reassessments")
+	}
+	byFinding := make(map[uuid.UUID]models.CodeReviewFindingReassessment, len(reassessments))
+	for _, reassessment := range reassessments {
+		if err := reassessment.Validate(); err != nil {
+			return nil, false, fmt.Errorf("invalid prior finding reassessment: %w", err)
+		}
+		if _, exists := byFinding[reassessment.FindingID]; exists {
+			return nil, false, errors.New("prior assessment has duplicate finding reassessments")
+		}
+		byFinding[reassessment.FindingID] = reassessment
+	}
+	if isRecheck {
+		for _, finding := range findings {
+			if _, exists := byFinding[finding.ID]; !exists {
+				return nil, false, errors.New("prior evidence-only assessment omitted a source finding disposition")
+			}
+		}
+	}
+	bounded := make([]models.CodeReviewFindingReassessment, 0, min(len(findings), 50))
+	truncated := false
+	// Match the displayed source findings, not the persisted array order. An
+	// omitted finding must never displace a displayed finding's disposition.
+	for _, finding := range findings[:min(len(findings), 50)] {
+		reassessment, exists := byFinding[finding.ID]
+		if !exists {
+			continue
+		}
+		item := models.CodeReviewFindingReassessment{FindingID: reassessment.FindingID, Status: reassessment.Status}
+		var omitted bool
+		item.Reason, omitted = priorReviewBoundedText(reassessment.Reason, 2000)
+		truncated = truncated || omitted || len(reassessment.EvidenceCitations) > 5
+		item.EvidenceCitations = make([]models.CodeReviewEvidenceCitation, 0, min(len(reassessment.EvidenceCitations), 5))
+		for _, citation := range reassessment.EvidenceCitations[:min(len(reassessment.EvidenceCitations), 5)] {
+			id, idOmitted := priorReviewBoundedText(citation.EvidenceID, 200)
+			quote, quoteOmitted := priorReviewBoundedText(citation.Quote, 500)
+			item.EvidenceCitations = append(item.EvidenceCitations, models.CodeReviewEvidenceCitation{EvidenceID: id, Quote: quote})
+			truncated = truncated || idOmitted || quoteOmitted
+		}
+		bounded = append(bounded, item)
+	}
+	return bounded, truncated || len(bounded) < len(reassessments), nil
+}
+
+func priorReviewBoundedText(value string, limit int) (string, bool) {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value, false
+	}
+	return string(runes[:limit]), true
 }
 
 type priorReviewMessageCursor struct {

@@ -2542,6 +2542,9 @@ func codeReviewOrchestratorOperationalSummary(results []models.CodeReviewAgentRe
 			if detail == "" && result.RawOutput != nil {
 				detail = strings.ToLower(strings.TrimSpace(*result.RawOutput))
 			}
+			if strings.HasPrefix(detail, codeReviewHistoryInputsChangedMessage) {
+				return "143 stopped the final synthesis because its saved review inputs changed before it could start. The automated review is incomplete; request a new full review to use the updated inputs."
+			}
 			if summary := codeReviewOrchestratorUnavailableSummary(detail); summary != "" {
 				return summary
 			}
@@ -3162,7 +3165,23 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
 	cfg := policy.Config()
 	attempt := codeReviewOrchestratorAttemptCount(agentResults)
-	if attempt > 0 && (!codeReviewOrchestratorNeedsFallback(agentResults) || time.Now().After(codeReviewOrchestratorDispatchDeadline(cfg, metadata, agentResults))) {
+	if attempt > 0 && !codeReviewOrchestratorNeedsFallback(agentResults) {
+		return nil
+	}
+	useHistory := job.RequestContext != nil && job.RequestContext.UseReviewHistory
+	rootKey := codeReviewPromptRecordRoot(metadata, job)
+	var historyCheckpoint *models.CodeReviewPromptRecord
+	if useHistory {
+		var recovered bool
+		var err error
+		historyCheckpoint, recovered, err = recoverCodeReviewHistoryOrchestrator(ctx, stores, job, rootKey, attempt)
+		if err != nil || recovered {
+			return err
+		}
+	}
+	// A dispatch deadline forbids starting another turn, but must not hide a
+	// turn already sent before its agent-result write was interrupted.
+	if attempt > 0 && time.Now().After(codeReviewOrchestratorDispatchDeadline(cfg, metadata, agentResults)) {
 		return nil
 	}
 	selection, err := resolveCodeReviewOrchestratorAvailability(ctx, services, job.OrgID, cfg, agentResults)
@@ -3221,11 +3240,7 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 	if err != nil {
 		return err
 	}
-	rootKey := codeReviewPromptRecordRoot(metadata, job)
-	recordKey := fmt.Sprintf("%s/orchestrator-%s", rootKey, agentType)
-	if attempt > 0 {
-		recordKey = fmt.Sprintf("%s/orchestrator-fallback-%02d-%s", rootKey, attempt, agentType)
-	}
+	recordKey := codeReviewOrchestratorPromptKey(rootKey, attempt, agentType)
 	promptText := codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings, visualEvidence)
 	descriptionInputHash := codeReviewDescriptionInputHash(pr, visualEvidence)
 	promptRecord := models.CodeReviewPromptRecord{
@@ -3243,7 +3258,16 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 			"visual_evidence_hash": visualEvidence.CanonicalHash(),
 		}),
 	}
-	useHistory := job.RequestContext != nil && job.RequestContext.UseReviewHistory
+	if historyCheckpoint != nil {
+		if err := validateCodeReviewHistoryDispatchInputs(*historyCheckpoint, promptRecord); err != nil {
+			var changed *codeReviewHistoryPromptChangedError
+			if errors.As(err, &changed) {
+				logger.Warn().Err(err).Str("session_id", job.SessionID.String()).Msg("ending unsent review history attempt after inputs changed")
+				return failCodeReviewHistoryDispatch(ctx, stores, job, changed.Record, changed)
+			}
+			return err
+		}
+	}
 	if !useHistory {
 		if err := storeCodeReviewPromptRecord(ctx, stores, promptRecord); err != nil {
 			return err
@@ -3381,6 +3405,10 @@ func ensureCodeReviewOrchestratorThread(ctx context.Context, stores *Stores, ser
 			return codeReviewOrchestratorPrompt(job, pr, health, cfg, policy.Version, metadata.BaseSHA, changedFiles, agentResults, findings, visualEvidence, history)
 		})
 		if err != nil {
+			var changed *codeReviewHistoryPromptChangedError
+			if errors.As(err, &changed) {
+				return failCodeReviewHistoryDispatch(ctx, stores, job, changed.Record, changed)
+			}
 			return err
 		}
 	}

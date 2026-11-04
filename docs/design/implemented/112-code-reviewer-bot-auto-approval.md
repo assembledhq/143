@@ -588,12 +588,19 @@ the current review's opt-in, active state, organization, repository, and a trust
 orchestrator-thread binding in `code_review_prompt_records`. The worker persists
 that binding and the complete prompt with `CreatePromptRecordIfAbsent` before
 dispatch. Retries reuse the winner; a mismatched session or thread fails closed.
+If dispatch started but its result write was lost, recovery restores the result
+from the bound thread and saved prompt identity without sending another turn.
+If inputs changed while the checkpoint was still unsent, the attempt ends
+explicitly incomplete with a new-review action instead of exhausting job retries.
 No repository-wide history capability is granted to the session or its reviewers.
 
 Source rounds must belong to the same PR and have completed before the current
 session began. When assessments exist, the API selects the latest eligible
-immutable completed assessment and its full-review evidence. Legacy session
-results retain their completion cutoff. Message retrieval is bounded, paginated,
+immutable completed assessment and its full-review evidence. Reports label the
+selected assessment separately from original source findings and reviewer
+outputs, and include that assessment's finding reassessments so later resolutions
+remain visible. Legacy session results retain their completion cutoff.
+Message retrieval is bounded, paginated,
 and excludes post-start messages; long messages can be read in chunks. Successful
 report and message responses are saved as immutable `review_history` prompt
 records with source and calling-thread provenance. Retries return those bytes.
@@ -603,12 +610,14 @@ When the saved index contains earlier rounds, synthesis requires at least one
 successful read of the latest referenced round's report by its own orchestrator
 thread. An index listing, empty transcript, or another fallback thread's receipt
 is insufficient. A missing read leaves an explicit incomplete synthesis;
-schema-only repair cannot invent the missing
-inspection. This check proves access, not semantic reconciliation quality. Empty
+schema-only repair cannot invent the missing inspection. This check proves
+access, not semantic reconciliation quality. Empty
 history needs no read. Historical text remains untrusted, and existing approval
 and injection safeguards remain authoritative.
 
-Deploy API, workers, and the sandbox `143-tools` binary before enabling the flag.
+Apply the database migrations, then deploy API, workers, and the sandbox
+`143-tools` binary before enabling the flag. The receipt role must be accepted by
+both current and retained legacy prompt-record tables.
 The flag controls new enrollment, not a rolling-deployment capability handshake.
 This is a limited opt-in experiment; it adds no automatic shadow sampling or wider
 rollout. Compare repeated findings, unexplained reversals, missed valid defects,

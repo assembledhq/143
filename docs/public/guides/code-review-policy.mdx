@@ -54,10 +54,10 @@ report, the review remains incomplete rather than claiming to have used history.
 review with no earlier rounds can complete normally. This experiment does not
 resume an earlier model conversation or enroll future automatic reviews.
 
-The installation flag `CODE_REVIEW_HISTORY_ENABLED` defaults to `false`. Deploy
-the API, all workers, and the sandbox image containing the new `143-tools`
-commands before enabling it. The opt-in remains hidden and requests are rejected
-while the flag is off.
+The installation flag `CODE_REVIEW_HISTORY_ENABLED` defaults to `false`. Apply
+the database migrations, then deploy the API, all workers, and the sandbox image
+containing the new `143-tools` commands before enabling it. The opt-in remains
+hidden and requests are rejected while the flag is off.
 
 ### Re-check updated evidence
 
