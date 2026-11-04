@@ -94,6 +94,17 @@ describe("review link from a GitHub comment", () => {
     expect(bodies).toEqual([firstRequest, { request_id: expect.any(String), mode: "review_now" }]);
     expect(bodies[1]?.request_id).not.toBe(bodies[0]?.request_id);
   });
+  it("toggles the override from its explanatory copy", async () => {
+    mockTarget({ allowOverride: true });
+    const user = userEvent.setup();
+    renderWithProviders(<ReviewNowFromComment canManage />, { searchParams: { review_now: sessionID }, nuqsHasMemory: true });
+    const dialog = await screen.findByRole("dialog", { name: "Request full review" });
+    const optIn = await within(dialog).findByRole("checkbox", { name: "Override size limits for this review" });
+
+    await user.click(within(dialog).getByText(/The override applies only/));
+
+    expect(optIn).toBeChecked();
+  });
   it("hides the opt-in and ignores a crafted link when the policy does not allow overrides", async () => {
     mockTarget();
     const bodies: unknown[] = [];

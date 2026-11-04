@@ -86,7 +86,7 @@ export function AutomationActionsConfig({ config, disabled, onSave }: {
       <DialogContent className="max-h-[85vh] overflow-y-auto">
         <DialogHeader><DialogTitle>Resumable automation actions</DialogTitle><DialogDescription>Select the actions this automation may perform. Configure only the destinations it needs. Each action keeps its receipt across runs.</DialogDescription></DialogHeader>
         <div className="space-y-3">
-          {kinds.map(([kind, label]) => <div key={kind} className="flex items-center gap-2"><Checkbox id={`${id}-${kind}`} checked={has(kind)} onCheckedChange={(checked) => setDraft({ ...draft, actions: checked ? [...draft.actions, kind] : draft.actions.filter((k) => k !== kind) })} /><Label htmlFor={`${id}-${kind}`}>{label}</Label></div>)}
+          {kinds.map(([kind, label]) => <Label key={kind} className="flex min-h-6 cursor-pointer items-center gap-2 font-normal"><Checkbox checked={has(kind)} onCheckedChange={(checked) => setDraft({ ...draft, actions: checked ? [...draft.actions, kind] : draft.actions.filter((k) => k !== kind) })} />{label}</Label>)}
           {draft.actions.some((k) => k.startsWith("github_")) && field("repository", "Repository", "owner/repository")}
           {has("github_label") && field("label", "GitHub label", "needs-review")}
           {has("github_team_review") && field("team", "GitHub team slug", "reviewers")}
