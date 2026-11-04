@@ -253,7 +253,7 @@ func TestCodeReviewHistoryPromptRoleMigrationPostgres(t *testing.T) {
 			require.ErrorAs(t, err, &rejected, "the prior schema must reject the exact receipt write used by history retrieval")
 			require.Equal(t, "23514", rejected.Code, "the original failure must be the role check constraint")
 
-			applyPriorHistoryMigration(t, pool, "000396_code_review_history_prompt_role.up.sql")
+			applyPriorHistoryMigration(t, pool, "000397_code_review_history_prompt_role.up.sql")
 			actual, err := store.SaveReceipt(ctx, orgID, sessionID, "after-migration", content, metadata)
 			require.NoError(t, err, "the new schema must accept history receipts through the real store")
 			require.JSONEq(t, string(content), string(actual), "the accepted receipt must preserve the returned historical evidence")
@@ -269,7 +269,7 @@ func TestCodeReviewHistoryPromptRoleMigrationPostgres(t *testing.T) {
 				require.JSONEq(t, string(content), string(legacyReceipt), "reverse synchronization must preserve receipt evidence")
 			}
 
-			applyPriorHistoryMigration(t, pool, "000396_code_review_history_prompt_role.down.sql")
+			applyPriorHistoryMigration(t, pool, "000397_code_review_history_prompt_role.down.sql")
 			retained, err := store.GetReceipt(ctx, orgID, sessionID, "after-migration")
 			require.NoError(t, err, "rollback must preserve readable audit receipts instead of deleting them")
 			require.JSONEq(t, string(content), string(retained), "rollback must keep the exact evidence previously shown")
@@ -285,7 +285,7 @@ func TestCodeReviewHistoryPromptRoleMigrationPostgres(t *testing.T) {
 				require.ErrorAs(t, err, &rejected, "rollback must also narrow legacy writes")
 				require.Equal(t, "23514", rejected.Code, "the legacy role constraint must reject new history receipts after rollback")
 			}
-			applyPriorHistoryMigration(t, pool, "000396_code_review_history_prompt_role.up.sql")
+			applyPriorHistoryMigration(t, pool, "000397_code_review_history_prompt_role.up.sql")
 			_, err = store.SaveReceipt(ctx, orgID, sessionID, "after-reapply", content, metadata)
 			require.NoError(t, err, "reapplying the migration must validate retained audit rows and restore receipt writes")
 		})

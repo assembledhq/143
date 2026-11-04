@@ -1727,8 +1727,8 @@ func TestCodeReviewHistoryPromptRoleMigrationPreservesRollbackAuditRows(t *testi
 		historyRoleCount int
 		uncheckedCount   int
 	}{
-		{name: "forward admits receipts in both worker generations", file: "000396_code_review_history_prompt_role.up.sql", historyRoleCount: 2},
-		{name: "rollback retains audit rows and narrows new writes", file: "000396_code_review_history_prompt_role.down.sql", uncheckedCount: 2},
+		{name: "forward admits receipts in both worker generations", file: "000397_code_review_history_prompt_role.up.sql", historyRoleCount: 2},
+		{name: "rollback retains audit rows and narrows new writes", file: "000397_code_review_history_prompt_role.down.sql", uncheckedCount: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
