@@ -122,12 +122,17 @@ jobs:
         with:
           version: v2.10.1
 
-  backend-test:
-    name: Backend Test
+  backend-test-suites:
+    name: Backend Test (${{ matrix.suite }})
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push'
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, database, commands]
     env:
+      BACKEND_TEST_SUITE: ${{ matrix.suite }}
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
       # Drives DB-backed migration behavior tests (e.g. the coding-credential
       # versioning test in internal/db). They self-skip when unset, so this
@@ -138,6 +143,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Test CI helper scripts
+        if: matrix.suite == 'unit'
         run: |
           python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
           python3 -B -m unittest discover -s scripts -p 'test_preflight.py'
@@ -146,6 +152,7 @@ jobs:
         timeout-minutes: 10
         run: bash .github/scripts/start-ci-postgres.sh
       - name: Preload preview infrastructure test image
+        if: matrix.suite == 'database'
         timeout-minutes: 10
         # Fail early if every source is unavailable, before compiling the suite.
         # Preserve the production template's image name and PostgreSQL variant.
@@ -175,7 +182,7 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             mode=race-atomic
           fi
-          family="backend-go-v1-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS}-${go_version}"
+          family="backend-go-v2-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS}-${go_version}-${BACKEND_TEST_SUITE}"
           {
             echo "family=$family"
             echo "scope=${family}-${mode}"
@@ -190,9 +197,9 @@ jobs:
             ${{ steps.go-cache.outputs.build }}
             ${{ steps.go-cache.outputs.modules }}
           # Cache entries are immutable. Each commit saves the complete warmed
-          # backend cache after success, reusing compatible objects on restore.
+          # suite cache after success. Suites never compete to publish one key.
           key: ${{ steps.go-cache.outputs.scope }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
-          # New PRs can fall back to main's race-mode cache: Go itself keys
+          # New PRs can fall back to this suite's main race-mode cache: Go keys
           # objects by build flags, while modules are reusable across modes.
           restore-keys: |
             ${{ steps.go-cache.outputs.scope }}-${{ hashFiles('go.mod', 'go.sum') }}-
@@ -205,6 +212,7 @@ jobs:
         run: go clean -testcache
 
       - name: Test review dependency recipe
+        if: matrix.suite == 'unit'
         run: python3 -B .143/review-dependencies_test.py
 
       - name: Download Go modules
@@ -225,16 +233,19 @@ jobs:
           echo "max_locks_per_transaction=$actual"
           test "$actual" = "256"
 
-      - name: Run go vet and migrations
-        run: |
-          go run cmd/migrate/main.go up
-          go vet ./...
+      - name: Run migrations
+        run: go run cmd/migrate/main.go up
+
+      - name: Run go vet
+        if: matrix.suite == 'unit'
+        run: go vet ./...
 
       - name: Validate demo seed against the migrated schema
-        if: needs.changes.outputs.demo_seed == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+        if: matrix.suite == 'database' && (needs.changes.outputs.demo_seed == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push')
         run: make demo-seed-check
 
       - name: Run backend unit tests outside database, demoseed, agent, and worker packages
+        if: matrix.suite == 'unit'
         timeout-minutes: 10
         run: |
           mode=count
@@ -261,6 +272,7 @@ jobs:
       # Demo checks create, migrate, seed, and drop complete sibling databases.
       # Serialize those fixtures outside the general concurrent package batch.
       - name: Run demoseed tests
+        if: matrix.suite == 'database'
         id: demoseed_tests
         timeout-minutes: 10
         run: |
@@ -296,7 +308,7 @@ jobs:
           exit "$capture_status"
 
       - name: Collect demoseed test PostgreSQL diagnostics
-        if: ${{ !cancelled() && (steps.demoseed_tests.outcome == 'success' || steps.demoseed_tests.outcome == 'failure') }}
+        if: ${{ !cancelled() && matrix.suite == 'database' && (steps.demoseed_tests.outcome == 'success' || steps.demoseed_tests.outcome == 'failure') }}
         timeout-minutes: 1
         env:
           POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
@@ -304,7 +316,7 @@ jobs:
         run: bash .github/scripts/collect-ci-postgres-diagnostics.sh
 
       - name: Upload demoseed test diagnostics
-        if: ${{ !cancelled() && (steps.demoseed_tests.outcome == 'success' || steps.demoseed_tests.outcome == 'failure') }}
+        if: ${{ !cancelled() && matrix.suite == 'database' && (steps.demoseed_tests.outcome == 'success' || steps.demoseed_tests.outcome == 'failure') }}
         uses: actions/upload-artifact@v7
         with:
           name: demoseed-test-diagnostics-${{ github.run_attempt }}
@@ -316,6 +328,7 @@ jobs:
       # Keep database work outside the concurrent general package suite.
       # Bound overlapping fixtures, not the concurrency exercised inside a test.
       - name: Run database tests
+        if: matrix.suite == 'database'
         id: database_tests
         timeout-minutes: 10
         run: |
@@ -355,14 +368,14 @@ jobs:
           exit "$capture_status"
 
       - name: Collect database test PostgreSQL diagnostics
-        if: ${{ !cancelled() && (steps.database_tests.outcome == 'success' || steps.database_tests.outcome == 'failure') }}
+        if: ${{ !cancelled() && matrix.suite == 'database' && (steps.database_tests.outcome == 'success' || steps.database_tests.outcome == 'failure') }}
         timeout-minutes: 1
         env:
           POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
         run: bash .github/scripts/collect-ci-postgres-diagnostics.sh
 
       - name: Upload database test diagnostics
-        if: ${{ !cancelled() && (steps.database_tests.outcome == 'success' || steps.database_tests.outcome == 'failure') }}
+        if: ${{ !cancelled() && matrix.suite == 'database' && (steps.database_tests.outcome == 'success' || steps.database_tests.outcome == 'failure') }}
         uses: actions/upload-artifact@v7
         with:
           name: database-test-diagnostics-${{ github.run_attempt }}
@@ -373,6 +386,7 @@ jobs:
       # Full-schema Postgres fixtures in worker need their own bounded budget.
       # Run that package separately from the concurrent general package suite.
       - name: Run worker unit tests
+        if: matrix.suite == 'database'
         timeout-minutes: 10
         run: |
           mode=count
@@ -388,6 +402,7 @@ jobs:
             -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
       - name: Run agent unit tests
+        if: matrix.suite == 'unit'
         timeout-minutes: 10
         run: |
           mode=count
@@ -401,13 +416,12 @@ jobs:
           go test ./internal/services/agent -coverpkg=./internal/... -coverprofile=coverage-unit-agent.out \
             -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
-      - name: Combine backend unit coverage
-        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-demoseed.out coverage-unit-db.out coverage-unit-worker.out coverage-unit-agent.out
-
       - name: Test offline review export archive utilities
+        if: matrix.suite == 'unit'
         run: python3 -B -m unittest discover -s scripts -p 'test_*code_review_export*.py'
 
       - name: Run command tests
+        if: matrix.suite == 'commands'
         id: command_tests
         timeout-minutes: 10
         run: |
@@ -476,7 +490,7 @@ jobs:
           exit "$capture_status"
 
       - name: Collect command test PostgreSQL diagnostics
-        if: ${{ !cancelled() && (steps.command_tests.outcome == 'success' || steps.command_tests.outcome == 'failure') }}
+        if: ${{ !cancelled() && matrix.suite == 'commands' && (steps.command_tests.outcome == 'success' || steps.command_tests.outcome == 'failure') }}
         timeout-minutes: 1
         env:
           POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
@@ -484,7 +498,7 @@ jobs:
         run: bash .github/scripts/collect-ci-postgres-diagnostics.sh
 
       - name: Upload command test diagnostics
-        if: ${{ !cancelled() && (steps.command_tests.outcome == 'success' || steps.command_tests.outcome == 'failure') }}
+        if: ${{ !cancelled() && matrix.suite == 'commands' && (steps.command_tests.outcome == 'success' || steps.command_tests.outcome == 'failure') }}
         uses: actions/upload-artifact@v7
         with:
           name: command-test-diagnostics-${{ github.run_attempt }}
@@ -496,6 +510,7 @@ jobs:
       # can otherwise consume. Keep real browser fixtures in a serial step,
       # with the same race mode and their own coverage contribution.
       - name: Run preview browser lifecycle tests
+        if: matrix.suite == 'database'
         timeout-minutes: 5
         env:
           TEST_BROWSER_REQUIRED: "1"
@@ -526,6 +541,7 @@ jobs:
       # infra. Build-tag gating means they don't run during the unit-test
       # step above, so we don't double-charge CI for the same code paths.
       - name: Run integration tests
+        if: matrix.suite == 'database'
         run: |
           mode=count
           race=()
@@ -542,7 +558,75 @@ jobs:
       # Exercise real image-declared volumes: mocks cannot prove that Docker
       # removed preview data or preserved explicitly named storage.
       - name: Verify preview infrastructure volume lifecycle
+        if: matrix.suite == 'database'
         run: go test -tags=docker_integration ./internal/services/preview/providers -run '^TestDockerIntegration' -count=1 -timeout=180s
+
+      - name: Upload unit suite coverage
+        if: ${{ !cancelled() && matrix.suite == 'unit' && hashFiles('coverage*.out') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-suite-unit
+          overwrite: true
+          if-no-files-found: error
+          path: |
+            coverage-unit-other.out
+            coverage-unit-agent.out
+
+      - name: Upload database suite coverage
+        if: ${{ !cancelled() && matrix.suite == 'database' && hashFiles('coverage*.out') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-suite-database
+          overwrite: true
+          if-no-files-found: error
+          path: |
+            coverage-unit-demoseed.out
+            coverage-unit-db.out
+            coverage-unit-worker.out
+            coverage-browser.out
+            coverage-integration.out
+
+      - name: Stop CI Postgres
+        if: always() && steps.postgres.outputs.container_id != ''
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+        run: docker rm --force --volumes "$POSTGRES_CONTAINER"
+
+  # Preserve the required check name while every suite owns its runner and database.
+  backend-test:
+    name: Backend Test
+    needs: [changes, backend-test-suites]
+    if: ${{ !cancelled() && (needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify backend suites
+        env:
+          SUITE_RESULT: ${{ needs.backend-test-suites.result }}
+        run: |
+          if [[ "$SUITE_RESULT" != "success" ]]; then
+            echo "::error::Every backend test suite must succeed"
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      # Exact artifact names and profile lists fail closed on missing suite evidence.
+      # Stable names also allow rerunning this job after only a failed suite reruns.
+      - name: Download unit suite coverage
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-suite-unit
+      - name: Download database suite coverage
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-suite-database
+
+      - name: Combine backend unit coverage
+        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-demoseed.out coverage-unit-db.out coverage-unit-worker.out coverage-unit-agent.out
 
       # Measure all backend code exercised by the successful suites, without
       # double-counting statements shared by multiple test binaries.
@@ -563,6 +647,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: backend-coverage
+          overwrite: true
           path: |
             coverage.out
             coverage-unit.out
@@ -573,12 +658,6 @@ jobs:
             coverage-unit-agent.out
             coverage-browser.out
             coverage-integration.out
-
-      - name: Stop CI Postgres
-        if: always() && steps.postgres.outputs.container_id != ''
-        env:
-          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
-        run: docker rm --force --volumes "$POSTGRES_CONTAINER"
 
   frontend-lint:
     name: Frontend Lint & Typecheck

@@ -40,8 +40,7 @@ func TestLifecycleCensusWritersFullSchemaPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			migration, actor := newContentMigrationPostgres(t, true)
-			require.NoError(t, migration.Up(), "apply the entire unchanged migration chain before reading passive writer leases")
+			_, actor := newMigratedSchemaPostgres(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			if tt.seed == "mixed" {
@@ -70,8 +69,7 @@ func TestLifecycleCensusWritersFullSchemaPostgres(t *testing.T) {
 
 func TestLifecycleCensusStatementClockFullSchemaPostgres(t *testing.T) {
 	t.Parallel()
-	migration, actor := newContentMigrationPostgres(t, false)
-	require.NoError(t, migration.Up(), "apply all repository migrations before checking the observation clock")
+	_, actor := newMigratedSchemaPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	tx, err := actor.BeginTx(ctx, pgx.TxOptions{})
@@ -92,8 +90,7 @@ func TestLifecycleCensusStatementClockFullSchemaPostgres(t *testing.T) {
 
 func TestLifecycleCensusConnectionsFullSchemaPostgres(t *testing.T) {
 	t.Parallel()
-	migration, actor := newContentMigrationPostgres(t, false)
-	require.NoError(t, migration.Up(), "apply the full schema before observing PostgreSQL connections")
+	_, actor := newMigratedSchemaPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	selfName := "synthetic-census-self-" + uuid.NewString()
@@ -171,8 +168,7 @@ func TestLifecycleCensusOperatorConnectionFullSchemaPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			migration, actor := newContentMigrationPostgres(t, false)
-			require.NoError(t, migration.Up(), "apply the unchanged full schema before observing a connection-only operator")
+			_, actor := newMigratedSchemaPostgres(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			poolURL, err := url.Parse(actor.Config().ConnString())
@@ -236,8 +232,7 @@ func TestLifecycleCensusVisibilityFullSchemaPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			migration, actor := newContentMigrationPostgres(t, false)
-			require.NoError(t, migration.Up(), "apply the complete schema before testing real PostgreSQL privilege masking")
+			_, actor := newMigratedSchemaPostgres(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			observerRole := newLifecycleCensusRole(t, ctx, actor)
@@ -310,8 +305,7 @@ func TestLifecycleCensusVisibilityFullSchemaPostgres(t *testing.T) {
 
 func TestLifecycleCensusDisabledActivityFullSchemaPostgres(t *testing.T) {
 	t.Parallel()
-	migration, actor := newContentMigrationPostgres(t, false)
-	require.NoError(t, migration.Up(), "apply the entire migration chain before observing disabled activity tracking")
+	_, actor := newMigratedSchemaPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	config := actor.Config().Copy()
@@ -332,8 +326,7 @@ func TestLifecycleCensusDisabledActivityFullSchemaPostgres(t *testing.T) {
 
 func TestLifecycleCensusReadOnlyFullSchemaPostgres(t *testing.T) {
 	t.Parallel()
-	migration, actor := newContentMigrationPostgres(t, false)
-	require.NoError(t, migration.Up(), "apply the full schema before proving both census queries work in a read-only transaction")
+	_, actor := newMigratedSchemaPostgres(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	tx, err := actor.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
@@ -362,8 +355,7 @@ func TestLifecycleCensusCancellationFullSchemaPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			migration, actor := newContentMigrationPostgres(t, false)
-			require.NoError(t, migration.Up(), "apply the full schema before testing a blocked standalone census")
+			_, actor := newMigratedSchemaPostgres(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 3*lifecyclecensus.Budget)
 			defer cancel()
 			lockTx, err := actor.Begin(ctx)
@@ -482,8 +474,7 @@ func TestLifecycleCensusCommandExitFullSchemaPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			migration, actor := newContentMigrationPostgres(t, false)
-			require.NoError(t, migration.Up(), "apply the unchanged full migration chain before the standalone-process lock probe")
+			_, actor := newMigratedSchemaPostgres(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 4*lifecyclecensus.Budget)
 			defer cancel()
 			lockTx, err := actor.Begin(ctx)

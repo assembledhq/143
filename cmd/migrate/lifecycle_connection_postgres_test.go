@@ -42,8 +42,7 @@ func TestLifecycleMigrationConnectionCommandPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			migration, actor := newContentMigrationPostgres(t, false)
-			require.NoError(t, migration.Up(), "apply the complete unchanged schema before running the real migration executable")
+			migration, actor := newMigratedSchemaPostgres(t)
 			baseline, dirty, err := migration.Version()
 			require.NoError(t, err, "record the original full-schema migration ledger independently of the command's custom ledger")
 			require.False(t, dirty, "the fully migrated fixture must start clean")
@@ -141,8 +140,7 @@ func TestLifecycleMigrationConnectionDriverPostgres(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			migration, actor := newContentMigrationPostgres(t, false)
-			require.NoError(t, migration.Up(), "apply the full schema before testing the migration URL helper through the real libpq driver")
+			migration, actor := newMigratedSchemaPostgres(t)
 			baseline, dirty, err := migration.Version()
 			require.NoError(t, err, "record the original full-schema ledger before a separate synthetic migration")
 			require.False(t, dirty, "driver-path probes must start from a clean full-schema fixture")

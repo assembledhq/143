@@ -23,8 +23,10 @@ func TestCIUnitPartitionsAndCoverage(t *testing.T) {
 	require.NoError(t, err, "test must exercise the actual CI workflow")
 	var workflow struct {
 		Jobs map[string]struct {
+			Needs yaml.Node `yaml:"needs"`
 			Steps []struct {
 				Name           string `yaml:"name"`
+				If             string `yaml:"if"`
 				Run            string `yaml:"run"`
 				TimeoutMinutes int    `yaml:"timeout-minutes"`
 				With           struct {
@@ -37,16 +39,24 @@ func TestCIUnitPartitionsAndCoverage(t *testing.T) {
 	steps := make(map[string]string)
 	stepIndexes := make(map[string]int)
 	stepTimeouts := make(map[string]int)
+	stepJobs := make(map[string]string)
+	stepConditions := make(map[string]string)
 	var coverageArtifacts string
-	for i, step := range workflow.Jobs["backend-test"].Steps {
-		if step.Run != "" {
-			require.NotContains(t, steps, step.Name, "test steps must have unambiguous names")
-			steps[step.Name] = step.Run
-			stepIndexes[step.Name] = i
-			stepTimeouts[step.Name] = step.TimeoutMinutes
-		}
-		if step.Name == "Upload coverage report" {
-			coverageArtifacts = step.With.Path
+	for _, jobName := range []string{"backend-test-suites", "backend-test"} {
+		job, ok := workflow.Jobs[jobName]
+		require.True(t, ok, "backend tests must retain both the workers and coverage aggregate")
+		for i, step := range job.Steps {
+			if step.Run != "" {
+				require.NotContains(t, steps, step.Name, "test steps must have unambiguous names")
+				steps[step.Name] = step.Run
+				stepIndexes[step.Name] = i
+				stepTimeouts[step.Name] = step.TimeoutMinutes
+				stepJobs[step.Name] = jobName
+				stepConditions[step.Name] = step.If
+			}
+			if step.Name == "Upload coverage report" {
+				coverageArtifacts = step.With.Path
+			}
 		}
 	}
 	unitSteps := []string{
@@ -60,9 +70,28 @@ func TestCIUnitPartitionsAndCoverage(t *testing.T) {
 	for _, name := range append(append([]string{}, unitSteps...), "Run preview browser lifecycle tests", "Run integration tests", "Combine backend coverage") {
 		require.NotEmpty(t, steps[name], "required backend test step must exist: %s", name)
 	}
-	for i := 1; i < len(unitSteps); i++ {
-		require.Less(t, stepIndexes[unitSteps[i-1]], stepIndexes[unitSteps[i]], "unit partitions must finish before their shared coverage merge")
+	owners := []struct{ step, suite string }{
+		{step: unitSteps[0], suite: "unit"},
+		{step: "Run demoseed tests", suite: "database"},
+		{step: "Run database tests", suite: "database"},
+		{step: "Run worker unit tests", suite: "database"},
+		{step: "Run agent unit tests", suite: "unit"},
+		{step: "Run preview browser lifecycle tests", suite: "database"},
+		{step: "Run integration tests", suite: "database"},
 	}
+	for _, owner := range owners {
+		require.Equal(t, "backend-test-suites", stepJobs[owner.step], "test execution must belong to the worker job: %s", owner.step)
+		require.Equal(t, "matrix.suite == '"+owner.suite+"'", stepConditions[owner.step], "every coverage suite must have exactly one worker owner: %s", owner.step)
+	}
+	var aggregateNeeds []string
+	aggregate := workflow.Jobs["backend-test"]
+	require.NoError(t, aggregate.Needs.Decode(&aggregateNeeds), "the aggregate must declare its worker dependencies")
+	require.Equal(t, []string{"changes", "backend-test-suites"}, aggregateNeeds, "coverage aggregation must wait for every independent worker")
+	require.Equal(t, "backend-test", stepJobs["Combine backend unit coverage"], "the shared unit merge must execute after all worker artifacts arrive")
+	require.Equal(t, "backend-test", stepJobs["Combine backend coverage"], "the final merge must execute in the aggregate job")
+	require.Less(t, stepIndexes["Run demoseed tests"], stepIndexes["Run database tests"], "fixture-heavy packages must remain serialized within the database worker")
+	require.Less(t, stepIndexes["Run database tests"], stepIndexes["Run worker unit tests"], "worker fixtures must not overlap the database package in one worker")
+	require.Less(t, stepIndexes[unitSteps[0]], stepIndexes["Run agent unit tests"], "the general batch must finish before agent tests in the unit worker")
 	require.Equal(t, 10, stepTimeouts["Run database tests"], "sharding must retain the existing aggregate database step budget")
 	require.Equal(t, 10, stepTimeouts["Run demoseed tests"], "the isolated demoseed package must retain its bounded aggregate step budget")
 	require.Less(t, stepIndexes["Combine backend unit coverage"], stepIndexes["Combine backend coverage"], "final coverage must consume the completed unit merge")

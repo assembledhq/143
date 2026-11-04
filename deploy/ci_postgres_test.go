@@ -22,10 +22,11 @@ func TestCIPostgresStartsAfterRegistryFallback(t *testing.T) {
 		}
 	}
 	require.NoError(t, yaml.Unmarshal(raw, &workflow), "CI workflow must be valid YAML")
-	for _, jobName := range []string{"backend-test", "migration-check"} {
+	for _, jobName := range []string{"backend-test-suites", "migration-check"} {
 		t.Run(jobName, func(t *testing.T) {
 			t.Parallel()
-			job := workflow.Jobs[jobName]
+			job, ok := workflow.Jobs[jobName]
+			require.True(t, ok, "database-consuming jobs must remain present in the workflow")
 			require.Empty(t, job.Services, "database pulls must run after checkout so registry fallback can execute")
 			checkout, start, wait, cleanup := -1, -1, -1, -1
 			for i, step := range job.Steps {

@@ -249,8 +249,12 @@ class DatabaseDiagnosticsTests(unittest.TestCase):
                 )
                 self.assertEqual(merged.returncode, 0, merged.stderr)
                 self.assertEqual((root / "coverage-unit.out").read_text().splitlines(), [f"mode: {mode}", "example/db.go:1.1,1.2 1 1", "example/demoseed.go:1.1,1.2 1 1", "example/remaining.go:1.1,1.2 1 3"], "the actual workflow merge must retain the isolated package's unique coverage contribution")
-                upload = "\n".join(workflow_step("Upload coverage report"))
-                self.assertIn("            coverage-unit-demoseed.out", upload, "retain the raw demoseed profile when later tests or the coverage floor fail")
+                for name in ("Upload database suite coverage", "Upload coverage report"):
+                    upload = "\n".join(workflow_step(name))
+                    self.assertIn("            coverage-unit-demoseed.out", upload,
+                                  "retain the isolated demoseed contribution in both suite evidence and the final report")
+                    self.assertIn("!cancelled()", upload,
+                                  "later test or coverage-floor failure must not suppress available profiles")
 
     def test_unknown_scope_is_rejected_without_echoing_input(self):
         with tempfile.TemporaryDirectory() as directory:
