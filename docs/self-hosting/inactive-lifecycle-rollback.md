@@ -88,12 +88,13 @@ unconditional skip-migrations option.
 A source revert of the lifecycle runtime is different from deploying an older
 binary. Keep migrations through 392 unchanged, along with any unrelated later
 migrations. The reverted runtime includes schema 393 for package-registry
-credentials, schema 394 for the workspace-preparation phase, and schema 395 for
-applied size-limit overrides. It retains the normal migration runner.
+credentials, schema 394 for the workspace-preparation phase, schema 395 for
+applied size-limit overrides, and schema 396 for automation comment updates. It
+retains the normal migration runner.
 
-For this source revert, `migrate up` checks clean schemas 392 through 395 for disabled
+For this source revert, `migrate up` checks clean schemas 392 through 396 for disabled
 participation and absence of incompatible lifecycle/caller history before making
-changes. It verifies the same inactive-state conditions at clean schema 395 after
+changes. It verifies the same inactive-state conditions at clean schema 396 after
 migration, including on fresh installations and no-change runs. Unsupported later
 schemas fail closed. These checks do not disable activation or delete retained
 history. A refusal requires investigation; do not bypass it or run down migrations.

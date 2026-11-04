@@ -23,7 +23,12 @@ func TestCICommandTestsRunEveryPackage(t *testing.T) {
 	require.NoError(t, err, "test must exercise the actual command-test CI gate")
 	var workflow struct {
 		Jobs map[string]struct {
-			Env   map[string]string `yaml:"env"`
+			Env      map[string]string `yaml:"env"`
+			Strategy struct {
+				Matrix struct {
+					Suite []string `yaml:"suite"`
+				} `yaml:"matrix"`
+			} `yaml:"strategy"`
 			Steps []struct {
 				Name           string            `yaml:"name"`
 				If             string            `yaml:"if"`
@@ -34,14 +39,16 @@ func TestCICommandTestsRunEveryPackage(t *testing.T) {
 		} `yaml:"jobs"`
 	}
 	require.NoError(t, yaml.Unmarshal(raw, &workflow), "CI workflow must remain valid YAML")
-	job, ok := workflow.Jobs["backend-test"]
-	require.True(t, ok, "command tests must run in the backend test job")
+	job, ok := workflow.Jobs["backend-test-suites"]
+	require.True(t, ok, "command tests must run in the backend suite workers")
+	require.Equal(t, []string{"unit", "database", "commands"}, job.Strategy.Matrix.Suite, "the worker matrix must include the complete command suite exactly once")
 	require.NotEmpty(t, job.Env["TEST_DATABASE_URL"], "database-backed command tests must receive a test database")
 	require.Equal(t, job.Env["DATABASE_URL"], job.Env["TEST_DATABASE_URL"], "command tests must use the database provisioned for the backend job")
 	commandIndex, migrationIndex := -1, -1
 	for i, step := range job.Steps {
 		if strings.Contains(step.Run, "go run cmd/migrate/main.go up") {
 			migrationIndex = i
+			require.Empty(t, step.If, "every suite worker must migrate its own provisioned database")
 		}
 		if step.Name == "Run command tests" {
 			require.Equal(t, -1, commandIndex, "the backend job must have one comprehensive command-test gate")
@@ -51,7 +58,7 @@ func TestCICommandTestsRunEveryPackage(t *testing.T) {
 	require.GreaterOrEqual(t, migrationIndex, 0, "backend tests must migrate the configured database")
 	require.Greater(t, commandIndex, migrationIndex, "command tests must run after database migrations")
 	step := job.Steps[commandIndex]
-	require.Empty(t, step.If, "all backend test invocations must exercise the comprehensive command gate")
+	require.Equal(t, "matrix.suite == 'commands'", step.If, "exactly the commands worker must exercise the complete command gate")
 	require.Equal(t, 10, step.TimeoutMinutes, "command tests must retain a bounded step budget with compilation headroom")
 	require.Greater(t, time.Duration(step.TimeoutMinutes)*time.Minute, 300*time.Second, "step budget must leave headroom beyond the command package deadline")
 	if databaseURL, overridden := step.Env["TEST_DATABASE_URL"]; overridden {

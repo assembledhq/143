@@ -26,10 +26,10 @@ print(fixture[sys.argv[2]])
 
 
 def backend_job():
-    match = re.search(r"^  backend-test:\n(.*?)(?=^  [a-z][a-z-]*:|\Z)",
+    match = re.search(r"^  backend-test-suites:\n(.*?)(?=^  [a-z][a-z-]*:|\Z)",
                       WORKFLOW.read_text(), re.MULTILINE | re.DOTALL)
     if not match:
-        raise AssertionError("Backend Test must remain in the CI workflow")
+        raise AssertionError("Backend Test suites must remain in the CI workflow")
     return match.group(1)
 
 
@@ -41,7 +41,7 @@ def backend_step(name):
     return match.group(1)
 
 
-def identify_cache(root, event, version="go1.26.3", arch="X64", image="ubuntu24", fail=""):
+def identify_cache(root, event, version="go1.26.3", arch="X64", image="ubuntu24", fail="", suite="unit"):
     stub = root / "go"
     stub.write_text(f"#!{sys.executable}\n{GO_STUB}")
     stub.chmod(0o700)
@@ -60,7 +60,7 @@ def identify_cache(root, event, version="go1.26.3", arch="X64", image="ubuntu24"
         env={
             **os.environ, "PATH": f"{root}:{os.environ['PATH']}",
             "GITHUB_EVENT_NAME": event, "RUNNER_OS": "Linux", "RUNNER_ARCH": arch,
-            "ImageOS": image,
+            "ImageOS": image, "BACKEND_TEST_SUITE": suite,
             "GO_CACHE_FIXTURE": json.dumps(fixture), "GO_CACHE_FAIL": fail,
             "GITHUB_OUTPUT": str(output),
         }, capture_output=True, text=True, timeout=10, check=False,
@@ -80,14 +80,15 @@ class BackendGoCacheTests(unittest.TestCase):
             ("pull_request", "go1.26.3", "X64", "ubuntu26", "count"),
         ]
         for event, version, arch, image, mode in cases:
-            with self.subTest(event=event, version=version, arch=arch, image=image), tempfile.TemporaryDirectory() as directory:
-                result, output, fixture = identify_cache(Path(directory), event, version, arch, image)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(output, (
-                    f"family=backend-go-v1-Linux-{arch}-{image}-{version}\n"
-                    f"scope=backend-go-v1-Linux-{arch}-{image}-{version}-{mode}\n"
-                    f"build={fixture['GOCACHE']}\nmodules={fixture['GOMODCACHE']}\n"
-                ), "cache scope must track the actual toolchain and test mode, with resolved cache paths")
+            for suite in ("unit", "database", "commands"):
+                with self.subTest(event=event, version=version, arch=arch, image=image, suite=suite), tempfile.TemporaryDirectory() as directory:
+                    result, output, fixture = identify_cache(Path(directory), event, version, arch, image, suite=suite)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(output, (
+                        f"family=backend-go-v2-Linux-{arch}-{image}-{version}-{suite}\n"
+                        f"scope=backend-go-v2-Linux-{arch}-{image}-{version}-{suite}-{mode}\n"
+                        f"build={fixture['GOCACHE']}\nmodules={fixture['GOMODCACHE']}\n"
+                    ), "cache scope must isolate suite outputs and track the actual toolchain and test mode")
 
     def test_failed_go_environment_does_not_publish_partial_cache_configuration(self):
         for variable in ("GOVERSION", "GOCACHE", "GOMODCACHE"):
@@ -112,7 +113,9 @@ class BackendGoCacheTests(unittest.TestCase):
                       "dependency and commit changes must rotate immutable cache keys")
         self.assertIn(f"          restore-keys: |\n            {scope}-{dependencies}-\n            {scope}-\n"
                       "            ${{ steps.go-cache.outputs.family }}-\n", cache,
-                      "restores must prefer the same build mode and reuse main's compatible backend cache for new PRs")
+                      "restores must prefer the same suite/build mode, with only same-suite cross-mode fallback")
+        self.assertIn("BACKEND_TEST_SUITE: ${{ matrix.suite }}", job,
+                      "matrix suites must have separate cache keys instead of racing to publish partial outputs")
         self.assertIn(f"          path: |\n            ${{{{ steps.go-cache.outputs.build }}}}\n"
                       f"            ${{{{ steps.go-cache.outputs.modules }}}}\n", cache,
                       "both build objects and downloaded modules must survive between runs")

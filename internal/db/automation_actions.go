@@ -177,6 +177,9 @@ func (s *AutomationActionStore) Reserve(ctx context.Context, orgID uuid.UUID, ac
 	if len(existing) >= 100 {
 		return out, ErrAutomationActionLimit
 	}
+	if err = validateAutomationCommentUpdate(ctx, tx, orgID, scope, request, payload, uuid.Nil); err != nil {
+		return out, err
+	}
 	destination, err := json.Marshal(scope.Config)
 	if err != nil {
 		return out, err
@@ -231,6 +234,12 @@ func (s *AutomationActionStore) Claim(ctx context.Context, orgID uuid.UUID, acto
 	}
 	if !reflect.DeepEqual(old.Canonical(), scope.Config.Canonical()) || !actionRequestAllowed(scope, frozen.Request) {
 		return out, ErrAutomationActionConflict
+	}
+	if out.Status != models.AutomationActionPending && out.Status != models.AutomationActionFailed {
+		return out, ErrAutomationActionBusy
+	}
+	if err = validateAutomationCommentUpdate(ctx, tx, orgID, scope, frozen.Request, out.Payload, out.ID); err != nil {
+		return out, err
 	}
 	rows, err = tx.Query(ctx, `UPDATE automation_actions SET status='sending',attempt_count=attempt_count+1,send_token=$3,send_deadline_at=clock_timestamp()+interval '8 seconds',last_run_id=$4,last_error_code=NULL,updated_at=now()
  WHERE org_id=$1 AND id=$2 AND status IN ('pending','failed') RETURNING `+automationActionColumns, orgID, id, uuid.New(), actor.RunID)

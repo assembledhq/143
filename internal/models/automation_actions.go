@@ -19,15 +19,21 @@ import (
 type AutomationActionKind string
 
 const (
-	AutomationActionLabel   AutomationActionKind = "github_label"
-	AutomationActionTeam    AutomationActionKind = "github_team_review"
-	AutomationActionComment AutomationActionKind = "github_issue_comment"
-	AutomationActionNotion  AutomationActionKind = "notion_tracking_row"
-	AutomationActionSlack   AutomationActionKind = "slack_notification"
+	AutomationActionLabel         AutomationActionKind = "github_label"
+	AutomationActionTeam          AutomationActionKind = "github_team_review"
+	AutomationActionComment       AutomationActionKind = "github_issue_comment"
+	AutomationActionCommentUpdate AutomationActionKind = "github_issue_comment_update"
+	AutomationActionNotion        AutomationActionKind = "notion_tracking_row"
+	AutomationActionSlack         AutomationActionKind = "slack_notification"
+)
+
+const (
+	AutomationActionCommentMarkerPrefix       = "<!-- 143-automation-action:"
+	AutomationActionCommentUpdateMarkerPrefix = "<!-- 143-automation-comment-update:"
 )
 
 func AutomationActionKinds() []AutomationActionKind {
-	return []AutomationActionKind{AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionNotion, AutomationActionSlack}
+	return []AutomationActionKind{AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionNotion, AutomationActionSlack, AutomationActionCommentUpdate}
 }
 func (k AutomationActionKind) Validate() error {
 	for _, v := range AutomationActionKinds() {
@@ -137,7 +143,7 @@ func (c AutomationActionConfig) Allows(k AutomationActionKind) bool {
 	return slices.Contains(c.Actions, k)
 }
 func (c AutomationActionConfig) Validate() error {
-	if len(c.Actions) == 0 || len(c.Actions) > 5 {
+	if len(c.Actions) == 0 || len(c.Actions) > len(AutomationActionKinds()) {
 		return errors.New("select at least one supported action")
 	}
 	seen := map[AutomationActionKind]bool{}
@@ -149,7 +155,8 @@ func (c AutomationActionConfig) Validate() error {
 			return errors.New("action kinds must be distinct")
 		}
 		seen[k] = true
-		if k == AutomationActionLabel || k == AutomationActionTeam || k == AutomationActionComment {
+		switch k {
+		case AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionCommentUpdate:
 			if !automationActionRepositoryPattern.MatchString(c.Repository) || len(c.Repository) > 256 {
 				return errors.New("repository must be owner/name")
 			}
@@ -216,11 +223,21 @@ func ValidateAutomationOperationKey(key string) error {
 
 type AutomationActionRequest struct {
 	AutomationActionKey
-	Kind       AutomationActionKind `json:"kind"`
-	PRNumber   int                  `json:"pr_number,omitempty"`
-	HeadSHA    string               `json:"head_sha,omitempty"`
-	Text       string               `json:"text,omitempty"`
-	Properties map[string]string    `json:"properties,omitempty"`
+	Kind           AutomationActionKind `json:"kind"`
+	PRNumber       int                  `json:"pr_number,omitempty"`
+	HeadSHA        string               `json:"head_sha,omitempty"`
+	Text           string               `json:"text,omitempty"`
+	Properties     map[string]string    `json:"properties,omitempty"`
+	SourceActionID string               `json:"source_action_id,omitempty"`
+}
+
+// AutomationActionCommentTarget identifies the existing comment through its create receipt
+// and records the last body the executor successfully delivered to that comment.
+type AutomationActionCommentTarget struct {
+	SourceActionID   uuid.UUID `json:"source_action_id"`
+	CommentID        string    `json:"comment_id"`
+	PreviousActionID uuid.UUID `json:"previous_action_id"`
+	PreviousText     string    `json:"previous_text"`
 }
 
 func (r AutomationActionRequest) Validate() error {
@@ -234,13 +251,23 @@ func (r AutomationActionRequest) Validate() error {
 		return errors.New("a PR precondition requires a positive pr_number and full lowercase head_sha")
 	}
 	switch r.Kind {
-	case AutomationActionLabel, AutomationActionTeam, AutomationActionComment:
+	case AutomationActionLabel, AutomationActionTeam, AutomationActionComment, AutomationActionCommentUpdate:
 		if r.PRNumber == 0 {
 			return errors.New("GitHub actions require a PR precondition")
 		}
 	}
+	if r.Kind == AutomationActionCommentUpdate {
+		if id, err := uuid.Parse(r.SourceActionID); err != nil || id == uuid.Nil || id.String() != r.SourceActionID {
+			return errors.New("comment updates require a canonical nonzero source_action_id UUID")
+		}
+		if strings.Contains(r.Text, AutomationActionCommentMarkerPrefix) || strings.Contains(r.Text, AutomationActionCommentUpdateMarkerPrefix) {
+			return errors.New("comment text contains a reserved automation marker")
+		}
+	} else if r.SourceActionID != "" {
+		return errors.New("source_action_id is only valid for comment updates")
+	}
 	switch r.Kind {
-	case AutomationActionComment, AutomationActionSlack:
+	case AutomationActionComment, AutomationActionCommentUpdate, AutomationActionSlack:
 		limit := 32 << 10
 		if r.Kind == AutomationActionSlack {
 			limit = 4 << 10
