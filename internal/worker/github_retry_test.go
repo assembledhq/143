@@ -22,7 +22,10 @@ func TestGitHubCheckRefreshBudgetDeferralPreservesAttempts(t *testing.T) {
 	require.ErrorIs(t, err, ghservice.ErrPullRequestCheckRefreshDeferred, "the worker should preserve local admission as the reason for retrying")
 	require.False(t, retryable.ConsumeAttempt, "local admission should preserve normal job attempts")
 	require.Equal(t, 67*time.Second, *retryable.RetryAfter, "the refresh should retry after a slot interval with per-PR jitter")
-	require.Equal(t, githubRateLimitMaxRetryDuration, *retryable.MaxRetryDuration, "budget deferrals should retain a bounded recovery window")
+	require.True(t, retryable.BypassMaxRetryDuration, "waiting for local admission should preserve durable work through long budget holds")
+	start := time.Date(2026, time.November, 4, 12, 0, 0, 0, time.UTC)
+	exceeded, _ := retryableDurationExceeded(start, retryable, start.Add(githubRateLimitMaxRetryDuration+time.Hour))
+	require.False(t, exceeded, "the worker should keep waiting beyond the provider retry window")
 	require.Empty(t, retryable.GitHubRetryPolicy, "local admission should not select a provider cooldown policy")
 }
 
@@ -79,6 +82,8 @@ func TestGitHubControllerDeadlineIsScheduledExactly(t *testing.T) {
 	require.Equal(t, GitHubRetryPolicyExact, retryable.GitHubRetryPolicy, "controller deferral should select exact scheduling")
 	require.False(t, retryable.ConsumeAttempt, "controller deferral should preserve attempts")
 	require.Nil(t, retryable.RetryAfter, "exact delay should be materialized from the worker scheduling clock")
+	require.False(t, retryable.BypassMaxRetryDuration, "provider cooldowns should retain their bounded retry window")
+	require.Equal(t, githubRateLimitMaxRetryDuration, *retryable.MaxRetryDuration, "provider cooldown retries should use the provider recovery window")
 
 	applyGitHubRetrySchedule(retryable, now.Add(-time.Hour), now)
 	require.NotNil(t, retryable.RetryAfter, "worker should materialize the exact controller delay")

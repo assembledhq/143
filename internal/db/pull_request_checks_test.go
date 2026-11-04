@@ -64,7 +64,7 @@ func TestPullRequestStore_UpsertCheckState(t *testing.T) {
 			mock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").
 				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 				WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
-			mock.ExpectQuery("WITH applied AS[\\s\\S]+provider_sequence < EXCLUDED.provider_sequence").
+			mock.ExpectQuery("applied AS[\\s\\S]+provider_sequence < EXCLUDED.provider_sequence").
 				WithArgs(pullRequestCheckStateArgs(orgID, state)).
 				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(tt.databaseApplied))
 			mock.ExpectCommit()
@@ -177,4 +177,97 @@ func TestPullRequestStore_ReconcileCheckStates(t *testing.T) {
 	err = store.ReconcileCheckStates(context.Background(), orgID, prID, "head-2", 44, []models.PullRequestCheckState{state})
 	require.NoError(t, err, "ReconcileCheckStates should atomically refresh the reconciliation baseline")
 	require.NoError(t, mock.ExpectationsWereMet(), "all check state replacement expectations should be met")
+}
+
+func TestCheckRunProviderAliasesPreserveOrderingPostgres(t *testing.T) {
+	t.Parallel()
+
+	pool, orgID, prID := newHealthSyncPostgres(t)
+	ctx := t.Context()
+	store := NewPullRequestStore(pool)
+	timestamp := time.Date(2026, 7, 22, 20, 0, 0, 0, time.UTC)
+	legacy := models.PullRequestCheckState{
+		OrgID: orgID, PullRequestID: prID, HeadSHA: "old-head",
+		Source: models.PullRequestCheckSourceCheckRun, ExternalKey: "état: test", Name: "État: Test",
+		Category: models.PullRequestCheckCategoryTest, Status: models.PullRequestCheckStatusFailed,
+		Provider: "first-app", ProviderEventID: "delivery-10", ProviderSequence: 10, ProviderUpdatedAt: timestamp,
+	}
+	applied, err := store.UpsertCheckState(ctx, orgID, legacy)
+	require.NoError(t, err, "the old writer should persist its unqualified check")
+	require.True(t, applied, "the first provider's legacy row should be accepted")
+
+	qualified := legacy
+	qualified.ExternalKey = " check-run-v2:first-app:état: test"
+	applied, err = store.UpsertCheckState(ctx, orgID, qualified)
+	require.NoError(t, err, "a qualified replay should resolve the same-provider legacy row")
+	require.True(t, applied, "an exact old delivery should still allow webhook follow-up work")
+	older := qualified
+	older.ProviderSequence--
+	older.Status = models.PullRequestCheckStatusPassed
+	applied, err = store.UpsertCheckState(ctx, orgID, older)
+	require.NoError(t, err, "rejecting older provider state should succeed")
+	require.False(t, applied, "a legacy key must still fence an older successful replay")
+
+	other := qualified
+	other.Provider = "second-app"
+	other.ExternalKey = " check-run-v2:second-app:état: test"
+	other.ProviderSequence = 4
+	other.ProviderEventID = "delivery-4"
+	applied, err = store.UpsertCheckState(ctx, orgID, other)
+	require.NoError(t, err, "another provider should have its own check with the same name")
+	require.True(t, applied, "the first provider's higher sequence should not reject the second")
+
+	reconciled := other
+	reconciled.ProviderSequence++
+	reconciled.ProviderEventID = ""
+	reconciled.Status = models.PullRequestCheckStatusPassed
+	version, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+	require.NoError(t, err, "reserve the reconciliation watermark")
+	require.NoError(t, store.ReconcileCheckStates(ctx, orgID, prID, legacy.HeadSHA, version, []models.PullRequestCheckState{older, reconciled}),
+		"authoritative reconciliation should retain the newer legacy event and update the other provider")
+	states, err := store.ListCheckStatesAfter(ctx, orgID, prID, legacy.HeadSHA, 0)
+	require.NoError(t, err, "read the two independent provider checks")
+	type check struct {
+		provider string
+		key      string
+		status   models.PullRequestCheckStatus
+		sequence int64
+	}
+	var actual []check
+	for _, state := range states {
+		actual = append(actual, check{state.Provider, state.ExternalKey, state.Status, state.ProviderSequence})
+	}
+	require.ElementsMatch(t, []check{
+		{"first-app", "état: test", models.PullRequestCheckStatusFailed, 10},
+		{"second-app", " check-run-v2:second-app:état: test", models.PullRequestCheckStatusPassed, 5},
+	}, actual, "readback and webhook ordering should preserve each provider independently")
+
+	// A rolling deployment can still have a legacy writer recreate the
+	// name-only alias after a current writer has stored the qualified row.
+	shadow := other
+	shadow.Name = "ÉTAT: TEST"
+	shadow.ExternalKey = "état: test"
+	shadow.ProviderEventID = "delivery-shadow"
+	// The old writer uses the original slot regardless of provider. Give it a
+	// sequence above the original occupant but below the newer qualified row.
+	reconciled.ProviderSequence = 20
+	reconciled.ProviderUpdatedAt = timestamp.Add(time.Minute)
+	require.NoError(t, store.ReconcileCheckStates(ctx, orgID, prID, legacy.HeadSHA, version, []models.PullRequestCheckState{reconciled}),
+		"persist the newer canonical result before the legacy write")
+	watermark, err := store.ReserveCheckStateVersion(ctx, orgID, prID)
+	require.NoError(t, err, "capture a watermark beyond the authoritative row")
+	shadow.ProviderSequence = 15
+	applied, err = store.UpsertCheckState(ctx, orgID, shadow)
+	require.NoError(t, err, "simulate a still-running legacy binary overwriting its original slot")
+	require.True(t, applied, "the legacy slot should accept its higher sequence")
+	pending, err := store.ListCheckStatesAfter(ctx, orgID, prID, legacy.HeadSHA, watermark)
+	require.NoError(t, err, "read projected state after only the stale alias changed")
+	require.Len(t, pending, 1, "the watermark should expose one logical check")
+	require.Equal(t, check{"second-app", other.ExternalKey, models.PullRequestCheckStatusPassed, 20},
+		check{pending[0].Provider, pending[0].ExternalKey, pending[0].Status, pending[0].ProviderSequence},
+		"the newer canonical result must win even if it was observed before the watermark")
+	require.Greater(t, pending[0].ProjectionVersion, watermark, "the winner should carry the newer alias watermark")
+	more, err := store.HasCheckStatesAfter(ctx, orgID, prID, legacy.HeadSHA, pending[0].ProjectionVersion)
+	require.NoError(t, err, "check for remaining pending aliases")
+	require.False(t, more, "the effective watermark should consume the shadow event")
 }

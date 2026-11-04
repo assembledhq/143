@@ -2861,13 +2861,14 @@ func TestHandleCheckRunEvent_CompletedEnqueuesHealthRebuild(t *testing.T) {
 	prMock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
-	prMock.ExpectQuery("WITH applied AS").
+	prMock.ExpectQuery("applied AS").
 		WithArgs(pgx.NamedArgs{
 			"org_id":              orgID,
 			"pull_request_id":     prID,
 			"head_sha":            "head-sha",
 			"source":              models.PullRequestCheckSourceCheckRun,
-			"external_key":        "backend test",
+			"external_key":        " check-run-v2:github-actions:backend test",
+			"legacy_external_key": "backend test",
 			"name":                "Backend Test",
 			"category":            models.PullRequestCheckCategoryTest,
 			"status":              models.PullRequestCheckStatusPassed,
@@ -2983,13 +2984,14 @@ func TestHandleStatusEvent_EnqueuesHealthRebuildForHeadSHA(t *testing.T) {
 	prMock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").
 		WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
-	prMock.ExpectQuery("WITH applied AS").
+	prMock.ExpectQuery("applied AS").
 		WithArgs(pgx.NamedArgs{
 			"org_id":              orgID,
 			"pull_request_id":     prID,
 			"head_sha":            "head-sha",
 			"source":              models.PullRequestCheckSourceCommitStatus,
 			"external_key":        "ci/circleci: frontend_lint_format_license",
+			"legacy_external_key": "ci/circleci: frontend_lint_format_license",
 			"name":                "ci/circleci: frontend_lint_format_license",
 			"category":            models.PullRequestCheckCategoryLint,
 			"status":              models.PullRequestCheckStatusFailed,

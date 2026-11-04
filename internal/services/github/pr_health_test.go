@@ -409,7 +409,7 @@ func TestClassifyCheckRunCategory(t *testing.T) {
 	}
 }
 
-func TestDedupeCheckRunsByName(t *testing.T) {
+func TestDedupeCheckRunsByProviderAndName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -470,8 +470,8 @@ func TestDedupeCheckRunsByName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := dedupeCheckRunsByName(tt.input)
-			require.Equal(t, tt.expected, got, "dedupeCheckRunsByName should keep highest-ID check per name")
+			got := dedupeCheckRunsByProviderAndName(tt.input)
+			require.Equal(t, tt.expected, got, "deduplication should keep the highest-ID check per provider and name")
 		})
 	}
 }

@@ -11,9 +11,31 @@ import (
 	"github.com/assembledhq/143/internal/models"
 )
 
-const pullRequestCheckStateSelectColumns = `org_id, pull_request_id, head_sha, source, external_key,
+const pullRequestCheckStateFields = `org_id, pull_request_id, head_sha, source, external_key,
 	name, category, status, provider, details_url, summary, provider_event_id,
-	provider_sequence, provider_updated_at, projection_version, created_at, updated_at`
+	provider_sequence, provider_updated_at`
+
+// A qualified check run can continue updating its same-provider legacy row.
+// Compare both aliases during rolling deployments because older writers still
+// use the unqualified name. A legacy caller keeps its original single key.
+const pullRequestCheckStateKeyCTE = `selected_key AS (
+	SELECT COALESCE((
+		SELECT external_key
+		FROM pull_request_check_states
+		WHERE org_id = @org_id
+		  AND pull_request_id = @pull_request_id
+		  AND head_sha = @head_sha
+		  AND source = @source
+		  AND (external_key = @external_key OR (
+			@source = 'check_run'
+			AND @external_key LIKE ' check-run-v2:%'
+			AND external_key = @legacy_external_key
+			AND lower(btrim(provider)) = lower(btrim(@provider))
+		  ))
+		ORDER BY provider_sequence DESC, provider_updated_at DESC, projection_version DESC
+		LIMIT 1
+	), @external_key) AS external_key
+)`
 
 func (s *PullRequestStore) UpsertCheckState(ctx context.Context, orgID uuid.UUID, state models.PullRequestCheckState) (bool, error) {
 	if err := validatePullRequestCheckState(orgID, state.PullRequestID, state.HeadSHA, state); err != nil {
@@ -30,16 +52,17 @@ func (s *PullRequestStore) UpsertCheckState(ctx context.Context, orgID uuid.UUID
 
 	var applied bool
 	err = tx.QueryRow(ctx, `
-		WITH applied AS (
+		WITH `+pullRequestCheckStateKeyCTE+`, applied AS (
 			INSERT INTO pull_request_check_states (
 				org_id, pull_request_id, head_sha, source, external_key, name,
 				category, status, provider, details_url, summary, provider_event_id,
 				provider_sequence, provider_updated_at
-			) VALUES (
-				@org_id, @pull_request_id, @head_sha, @source, @external_key, @name,
+			)
+			SELECT
+				@org_id, @pull_request_id, @head_sha, @source, external_key, @name,
 				@category, @status, @provider, @details_url, @summary, @provider_event_id,
 				@provider_sequence, @provider_updated_at
-			)
+			FROM selected_key
 			ON CONFLICT (pull_request_id, head_sha, source, external_key) DO UPDATE
 			SET name = EXCLUDED.name,
 				category = EXCLUDED.category,
@@ -65,7 +88,7 @@ func (s *PullRequestStore) UpsertCheckState(ctx context.Context, orgID uuid.UUID
 		SELECT EXISTS (SELECT 1 FROM applied) OR EXISTS (
 			SELECT 1 FROM pull_request_check_states
 			WHERE org_id=@org_id AND pull_request_id=@pull_request_id AND head_sha=@head_sha
-			  AND source=@source AND external_key=@external_key
+			  AND source=@source AND external_key=(SELECT external_key FROM selected_key)
 			  AND provider_sequence=@provider_sequence AND provider_updated_at=@provider_updated_at
 			  AND name=@name AND category=@category AND status=@status AND provider=@provider
 			  AND details_url IS NOT DISTINCT FROM @details_url AND summary=@summary
@@ -121,12 +144,23 @@ func lockPullRequestCheckProjection(ctx context.Context, tx pgx.Tx, orgID, pullR
 
 func (s *PullRequestStore) ListCheckStatesAfter(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, afterVersion int64) ([]models.PullRequestCheckState, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT `+pullRequestCheckStateSelectColumns+`
-		FROM pull_request_check_states
-		WHERE org_id = @org_id
-		  AND pull_request_id = @pull_request_id
-		  AND head_sha = @head_sha
-		  AND projection_version > @after_version
+		WITH aliases AS (
+			SELECT `+pullRequestCheckStateFields+`, created_at, updated_at,
+				MAX(projection_version) OVER logical_check AS alias_projection_version,
+				ROW_NUMBER() OVER (logical_check
+					ORDER BY provider_sequence DESC, provider_updated_at DESC, projection_version DESC
+				) AS alias_rank
+			FROM pull_request_check_states
+			WHERE org_id = @org_id
+			  AND pull_request_id = @pull_request_id
+			  AND head_sha = @head_sha
+			WINDOW logical_check AS (PARTITION BY source, lower(btrim(provider)),
+				CASE WHEN source = 'check_run' THEN regexp_replace(external_key, '^ check-run-v2:[^:]+:', '')
+					ELSE external_key END)
+		)
+		SELECT `+pullRequestCheckStateFields+`, alias_projection_version AS projection_version, created_at, updated_at
+		FROM aliases
+		WHERE alias_rank = 1 AND alias_projection_version > @after_version
 		ORDER BY lower(name), source, external_key`, pgx.NamedArgs{
 		"org_id":          orgID,
 		"pull_request_id": pullRequestID,
@@ -161,6 +195,8 @@ func (s *PullRequestStore) HasCheckStatesAfter(ctx context.Context, orgID, pullR
 	return pending, nil
 }
 
+// ReconcileCheckStates is called under ApplyHealthSync's pull request lock,
+// which serializes alias selection against concurrent webhook upserts.
 func (s *PullRequestStore) ReconcileCheckStates(ctx context.Context, orgID, pullRequestID uuid.UUID, headSHA string, checkStateVersion int64, states []models.PullRequestCheckState) error {
 	for _, state := range states {
 		if err := validatePullRequestCheckState(orgID, pullRequestID, headSHA, state); err != nil {
@@ -193,15 +229,17 @@ func (s *PullRequestStore) ReconcileCheckStates(ctx context.Context, orgID, pull
 		args := pullRequestCheckStateArgs(orgID, state)
 		args["projection_version"] = checkStateVersion
 		if _, err := tx.Exec(ctx, `
+			WITH `+pullRequestCheckStateKeyCTE+`
 			INSERT INTO pull_request_check_states (
 				org_id, pull_request_id, head_sha, source, external_key, name,
 				category, status, provider, details_url, summary, provider_event_id,
 				provider_sequence, provider_updated_at, projection_version
-			) VALUES (
-				@org_id, @pull_request_id, @head_sha, @source, @external_key, @name,
+			)
+			SELECT
+				@org_id, @pull_request_id, @head_sha, @source, external_key, @name,
 				@category, @status, @provider, @details_url, @summary, @provider_event_id,
 				@provider_sequence, @provider_updated_at, @projection_version
-			)
+			FROM selected_key
 			ON CONFLICT (pull_request_id, head_sha, source, external_key) DO UPDATE
 			SET name = EXCLUDED.name,
 				category = EXCLUDED.category,
@@ -267,6 +305,7 @@ func pullRequestCheckStateArgs(orgID uuid.UUID, state models.PullRequestCheckSta
 		"head_sha":            state.HeadSHA,
 		"source":              state.Source,
 		"external_key":        state.ExternalKey,
+		"legacy_external_key": strings.ToLower(strings.TrimSpace(state.Name)),
 		"name":                state.Name,
 		"category":            state.Category,
 		"status":              state.Status,

@@ -10,6 +10,7 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 var errPullRequestBackgroundQuotaDeferred = errors.New("pull request background quota budget deferred")
@@ -29,13 +30,28 @@ func (s *PRService) syncWebhookPullRequestChecks(ctx context.Context, orgID, pul
 	}
 	installationID := resolved.resolution.InstallationID
 	admitted, err := s.backgroundQuotaController.AdmitCheckRefresh(ctx, installationID)
+	if err := checkRefreshAdmissionError(admitted, err); err != nil {
+		return err
+	}
+	return s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, resolved, false)
+}
+
+func (s *PRService) checkRefreshContinuation(ctx context.Context) error {
+	if PullRequestSyncReasonFromContext(ctx) != PullRequestSyncReasonIncomplete {
+		return nil
+	}
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	return checkRefreshAdmissionError(s.backgroundQuotaController.CheckRefreshHasHeadroom(ctx, metadata.InstallationID))
+}
+
+func checkRefreshAdmissionError(admitted bool, err error) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrPullRequestCheckRefreshDeferred, err)
 	}
 	if !admitted {
 		return ErrPullRequestCheckRefreshDeferred
 	}
-	return s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, resolved, false)
+	return nil
 }
 
 func (s *PRService) backgroundQuotaFlightKey(ctx context.Context, key string, resolution *identity.Resolution) string {

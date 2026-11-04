@@ -3,6 +3,8 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/services/github/identity"
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -174,6 +177,76 @@ func TestCheckWebhookEnqueueFailureRedeliveryPostgres(t *testing.T) {
 			require.Equal(t, 0, pending, "obsolete payloads must not receive exact-redelivery acceptance")
 			require.NoError(t, pool.QueryRow(ctx, `SELECT projection_version FROM pull_request_check_states WHERE org_id=$1 AND pull_request_id=$2`, org, pr).Scan(&after), "read immutable current projection")
 			require.Equal(t, version, after, "obsolete events must leave current check state unchanged")
+		})
+	}
+}
+
+func TestRacedCheckProjectionSchedulesFollowUpPostgres(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name         string
+		remoteStatus string
+		wantJob      string
+		wantComplete bool
+	}{
+		{name: "settled known check wakes merge processing", remoteStatus: "ci/build", wantJob: prMergeWhenReadyJobType, wantComplete: true},
+		{name: "new check schedules verification before merge processing", remoteStatus: "ci/other", wantJob: prHealthSyncJobType},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool, orgID, prID := newWebhookRecoveryPostgres(t)
+			ctx := t.Context()
+			_, err := pool.Exec(ctx, `UPDATE pull_requests SET merge_when_ready_state='queued' WHERE org_id=$1 AND id=$2`, orgID, prID)
+			require.NoError(t, err, "seed a pull request waiting for merge processing")
+
+			repoMock := newMockPool(t)
+			expectReconciliationRepository(repoMock, orgID, uuid.New(), "acme/api", 42, false)
+			store := db.NewPullRequestStore(pool)
+			service := &PRService{
+				baseURL: "https://example.test", pullRequests: store, repos: db.NewRepositoryStore(repoMock), jobs: db.NewJobStore(pool),
+				cachedResolver: identity.NewResolver(reconciliationTokenSource{}, zerolog.Nop()), logger: zerolog.Nop(),
+				httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					var body string
+					switch r.URL.Path {
+					case "/repos/acme/api/pulls/17":
+						body = `{"number":17,"state":"open","mergeable":true,"mergeable_state":"clean","head":{"sha":"head-one"},"base":{"sha":"base-one","ref":"main"}}`
+					case "/repos/acme/api/commits/head-one/check-runs":
+						// Commit a webhook update after the full read reserved its
+						// watermark, before the webhook's normal rebuild is queued.
+						applied, err := store.UpsertCheckState(r.Context(), orgID, models.PullRequestCheckState{
+							OrgID: orgID, PullRequestID: prID, HeadSHA: "head-one", Source: models.PullRequestCheckSourceCommitStatus,
+							ExternalKey: "ci/build", Name: "ci/build", Category: models.PullRequestCheckCategoryBuild,
+							Status: models.PullRequestCheckStatusPassed, Provider: "github_status", ProviderEventID: "synthetic-delivery",
+							ProviderSequence: 2, ProviderUpdatedAt: time.Now().UTC(),
+						})
+						require.NoError(t, err, "record a check webhook concurrent with the full refresh")
+						require.True(t, applied, "the concurrent webhook must advance the projection watermark")
+						body = `{"total_count":0,"check_runs":[]}`
+					case "/repos/acme/api/commits/head-one/status":
+						body = `{"total_count":1,"statuses":[{"id":1,"state":"pending","context":"` + tt.remoteStatus + `"}]}`
+					default:
+						t.Fatalf("unexpected GitHub request %s", r.URL.Path)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+				})},
+			}
+
+			err = service.SyncPullRequestState(WithPullRequestSyncReason(ctx, PullRequestSyncReasonCodeReview), orgID, prID)
+			require.NoError(t, err, "the full refresh should apply and reconcile the racing webhook")
+			require.NoError(t, repoMock.ExpectationsWereMet(), "GitHub credentials should come from the scoped repository")
+			current, err := store.GetHealthCurrent(ctx, orgID, prID)
+			require.NoError(t, err, "load the post-race snapshot")
+			var summary models.PullRequestHealthSummary
+			require.NoError(t, json.Unmarshal(current.SummaryJSON, &summary), "decode the post-race snapshot")
+			require.Equal(t, boolPtr(tt.wantComplete), summary.CheckSetComplete, "the snapshot should distinguish known check updates from new coverage")
+			require.Equal(t, tt.wantComplete, summary.ChecksConfirmed, "only complete terminal coverage should wake merge processing")
+
+			rows, err := pool.Query(ctx, `SELECT job_type FROM jobs WHERE org_id=$1 ORDER BY job_type`, orgID)
+			require.NoError(t, err, "load durable follow-up jobs for the race overlay")
+			jobs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+			require.NoError(t, err, "read all follow-up jobs")
+			require.Equal(t, []string{tt.wantJob}, jobs, "the overlay should queue the correct follow-up without depending on a later webhook")
 		})
 	}
 }

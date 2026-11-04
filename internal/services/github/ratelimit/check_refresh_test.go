@@ -25,20 +25,27 @@ func TestAdmitCheckRefreshSharesInstallationSlot(t *testing.T) {
 		controller     *Controller
 		installationID int64
 		advance        time.Duration
+		continuation   bool
 		admitted       bool
 	}{
+		{controller: b, installationID: 42, continuation: true, admitted: true},
 		{controller: a, installationID: 42, admitted: true},
 		{controller: b, installationID: 42},
 		{controller: b, installationID: 43, admitted: true},
 		{controller: otherApp, installationID: 42, admitted: true},
 		{controller: otherEnv, installationID: 42, admitted: true},
-		{controller: b, installationID: 42, advance: 29 * time.Second},
+		{controller: b, installationID: 42, advance: 29 * time.Second, continuation: true, admitted: true},
+		{controller: b, installationID: 42},
 		{controller: b, installationID: 42, advance: time.Second, admitted: true},
 		{controller: a, installationID: 42},
 	}
 	for i, tt := range tests {
 		server.FastForward(tt.advance)
-		admitted, err := tt.controller.AdmitCheckRefresh(t.Context(), tt.installationID)
+		check := tt.controller.AdmitCheckRefresh
+		if tt.continuation {
+			check = tt.controller.CheckRefreshHasHeadroom
+		}
+		admitted, err := check(t.Context(), tt.installationID)
 		require.NoError(t, err, "step %d should query the shared budget", i)
 		require.Equal(t, tt.admitted, admitted, "step %d should admit only independent scopes and expired slots", i)
 	}
@@ -74,6 +81,9 @@ func TestAdmitCheckRefreshPreservesCoreHeadroom(t *testing.T) {
 	admitted, err = worker.AdmitCheckRefresh(t.Context(), 42)
 	require.NoError(t, err, "trusted headers from the other controller should inform admission")
 	require.False(t, admitted, "a live reset family at the cutoff should reserve its remaining quota for reviews")
+	canContinue, err := worker.CheckRefreshHasHeadroom(t.Context(), 42)
+	require.NoError(t, err, "continuation should see the same trusted quota as initial admission")
+	require.False(t, canContinue, "an extra page should respect the live quota reserve")
 
 	now = now.Add(time.Hour - 30*time.Second)
 	server.FastForward(time.Hour - 30*time.Second)
@@ -113,6 +123,9 @@ func TestAdmitCheckRefreshFailsClosed(t *testing.T) {
 			admitted, err := controller.AdmitCheckRefresh(t.Context(), tt.installationID)
 			require.Error(t, err, "an unavailable budget should be surfaced to the caller")
 			require.False(t, admitted, "uncertain budget ownership should defer check refreshes")
+			canContinue, err := controller.CheckRefreshHasHeadroom(t.Context(), tt.installationID)
+			require.Error(t, err, "an unavailable budget should also be surfaced during pagination")
+			require.False(t, canContinue, "uncertain budget ownership should defer continuation pages")
 		})
 	}
 }

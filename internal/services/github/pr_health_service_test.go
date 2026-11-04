@@ -4479,7 +4479,7 @@ func expectCheckStateReconciliation(mock pgxmock.PgxPoolIface, orgID, pullReques
 		mock.ExpectExec("INSERT INTO pull_request_check_states").
 			WithArgs(pgx.NamedArgs{
 				"org_id": pgxmock.AnyArg(), "pull_request_id": pgxmock.AnyArg(), "head_sha": pgxmock.AnyArg(),
-				"source": pgxmock.AnyArg(), "external_key": pgxmock.AnyArg(), "name": pgxmock.AnyArg(),
+				"source": pgxmock.AnyArg(), "external_key": pgxmock.AnyArg(), "legacy_external_key": pgxmock.AnyArg(), "name": pgxmock.AnyArg(),
 				"category": pgxmock.AnyArg(), "status": pgxmock.AnyArg(), "provider": pgxmock.AnyArg(),
 				"details_url": pgxmock.AnyArg(), "summary": pgxmock.AnyArg(), "provider_event_id": pgxmock.AnyArg(),
 				"provider_sequence": pgxmock.AnyArg(), "provider_updated_at": pgxmock.AnyArg(), "projection_version": pgxmock.AnyArg(),

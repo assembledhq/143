@@ -145,8 +145,7 @@ func classifyGitHubJobError(err error, retryKey string) error {
 		// Spread retries across the installation's next available slots instead
 		// of waking all waiting PRs together. Only this background lane waits.
 		delay := 45*time.Second + githubRateLimitJitter(retryKey)
-		retryWindow := githubRateLimitMaxRetryDuration
-		return &RetryableError{Err: err, RetryAfter: &delay, MaxRetryDuration: &retryWindow}
+		return &RetryableError{Err: err, RetryAfter: &delay, BypassMaxRetryDuration: true}
 	}
 	if errors.Is(err, models.ErrInvalidCodeReviewGuidanceFile) {
 		var fatal *FatalError
