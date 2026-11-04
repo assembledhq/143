@@ -240,8 +240,8 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 }
 
 // prepareColdCodeReviewInputs is only for a newly cloned, unpublished sandbox.
-// Its immutable input bundle cannot exist yet, so begin with local preparation
-// instead of probing the warm cache. Expired budgets still permit only verification.
+// Prepare and hydrate missing evidence in one private attempt, resolving current
+// credentials immediately before hydration. Expired budgets permit only verification.
 func (o *Orchestrator) prepareColdCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
 	return o.prepareCodeReviewInputs(ctx, session, sandbox, false)
 }
@@ -310,19 +310,26 @@ func (o *Orchestrator) prepareCodeReviewInputs(ctx context.Context, session *mod
 				return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
 			}
 		}
-		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, false)
-		if err != nil || exit != 42 {
-			if err != nil {
-				return nil, err
+		_, trusted := o.provider.(reviewPreparationTrustedStdinExecutor)
+		_, stdin := o.provider.(reviewPreparationStdinExecutor)
+		directHydration := !verifyExisting && (trusted || stdin) && o.github != nil && strings.TrimSpace(repo.CloneURL) != ""
+		if !directHydration {
+			exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, false)
+			if err != nil || exit != 42 {
+				if err != nil {
+					return nil, err
+				}
+				return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
 			}
-			return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
+			if o.github == nil {
+				return nil, fmt.Errorf("code review inputs incomplete: missing commits or merge-base history")
+			}
+			if strings.TrimSpace(repo.CloneURL) == "" {
+				return nil, fmt.Errorf("code review inputs incomplete: repository clone URL unavailable")
+			}
 		}
-		if o.github == nil {
-			return nil, fmt.Errorf("code review inputs incomplete: missing commits or merge-base history")
-		}
-		if strings.TrimSpace(repo.CloneURL) == "" {
-			return nil, fmt.Errorf("code review inputs incomplete: repository clone URL unavailable")
-		}
+		// Setup can outlast the clone token. Resolve it again here so the token
+		// provider can refresh expired credentials before any missing-object fetch.
 		token, err := o.github.GetInstallationToken(prepareCtx, repo.InstallationID)
 		if err != nil {
 			return nil, fmt.Errorf("authenticate shared review input preparation: %w", err)

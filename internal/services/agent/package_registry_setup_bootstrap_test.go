@@ -54,6 +54,7 @@ func TestPackageRegistrySetupSelectedRuntimeReachesRepositoryBootstrap(t *testin
 		toolchain nodetoolchain.Toolchain
 	}{
 		{name: "repository Node 22", toolchain: nodetoolchain.Toolchain{ID: "node22-npm10", NodeVersion: "22.23.4", NPMVersion: "10.9.9"}},
+		{name: "repository Node 22 npm 11", toolchain: nodetoolchain.Toolchain{ID: "node22-npm11", NodeVersion: "22.23.4", NPMVersion: "11.21.1", Directory: "22.23.4-npm11.21.1"}},
 		{name: "default Node 24", toolchain: nodetoolchain.Toolchain{ID: "node24-npm11", NodeVersion: "24.22.2", NPMVersion: "11.19.1"}},
 	}
 	for _, tt := range tests {

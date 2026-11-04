@@ -106,7 +106,10 @@ func TestPackageRegistrySetupTrustAndScope(t *testing.T) {
 			if tt.verifyOnly {
 				ctx = context.WithValue(ctx, packageSetupVerifyOnlyKey{}, true)
 			}
-			_, err := o.preparePackageRegistryDependencies(ctx, &models.Session{OrgID: orgID, RepositoryID: &repoID, Origin: tt.origin, RevisionContext: json.RawMessage(tt.revision)}, &Sandbox{ID: "main", OrgID: orgID.String()}, repoconfig.Config{Setup: repoconfig.SetupSection{NPM: []repoconfig.NPMSetup{{Directory: "."}}}})
+			_, err := o.preparePackageRegistryDependencies(ctx, &models.Session{OrgID: orgID, RepositoryID: &repoID, Origin: tt.origin, RevisionContext: json.RawMessage(tt.revision)}, &Sandbox{ID: "main", OrgID: orgID.String()}, repoconfig.Config{
+				Setup:  repoconfig.SetupSection{NPM: []repoconfig.NPMSetup{{Directory: "."}}},
+				Review: &repoconfig.ReviewSection{InstallNPMDependencies: true},
+			})
 			if tt.fail {
 				require.Error(t, err, "unsafe setup must fail before credentials can be delivered")
 				require.NotContains(t, err.Error(), "fake-setup-only", "errors must not expose provider credential diagnostics")
