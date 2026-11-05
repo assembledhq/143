@@ -498,6 +498,49 @@ func TestUserPrompts_EmptyFields(t *testing.T) {
 	})
 }
 
+func TestCodeReviewReviewerBoundedInvestigation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		data CodeReviewReviewerPromptData
+	}{
+		{name: "default reviewer"},
+		{
+			name: "captured target with organization policy",
+			data: CodeReviewReviewerPromptData{
+				Repository:         "example/repository",
+				BaseSHA:            "base-sha",
+				HeadSHA:            "head-sha",
+				ManifestPath:       ".git/review/manifest.json",
+				DiffPath:           ".git/review/changes.patch",
+				ReviewInstructions: "Inspect relevant callers before filing a finding.",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := CodeReviewReviewerPrompt(tt.data)
+			contextEnd := strings.Index(result, "</platform_review_context>")
+			require.Positive(t, contextEnd, "reviewer constraints should have an explicit platform context")
+			platformContext := result[:contextEnd]
+			require.Contains(t, platformContext, "Read the complete changed-code diff", "bounded searches must preserve complete diff coverage")
+			require.Contains(t, platformContext, "Do not run `git log --all`", "reviewers must not search history across unrelated refs")
+			require.Contains(t, platformContext, "explicit revision range and paths", "necessary history inspection must be limited to the review question")
+			require.Contains(t, platformContext, "timeout -k 2s 10s git log", "history commands need a process-level termination deadline")
+			require.Contains(t, platformContext, "A Bash tool timeout may move work to the background", "reviewers must distinguish tool yielding from process termination")
+			require.Contains(t, platformContext, "TaskStop or the equivalent cancellation tool", "reviewers must cancel their own automatically backgrounded commands")
+			require.Contains(t, platformContext, "confirm it has stopped before returning your review", "pending background work must not keep a completed review alive")
+			require.Contains(t, platformContext, "Do not infer a clean result from an inability to inspect required evidence", "timed-out inspection must preserve material missing-evidence reporting")
+			if tt.data.ReviewInstructions != "" {
+				require.Greater(t, strings.Index(result, tt.data.ReviewInstructions), contextEnd, "organization policy must follow the platform command limits")
+			}
+		})
+	}
+}
+
 func TestCodeReviewPolicyPromptComposition(t *testing.T) {
 	t.Parallel()
 	reviewInstructions := `Focus on tenant isolation.

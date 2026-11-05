@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -679,6 +680,61 @@ func TestClaudeCodeAdapter_Execute_CapturesResultEventSessionID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, "claude-session-xyz", result.AgentSessionID, "result event's session_id must populate AgentSessionID for next-turn resume")
+}
+
+func TestClaudeCodeAdapter_Execute_BackgroundTasksForBuiltInReviews(t *testing.T) {
+	t.Parallel()
+
+	const baseCommand = "CLAUDE_143_HUMAN_INPUT_TOOLS='AskUserQuestion' claude --print --output-format stream-json --verbose --settings '/home/sandbox/.143-claude-settings.json' --permission-mode bypassPermissions"
+	const reviewPrefix = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 "
+	tests := []struct {
+		name         string
+		review       bool
+		continuation bool
+		resumeID     string
+		expected     string
+	}{
+		{name: "ordinary fresh", expected: baseCommand + " < /home/sandbox/.143-prompt.md"},
+		{name: "review fresh", review: true, expected: reviewPrefix + baseCommand + " < /home/sandbox/.143-prompt.md"},
+		{name: "ordinary resume", continuation: true, resumeID: "review-session", expected: baseCommand + " --resume review-session \"Continue the review.\""},
+		{name: "review resume", review: true, continuation: true, resumeID: "review-session", expected: reviewPrefix + baseCommand + " --resume review-session \"Continue the review.\""},
+		{name: "ordinary missing resume fallback", continuation: true, expected: baseCommand + " < /home/sandbox/.143-prompt.md"},
+		{name: "review missing resume fallback", review: true, continuation: true, expected: reviewPrefix + baseCommand + " < /home/sandbox/.143-prompt.md"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			provider := testutil.NewMockSandboxProvider()
+			provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, cmd string, stdout, _ io.Writer) (int, error) {
+				if strings.Contains(cmd, "claude --print") {
+					_, err := io.WriteString(stdout, `{"type":"result","subtype":"success","result":"Review complete."}`)
+					return 0, err
+				}
+				return 0, nil
+			}
+			sandbox := &agent.Sandbox{
+				ID: "test", WorkDir: "/workspace", HomeDir: "/home/sandbox",
+				Env: map[string]string{"EXISTING_SETTING": "preserved"},
+			}
+			prompt := &agent.AgentPrompt{
+				UserPrompt: "Review the code.", UserMessage: "Continue the review.",
+				Continuation: tt.continuation, ResumeSessionID: tt.resumeID,
+			}
+			ctx := WithSandboxProvider(context.Background(), provider)
+			if tt.review {
+				threadID := uuid.New()
+				ctx = agent.WithCodeReviewExecution(ctx, &models.Session{Origin: models.SessionOriginCodeReview}, &threadID)
+			}
+
+			result, err := NewClaudeCodeAdapter(zerolog.Nop()).Execute(ctx, sandbox, prompt, make(chan agent.LogEntry, 10))
+
+			require.NoError(t, err, "review runtime defaults should not prevent Claude from launching")
+			require.Equal(t, "Review complete.", result.Summary, "adapter should preserve the completed review result")
+			require.Equal(t, tt.expected, claudeLaunchCommand(t, provider.ExecCalls), "only built-in review invocations should disable Claude background tasks across fresh and resumed execution")
+			require.Equal(t, map[string]string{"EXISTING_SETTING": "preserved"}, sandbox.Env, "review runtime defaults must not leak into the shared sandbox environment")
+		})
+	}
 }
 
 func TestClaudeCodeAdapter_Execute_IncludesReasoningEffortOverride(t *testing.T) {

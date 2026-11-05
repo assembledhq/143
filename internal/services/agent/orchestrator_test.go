@@ -7118,6 +7118,7 @@ func TestContinueSession_ResultErrorMarksActiveThreadFailed(t *testing.T) {
 		return err
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.False(t, agent.IsCodeReviewExecution(ctx), "ordinary session threads must retain their normal adapter runtime defaults")
 		return &agent.AgentResult{
 			Summary:  `{"type":"error","error":{"name":"UnknownError"}}`,
 			Error:    `opencode CLI exited with code 1: {"type":"error","error":{"name":"UnknownError"}}`,
@@ -7193,7 +7194,8 @@ func TestContinueSession_CodeReviewResultErrorFailsOnlyReviewerThread(t *testing
 		_, err := io.ReadAll(reader)
 		return err
 	}
-	d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+	d.adapter.executeFn = func(ctx context.Context, _ *agent.Sandbox, _ *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, agent.IsCodeReviewExecution(ctx), "initial built-in reviewers must carry trusted runtime scope through ContinueSession")
 		return &agent.AgentResult{
 			Summary:  "You've hit your weekly limit · resets Aug 9, 12pm (UTC)",
 			Error:    "claude CLI exited with code 1: You've hit your weekly limit · resets Aug 9, 12pm (UTC)",

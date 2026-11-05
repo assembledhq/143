@@ -163,6 +163,12 @@ func (a *ClaudeCodeAdapter) Execute(ctx context.Context, sandbox *agent.Sandbox,
 		)
 	}
 
+	if agent.IsCodeReviewExecution(ctx) {
+		// Print mode otherwise waits for timed-out commands that Claude moves
+		// to the background, even after the reviewer has returned its findings.
+		cmd = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1 " + cmd
+	}
+
 	if err := ensureClaudeWorkspaceTrust(ctx, provider, sandbox); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
