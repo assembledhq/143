@@ -1,6 +1,12 @@
 import { expect, test } from "@playwright/test";
 import type { Automation } from "../src/lib/types";
 
+test.beforeAll(async ({ request }) => {
+  test.setTimeout(120_000);
+  const response = await request.get("/automations", { timeout: 120_000 });
+  expect(response.ok()).toBe(true);
+});
+
 const automationNames = [
   "Weekly maintenance",
   `Maintenance${"WithoutSpaces".repeat(20)}`,
