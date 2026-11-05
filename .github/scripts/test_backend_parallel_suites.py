@@ -84,7 +84,7 @@ class BackendParallelSuitesTests(unittest.TestCase):
                       "the matrix must run every independent suite")
         self.assertIn("fail-fast: false", source,
                       "one failed suite must not cancel the other suites or their diagnostics")
-        self.assertIn("runs-on: blacksmith-4vcpu-ubuntu-2404", source)
+        self.assertIn("runs-on: ubuntu-latest", source)
         self.assertIn("DATABASE_URL: postgres://", source,
                       "each matrix worker must own a local database service")
         self.assertIn("run: bash .github/scripts/start-ci-postgres.sh", source)
