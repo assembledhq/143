@@ -27,6 +27,7 @@ env:
 jobs:
   changes:
     name: Detect Changes
+    # Keep change detection independent of the external runner fleet.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -108,7 +109,7 @@ jobs:
     name: Backend Lint
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.migrations == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -125,7 +126,7 @@ jobs:
     name: Backend Test (${{ matrix.suite }})
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.suite == 'unit' && 'ubuntu-latest' || 'blacksmith-4vcpu-ubuntu-2404' }}
     strategy:
       fail-fast: false
       matrix:
@@ -682,7 +683,7 @@ jobs:
     name: Frontend Test
     needs: changes
     if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: frontend
@@ -823,7 +824,7 @@ jobs:
     name: Docker Build
     needs: changes
     if: github.event_name == 'pull_request' && (needs.changes.outputs.docker == 'true' || needs.changes.outputs.ci == 'true')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       matrix:
         include:
@@ -841,29 +842,24 @@ jobs:
             tags: 143-frontend:latest
     steps:
       - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
+      - name: Set up Blacksmith Docker builder
+        uses: useblacksmith/setup-docker-builder@v2
         with:
-          # Bootstrap must use the cache before BuildKit's mirror config is active.
-          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
-          # Cache Docker Hub images through Google's public mirror for CI builds.
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["mirror.gcr.io"]
+          # Keep each image's layers and build cache mounts on its own disk.
+          cache-key: ${{ matrix.file }}
       - name: Build ${{ matrix.name }} Docker image
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           push: false
           tags: ${{ matrix.tags }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
   security:
     name: Security Scan
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v6
 
@@ -910,6 +906,7 @@ jobs:
   required-checks:
     name: All Checks Pass
     needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test, deploy-config-test]
+    # Keep final status reporting independent of the external runner fleet.
     runs-on: ubuntu-latest
     # Report dependency failures and skips, but let cancelled workflows stop.
     if: ${{ !cancelled() }}
