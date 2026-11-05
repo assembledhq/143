@@ -162,6 +162,29 @@ func TestProvidersIndependentActions(t *testing.T) {
 		})
 	}
 }
+func TestProviderSlackConfiguredGroup(t *testing.T) {
+	t.Parallel()
+	for _, group := range []string{"", "S0123456789"} {
+		t.Run("group="+group, func(t *testing.T) {
+			t.Parallel()
+			scope := providerScope()
+			scope.Config.SlackUserGroupID = group
+			slack := &testSlack{}
+			provider := NewProviders(testTokens{}, testCredentials{}, slack)
+			payload := Payload{Request: models.AutomationActionRequest{Text: "Review <!subteam^S9876543210> <@U123> <!here> &amp; <!channel>"}}
+			receipt, err := provider.Send(context.Background(), scope, models.AutomationAction{Kind: models.AutomationActionSlack}, payload)
+			require.NoError(t, err, "send to the configured Slack destination")
+			want := "Review &lt;!subteam^S9876543210&gt; &lt;@U123&gt; &lt;!here&gt; &amp;amp; &lt;!channel&gt;"
+			if group != "" {
+				want = "<!subteam^S0123456789> " + want
+			}
+			require.Equal(t, want, slack.text, "only the configured group can produce a mention")
+			require.Equal(t, scope.Config.SlackChannelID, slack.channel, "the group does not change the configured channel")
+			require.Equal(t, scope.Config.SlackChannelID+":123.456", receipt.ID, "keep the original Slack receipt identity")
+		})
+	}
+}
+
 func TestProvidersFailureClassification(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

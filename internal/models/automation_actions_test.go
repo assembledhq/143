@@ -17,6 +17,13 @@ func TestAutomationActionConfig(t *testing.T) {
 		valid     bool
 	}{
 		{"Slack only", `{"actions":["slack_notification"],"slack_channel_id":"C0123456789"}`, true},
+		{"Slack group mention", `{"actions":["slack_notification"],"slack_channel_id":"C0123456789","slack_user_group_id":"S0123456789"}`, true},
+		{"Slack empty group", `{"actions":["slack_notification"],"slack_channel_id":"C0123456789","slack_user_group_id":""}`, true},
+		{"Slack channel is not a group", `{"actions":["slack_notification"],"slack_channel_id":"C0123456789","slack_user_group_id":"C0123456789"}`, false},
+		{"Slack group markup", `{"actions":["slack_notification"],"slack_channel_id":"C0123456789","slack_user_group_id":"<!subteam^S0123456789>"}`, false},
+		{"Slack multiple groups", `{"actions":["slack_notification"],"slack_channel_id":"C0123456789","slack_user_group_id":"S0123456789 S9876543210"}`, false},
+		{"Slack short group", `{"actions":["slack_notification"],"slack_channel_id":"C0123456789","slack_user_group_id":"S123"}`, false},
+		{"Slack lowercase group", `{"actions":["slack_notification"],"slack_channel_id":"C0123456789","slack_user_group_id":"s0123456789"}`, false},
 		{"GitHub only", `{"actions":["github_issue_comment"],"repository":"owner/repo"}`, true},
 		{"GitHub comment updates only", `{"actions":["github_issue_comment_update"],"repository":"owner/repo"}`, true},
 		{"GitHub comment updates require a repository", `{"actions":["github_issue_comment_update"]}`, false},
@@ -212,6 +219,15 @@ func TestAutomationActionConfigJSONRoundTrip(t *testing.T) {
 				Repository:     "owner/repo",
 				Label:          "needs-review",
 				SlackChannelID: "C0123456789",
+			},
+		},
+		{
+			name: "configured Slack group is preserved",
+			raw:  `{"actions":["slack_notification"],"slack_channel_id":"C0123456789","slack_user_group_id":"S0123456789"}`,
+			expected: AutomationActionConfig{
+				Actions:          []AutomationActionKind{AutomationActionSlack},
+				SlackChannelID:   "C0123456789",
+				SlackUserGroupID: "S0123456789",
 			},
 		},
 		{

@@ -94,6 +94,7 @@ type AutomationActionConfig struct {
 	NotionDataSourceID string                                  `json:"notion_data_source_id,omitempty"`
 	NotionProperties   map[string]AutomationActionPropertyType `json:"notion_properties,omitempty"`
 	SlackChannelID     string                                  `json:"slack_channel_id,omitempty"`
+	SlackUserGroupID   string                                  `json:"slack_user_group_id,omitempty"`
 }
 
 type AutomationActionPropertyType string
@@ -116,6 +117,7 @@ func (p AutomationActionPropertyType) Validate() error {
 
 var automationActionTeamPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$`)
 var automationActionChannelPattern = regexp.MustCompile(`^[CG][A-Z0-9]{8,31}$`)
+var automationActionUserGroupPattern = regexp.MustCompile(`^S[A-Z0-9]{8,31}$`)
 var automationActionRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var automationActionSHAPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 var automationActionKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$`)
@@ -180,6 +182,9 @@ func (c AutomationActionConfig) Validate() error {
 	}
 	if c.Allows(AutomationActionSlack) && !automationActionChannelPattern.MatchString(c.SlackChannelID) {
 		return errors.New("slack_channel_id must identify a Slack channel")
+	}
+	if c.Allows(AutomationActionSlack) && c.SlackUserGroupID != "" && !automationActionUserGroupPattern.MatchString(c.SlackUserGroupID) {
+		return errors.New("slack_user_group_id must identify a Slack user group")
 	}
 	if c.Allows(AutomationActionNotion) {
 		if id, err := uuid.Parse(c.NotionDataSourceID); err != nil || id == uuid.Nil {

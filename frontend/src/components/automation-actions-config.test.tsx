@@ -6,6 +6,14 @@ import { AutomationActionsConfig, actionConfigError } from "./automation-actions
 describe("automation action configuration", () => {
   it.each([
     ["Slack only", { actions: ["slack_notification"], slack_channel_id: "C0123456789" }, true],
+    ["Slack with a user group", { actions: ["slack_notification"], slack_channel_id: "C0123456789", slack_user_group_id: "S0123456789" }, true],
+    ["Slack with an empty user group", { actions: ["slack_notification"], slack_channel_id: "C0123456789", slack_user_group_id: "" }, true],
+    ["Slack with a channel as its user group", { actions: ["slack_notification"], slack_channel_id: "C0123456789", slack_user_group_id: "C0123456789" }, false],
+    ["Slack with a lowercase user group", { actions: ["slack_notification"], slack_channel_id: "C0123456789", slack_user_group_id: "Sabcdefgh" }, false],
+    ["Slack with a short user group", { actions: ["slack_notification"], slack_channel_id: "C0123456789", slack_user_group_id: "S0123456" }, false],
+    ["Slack with an oversized user group", { actions: ["slack_notification"], slack_channel_id: "C0123456789", slack_user_group_id: `S${"0".repeat(32)}` }, false],
+    ["Slack with user group markup", { actions: ["slack_notification"], slack_channel_id: "C0123456789", slack_user_group_id: "<!subteam^S0123456789>" }, false],
+    ["inactive Slack with retained user group markup", { actions: ["github_issue_comment"], repository: "owner/repo", slack_user_group_id: "<!subteam^S0123456789>" }, true],
     ["GitHub comments only", { actions: ["github_issue_comment"], repository: "owner/repo" }, true],
     ["GitHub comment updates only", { actions: ["github_issue_comment_update"], repository: "owner/repo" }, true],
     ["GitHub comment updates without a repository", { actions: ["github_issue_comment_update"] }, false],
@@ -38,6 +46,40 @@ describe("automation action configuration", () => {
     expect(screen.queryByLabelText("Notion data source ID")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Save configuration" }));
     expect(save).toHaveBeenCalledWith(expect.objectContaining({ actions: ["slack_notification"], slack_channel_id: "C0123456789" }));
+    expect(save.mock.calls[0][0]).not.toHaveProperty("slack_user_group_id");
+  });
+  it("edits, reloads and clears a saved Slack user group", async () => {
+    const user = userEvent.setup();
+    const save = vi.fn();
+    const { rerender } = render(<AutomationActionsConfig config={{ actions: ["slack_notification"], slack_channel_id: "C0123456789", slack_user_group_id: "S0123456789" }} onSave={save} />);
+    await user.click(screen.getByRole("button", { name: "Configure actions" }));
+    const group = screen.getByLabelText("Slack user group ID (optional)");
+    expect(group).toHaveValue("S0123456789");
+    await user.clear(group);
+    await user.type(group, "S9876543210");
+    await user.click(screen.getByRole("button", { name: "Save configuration" }));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ slack_user_group_id: "S9876543210" }));
+
+    rerender(<AutomationActionsConfig config={save.mock.calls[0][0]} onSave={save} />);
+    await user.click(screen.getByRole("button", { name: "Configure actions" }));
+    expect(screen.getByLabelText("Slack user group ID (optional)")).toHaveValue("S9876543210");
+    await user.clear(screen.getByLabelText("Slack user group ID (optional)"));
+    await user.click(screen.getByRole("button", { name: "Save configuration" }));
+    expect(save.mock.calls[1][0]).not.toHaveProperty("slack_user_group_id");
+
+    rerender(<AutomationActionsConfig config={save.mock.calls[1][0]} onSave={save} />);
+    await user.click(screen.getByRole("button", { name: "Configure actions" }));
+    expect(screen.getByLabelText("Slack user group ID (optional)")).toHaveValue("");
+  });
+  it("retains the group while Slack notifications are turned off", async () => {
+    const user = userEvent.setup();
+    const save = vi.fn();
+    render(<AutomationActionsConfig config={{ actions: ["github_issue_comment", "slack_notification"], repository: "owner/repo", slack_channel_id: "C0123456789", slack_user_group_id: "S0123456789" }} onSave={save} />);
+    await user.click(screen.getByRole("button", { name: "Configure actions" }));
+    await user.click(screen.getByRole("checkbox", { name: "Send a Slack message" }));
+    expect(screen.queryByLabelText("Slack user group ID (optional)")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save configuration" }));
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ actions: ["github_issue_comment"], slack_user_group_id: "S0123456789" }));
   });
   it("saves comment updates separately from comment creation", async () => {
     const user = userEvent.setup();
