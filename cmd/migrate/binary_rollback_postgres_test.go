@@ -50,14 +50,14 @@ func TestInactiveBinaryRollbackPostgres(t *testing.T) {
 		tc.name = "source revert " + tc.name
 		tc.source = true
 		if tc.name == "source revert different schema" {
-			tc.mutation = "UPDATE schema_migrations SET version=398"
+			tc.mutation = "UPDATE schema_migrations SET version=399"
 		}
 		tc.refusal = strings.ReplaceAll(tc.refusal, "392", "393")
 		if strings.Contains(tc.name, "dirty ledger") {
 			tc.refusal = "dirty migration ledger"
 		}
 		if tc.name == "source revert different schema" {
-			tc.refusal = "schema through 397 only"
+			tc.refusal = "schema through 398 only"
 		}
 		tests = append(tests, tc)
 	}
@@ -140,7 +140,7 @@ func seedInactiveRollbackCredential(t *testing.T, ctx context.Context, conn *pgx
 
 func TestInactiveBinaryRollbackRejectsUnreviewedSchema(t *testing.T) {
 	t.Parallel()
-	for _, schema := range []uint{0, 391, 394, 395, 396, 397} {
+	for _, schema := range []uint{0, 391, 394, 395, 396, 397, 398} {
 		t.Run(fmt.Sprint(schema), func(t *testing.T) {
 			t.Parallel()
 			err := verifyInactiveBinaryRollback(context.Background(), "invalid://must-not-connect", schema)

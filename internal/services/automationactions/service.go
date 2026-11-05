@@ -62,6 +62,7 @@ type Provider interface {
 	Inspect(context.Context, models.AutomationActionScope) (PullRequest, error)
 	Preflight(context.Context, models.AutomationActionScope, models.AutomationActionRequest) error
 	Send(context.Context, models.AutomationActionScope, models.AutomationAction, Payload) (Receipt, error)
+	ReconcileGitHubReview(context.Context, models.AutomationActionScope, models.AutomationAction) (Receipt, error)
 }
 type Service struct {
 	store    Store
@@ -145,7 +146,10 @@ func (s *Service) Execute(ctx context.Context, actor models.AutomationActionActo
 				return result, db.ErrAutomationActionConflict
 			}
 		}
-		if action.Status == models.AutomationActionSucceeded || action.Status == models.AutomationActionSending || action.EffectiveStatus(time.Now()) == models.AutomationActionUnknown {
+		if action.Status == models.AutomationActionUnknown && request == nil && action.Kind == models.AutomationActionGitHubReview {
+			return result, s.reconcileGitHubReview(ctx, scope, action)
+		}
+		if action.Status == models.AutomationActionSucceeded || action.Status == models.AutomationActionSending || action.Status == models.AutomationActionUnknown {
 			return result, nil
 		}
 	} else {
@@ -247,6 +251,28 @@ func (s *Service) Execute(ctx context.Context, actor models.AutomationActionActo
 	}
 	return result, nil
 }
+
+func (s *Service) reconcileGitHubReview(ctx context.Context, scope models.AutomationActionScope, action models.AutomationAction) error {
+	if !scope.Config.Allows(models.AutomationActionGitHubReview) || !strings.EqualFold(scope.Config.Repository, scope.RepositoryName) ||
+		action.PRNumber <= 0 || (scope.PRNumber != 0 && scope.PRNumber != action.PRNumber) || action.SendToken == nil {
+		return db.ErrAutomationActionUnauthorized
+	}
+	scope.PRNumber = action.PRNumber
+	readCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	receipt, err := s.provider.ReconcileGitHubReview(readCtx, scope, action)
+	cancel()
+	if err != nil || receipt.ID == "" {
+		return err
+	}
+	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer finishCancel()
+	err = s.store.Finish(finishCtx, scope.Actor.OrgID, action.ID, *action.SendToken, models.AutomationActionSucceeded, receipt.ID, receipt.URL, "")
+	if errors.Is(err, db.ErrAutomationActionBusy) {
+		return nil
+	}
+	return err
+}
+
 func actionBudget(ctx context.Context) error {
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 6*time.Second {
 		return ErrBudgetExhausted

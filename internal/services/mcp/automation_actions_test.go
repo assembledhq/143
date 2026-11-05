@@ -30,6 +30,7 @@ func TestAutomationActionCLI(t *testing.T) {
 	}{
 		{"file delivered", "file", "delivered", 0, "/api/v1/internal/automation/actions", "POST", `{"reasoning":"multi\nline"}`},
 		{"file comment update", "file", "delivered", 0, "/api/v1/internal/automation/actions", "POST", `{"operation_key":"pr:42","action_key":"comment:revision-2","kind":"github_issue_comment_update","pr_number":42,"head_sha":"0123456789abcdef0123456789abcdef01234567","text":"Updated findings","source_action_id":"12345678-1234-1234-1234-123456789abc"}`},
+		{"file inline review", "file", "delivered", 0, "/api/v1/internal/automation/actions", "POST", `{"operation_key":"pr:42","action_key":"review:head","kind":"github_pull_request_review","pr_number":42,"head_sha":"0123456789abcdef0123456789abcdef01234567","text":"One finding.","comments":[{"path":"ui/Card.tsx","line":12,"body":"Use the shared Card."}]}`},
 		{"resume partial", "resume", "partial", 1, "/api/v1/internal/automation/actions/resume", "POST", ""},
 		{"resume unknown", "resume", "needs_attention", 1, "/api/v1/internal/automation/actions/resume", "POST", ""},
 		{"status", "status", "partial", 0, "/api/v1/internal/automation/actions", "GET", ""},

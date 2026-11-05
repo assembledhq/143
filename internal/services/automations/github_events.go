@@ -60,6 +60,8 @@ type GitHubEventTriggerRequest struct {
 	BaseBranch      string
 	Path            string
 	ReviewState     string
+	// OwnAppReviewFeedback is populated only for feedback from the verified GitHub App.
+	OwnAppReviewFeedback *models.AutomationActionReviewFeedback
 	// PullRequestUpdatedAt is GitHub's pull_request.updated_at for the
 	// delivery. It orders pushes for per-target continuity (design doc 125,
 	// "Head Authority"); nil when the payload omitted it.
@@ -101,6 +103,7 @@ type GitHubEventTriggerService struct {
 
 type githubAutomationActionLookup interface {
 	ListAutomationActionCommentOwners(context.Context, uuid.UUID, uuid.UUID, int, int64, string) ([]uuid.UUID, error)
+	FindAutomationActionReviewOwner(context.Context, uuid.UUID, uuid.UUID, int, models.AutomationActionReviewFeedback) (uuid.UUID, error)
 }
 
 func (s *GitHubEventTriggerService) SetActions(store githubAutomationActionLookup) {
@@ -194,8 +197,15 @@ func (s *GitHubEventTriggerService) TriggerGitHubEvent(ctx context.Context, req 
 			commentOwners[id] = true
 		}
 	}
+	var reviewOwner uuid.UUID
+	if req.OwnAppReviewFeedback != nil && s.actions != nil {
+		reviewOwner, err = s.actions.FindAutomationActionReviewOwner(ctx, req.OrgID, req.RepositoryID, req.PullRequestNumber, *req.OwnAppReviewFeedback)
+		if err != nil {
+			return fmt.Errorf("check automation review webhook: %w", err)
+		}
+	}
 	for _, automation := range automations {
-		if commentOwners[automation.ID] {
+		if commentOwners[automation.ID] || (reviewOwner != uuid.Nil && reviewOwner == automation.ID) {
 			continue
 		}
 		filters, err := decodeGitHubEventFilters(automation)

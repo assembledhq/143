@@ -14,6 +14,7 @@ const kinds = [
   ["github_team_review", "Request a GitHub team review"],
   ["github_issue_comment", "Comment on a GitHub PR"],
   ["github_issue_comment_update", "Update this automation’s GitHub PR comments"],
+  ["github_pull_request_review", "Post an advisory GitHub PR review with inline comments"],
   ["notion_tracking_row", "Create a Notion page"],
   ["slack_notification", "Send a Slack message"],
 ] as const;
