@@ -185,6 +185,64 @@ func TestProviderSlackConfiguredGroup(t *testing.T) {
 	}
 }
 
+func TestProviderSlackPRReviewLinks(t *testing.T) {
+	t.Parallel()
+	const reviewURL = "https://github.com/owner/repo/pull/42#pullrequestreview-123"
+	const markdownLink = "[PR #42](" + reviewURL + ")"
+	const renderedLink = "<" + reviewURL + "|PR #42>"
+	tests := []struct {
+		name, text, want string
+	}{
+		{name: "review link", text: markdownLink, want: renderedLink},
+		{
+			name: "repository case",
+			text: "[PR #42](https://github.com/OWNER/Repo/pull/42#pullrequestreview-123)",
+			want: "<https://github.com/OWNER/Repo/pull/42#pullrequestreview-123|PR #42>",
+		},
+		{
+			name: "format and mentions",
+			text: "*:large_yellow_circle: Design review · Medium · 1 finding*\n" + markdownLink +
+				" — title\n*Fix* Use `Card`. <!here> <@U123> <!subteam^S9876543210> &",
+			want: "*:large_yellow_circle: Design review · Medium · 1 finding*\n" + renderedLink +
+				" — title\n*Fix* Use `Card`. &lt;!here&gt; &lt;@U123&gt; &lt;!subteam^S9876543210&gt; &amp;",
+		},
+		{name: "different repository", text: "[PR #42](https://github.com/other/repo/pull/42#pullrequestreview-123)"},
+		{name: "different PR", text: "[PR #41](" + reviewURL + ")"},
+		{name: "other link label", text: "[Review](" + reviewURL + ")"},
+		{name: "nested label", text: "[PR #42 [review]](" + reviewURL + ")"},
+		{name: "leading zero PR", text: "[PR #042](https://github.com/owner/repo/pull/042#pullrequestreview-123)"},
+		{name: "zero review", text: "[PR #42](https://github.com/owner/repo/pull/42#pullrequestreview-0)"},
+		{name: "leading zero review", text: "[PR #42](https://github.com/owner/repo/pull/42#pullrequestreview-0123)"},
+		{name: "query", text: "[PR #42](https://github.com/owner/repo/pull/42?x=1#pullrequestreview-123)"},
+		{name: "userinfo", text: "[PR #42](https://user@github.com/owner/repo/pull/42#pullrequestreview-123)"},
+		{name: "port", text: "[PR #42](https://github.com:443/owner/repo/pull/42#pullrequestreview-123)"},
+		{name: "other host", text: "[PR #42](https://github.com.evil.test/owner/repo/pull/42#pullrequestreview-123)"},
+		{name: "http", text: "[PR #42](http://github.com/owner/repo/pull/42#pullrequestreview-123)"},
+		{name: "encoded path", text: "[PR #42](https://github.com/owner/%72epo/pull/42#pullrequestreview-123)"},
+		{name: "control character", text: "[PR #42](https://github.com/owner/repo/pull/42#pullrequestreview-123\n)"},
+		{name: "Slack delimiter", text: "[PR #42](https://github.com/owner/repo/pull/42#pullrequestreview-123|<!here>)", want: "[PR #42](https://github.com/owner/repo/pull/42#pullrequestreview-123|&lt;!here&gt;)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			scope := providerScope()
+			scope.Config.SlackUserGroupID = "S0123456789"
+			slack := &testSlack{}
+			provider := NewProviders(testTokens{}, testCredentials{}, slack)
+			payload := Payload{Request: models.AutomationActionRequest{Text: tt.text}}
+			receipt, err := provider.Send(context.Background(), scope, models.AutomationAction{Kind: models.AutomationActionSlack}, payload)
+			require.NoError(t, err, "render links without changing delivery behavior")
+			want := tt.want
+			if want == "" {
+				want = tt.text
+			}
+			require.Equal(t, "<!subteam^S0123456789> "+want, slack.text, "only the scoped PR review link receives native Slack markup")
+			require.Equal(t, scope.Config.SlackChannelID, slack.channel, "retain the configured channel")
+			require.Equal(t, scope.Config.SlackChannelID+":123.456", receipt.ID, "retain the original receipt identity")
+		})
+	}
+}
+
 func TestProvidersFailureClassification(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
