@@ -74,7 +74,7 @@ func TestCodeReviewStartupCaptureHandoffPostgres(t *testing.T) {
 				}
 				return nil
 			}}}
-			assessment, captured, err := prepareCodeReviewPreflight(ctx, f.stores, services, zerolog.Nop(), f.job, metadata)
+			assessment, captured, _, err := prepareCodeReviewPreflight(ctx, f.stores, services, zerolog.Nop(), f.job, metadata)
 			if tt.change != "" {
 				var changed *fullAssessmentQueuedIdentityChanged
 				require.ErrorAs(t, err, &changed, "authoritative queued identity drift must retain the existing replacement handoff")
@@ -104,7 +104,7 @@ func TestCodeReviewStartupCaptureHandoffPostgres(t *testing.T) {
 			require.Equal(t, 0, syncs, "a complete fresh capture must suppress exactly one duplicate ordinary startup refresh")
 			expectedRequest := codereviewsvc.AssessmentInputCaptureRequest{OrgID: f.job.OrgID, RepositoryID: f.job.RepositoryID, PullRequestID: f.job.PullRequestID, SessionID: f.job.SessionID, AssessmentID: assessment.ID, RequestContext: f.job.RequestContext}
 			require.Equal(t, []codereviewsvc.AssessmentInputCaptureRequest{expectedRequest}, capture.requests, "handoff must preserve the tenant, PR, session and immutable capture identity")
-			retained, secondCapture, err := prepareCodeReviewPreflight(ctx, f.stores, services, zerolog.Nop(), f.job, metadata)
+			retained, secondCapture, _, err := prepareCodeReviewPreflight(ctx, f.stores, services, zerolog.Nop(), f.job, metadata)
 			require.NoError(t, err, "a later controller attempt should resume the persisted assessment")
 			require.Equal(t, assessment.ID, retained.ID, "retry must retain the original assessment")
 			require.Nil(t, secondCapture, "startup capture authority must not survive across attempts")
