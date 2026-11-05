@@ -6107,6 +6107,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
+	execCtx = WithCodeReviewExecution(execCtx, session, threadID)
 	var attachers []InteractiveHandleAttacher
 	if o.cancels != nil {
 		if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
