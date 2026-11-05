@@ -28,14 +28,14 @@ func readBuildRunnerWorkflow(t *testing.T, path string) buildRunnerWorkflow {
 	return workflow
 }
 
-func TestDeployWorkflowKeepsRolloutOnGitHub(t *testing.T) {
+func TestDeployWorkflowUsesGitHubRunners(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		job      string
 		expected string
 	}{
-		{job: "build", expected: "blacksmith-4vcpu-ubuntu-2404"},
+		{job: "build", expected: "ubuntu-latest"},
 		{job: "predeploy-latest", expected: "ubuntu-latest"},
 		{job: "deploy", expected: "ubuntu-latest"},
 	}
@@ -45,7 +45,7 @@ func TestDeployWorkflowKeepsRolloutOnGitHub(t *testing.T) {
 			workflow := readBuildRunnerWorkflow(t, "../.github/workflows/deploy.yml")
 			job, ok := workflow.Jobs[tt.job]
 			require.True(t, ok, "deployment runner boundaries must include each expected job")
-			require.Equal(t, tt.expected, job.RunsOn, "only image builds should use Blacksmith; rollout jobs must stay on GitHub runners")
+			require.Equal(t, tt.expected, job.RunsOn, "all deployment workflow jobs should use standard GitHub runners")
 		})
 	}
 }

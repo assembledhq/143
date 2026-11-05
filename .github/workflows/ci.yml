@@ -126,7 +126,7 @@ jobs:
     name: Backend Test (${{ matrix.suite }})
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ matrix.suite == 'unit' && 'ubuntu-latest' || 'blacksmith-4vcpu-ubuntu-2404' }}
     strategy:
       fail-fast: false
       matrix:
@@ -663,7 +663,7 @@ jobs:
     name: Frontend Lint & Typecheck
     needs: changes
     if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
@@ -748,7 +748,7 @@ jobs:
     # required-checks treats a skipped job as passing, so a plain job-level
     # condition is enough — matching every other conditional job here.
     if: needs.changes.outputs.session_transcript_e2e == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
@@ -786,7 +786,7 @@ jobs:
     name: Migration Safety
     needs: changes
     if: needs.changes.outputs.migrations == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     env:
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
     steps:
@@ -877,7 +877,7 @@ jobs:
   # Config tests read repository-wide inputs; run them for every PR and push.
   deploy-config-test:
     name: Deploy Config Test
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -892,7 +892,7 @@ jobs:
     name: Deploy Scripts Test
     needs: changes
     if: needs.changes.outputs.deploy == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - name: Run deploy shell tests
