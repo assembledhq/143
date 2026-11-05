@@ -128,6 +128,11 @@ func (p *Providers) Inspect(ctx context.Context, scope models.AutomationActionSc
 	if err != nil {
 		return result, err
 	}
+	return p.inspectPullRequest(ctx, scope, token)
+}
+
+func (p *Providers) inspectPullRequest(ctx context.Context, scope models.AutomationActionScope, token string) (PullRequest, error) {
+	var result PullRequest
 	var pr struct {
 		Title string `json:"title"`
 		URL   string `json:"html_url"`
@@ -142,7 +147,7 @@ func (p *Providers) Inspect(ctx context.Context, scope models.AutomationActionSc
 			Name string `json:"name"`
 		} `json:"labels"`
 	}
-	if err = p.request(ctx, http.MethodGet, p.githubPath(scope, "pulls"), token, "", nil, &pr); err != nil {
+	if err := p.request(ctx, http.MethodGet, p.githubPath(scope, "pulls"), token, "", nil, &pr); err != nil {
 		return result, err
 	}
 	if strings.TrimSpace(pr.Title) == "" || len(pr.Title) > 4096 || strings.TrimSpace(pr.User.Login) == "" || len(pr.User.Login) > 256 {
@@ -210,9 +215,19 @@ func (p *Providers) Send(ctx context.Context, scope models.AutomationActionScope
 		if p.slack == nil {
 			return Receipt{}, &SendFailure{Code: "SLACK_NOT_CONNECTED", Definitive: true}
 		}
+		authorMention, err := p.slackPRAuthorMention(ctx, scope)
+		if err != nil {
+			return Receipt{}, err
+		}
 		text := renderSlackActionText(payload.Request.Text, scope.RepositoryName)
+		if authorMention != "" {
+			text = authorMention + " " + text
+		}
 		if scope.Config.SlackUserGroupID != "" {
 			text = "<!subteam^" + scope.Config.SlackUserGroupID + "> " + text
+		}
+		if err := ctx.Err(); err != nil {
+			return Receipt{}, &SendFailure{Code: "SLACK_SEND_CANCELED", Definitive: true, Err: err}
 		}
 		posted, err := p.slack.PostMessage(ctx, token, scope.Config.SlackChannelID, "", text)
 		if errors.Is(err, ingestion.ErrSlackRateLimited) {

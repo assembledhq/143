@@ -35,10 +35,12 @@ func (testCredentials) Get(_ context.Context, _ uuid.UUID, provider models.Provi
 type testSlack struct {
 	channel, text string
 	err           error
+	calls         int
 }
 
 func (s *testSlack) PostMessage(_ context.Context, token, channel, thread, text string) (ingestion.SlackPostedMessage, error) {
 	s.channel, s.text = channel, text
+	s.calls++
 	return ingestion.SlackPostedMessage{Channel: channel, Timestamp: "123.456"}, s.err
 }
 func providerScope() models.AutomationActionScope {

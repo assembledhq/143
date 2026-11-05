@@ -29,6 +29,7 @@ type ActionConfig = {
   notion_data_source_id: string;
   slack_channel_id: string;
   slack_user_group_id: string;
+  slack_pr_author_map_path: string;
   notion_properties: Record<string, PropertyType>;
 };
 const text = (v: unknown) => typeof v === "string" ? v : "";
@@ -40,6 +41,7 @@ function readConfig(raw: Record<string, unknown>): ActionConfig {
     repository: text(raw.repository), label: text(raw.label), team: text(raw.team),
     notion_data_source_id: text(raw.notion_data_source_id), slack_channel_id: text(raw.slack_channel_id),
     slack_user_group_id: text(raw.slack_user_group_id),
+    slack_pr_author_map_path: text(raw.slack_pr_author_map_path),
     notion_properties: props && typeof props === "object" && !Array.isArray(props) ? props as Record<string, PropertyType> : {},
   };
 }
@@ -51,6 +53,15 @@ export function actionConfigError(raw: Record<string, unknown>): string | null {
   if (c.actions.includes("github_team_review") && !/^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$/.test(c.team)) return "Enter a GitHub team slug.";
   if (c.actions.includes("slack_notification") && !/^[CG][A-Z0-9]{8,31}$/.test(c.slack_channel_id)) return "Enter a Slack channel ID.";
   if (c.actions.includes("slack_notification") && c.slack_user_group_id && !/^S[A-Z0-9]{8,31}$/.test(c.slack_user_group_id)) return "Enter a Slack user group ID.";
+  if (c.actions.includes("slack_notification") && c.slack_pr_author_map_path) {
+    const path = c.slack_pr_author_map_path;
+    if (
+      path.length > 256 ||
+      !/^[A-Za-z0-9_./-]+$/.test(path) ||
+      !path.endsWith(".json") ||
+      path.split("/").some((part) => part === "" || part === "." || part === "..")
+    ) return "Enter a relative JSON mapping file path.";
+  }
   if (c.actions.includes("notion_tracking_row")) {
     const id = c.notion_data_source_id.replaceAll("-", "");
     if (!/^[0-9a-f]{32}$/i.test(id) || /^0+$/.test(id)) return "Enter a Notion data source UUID.";
@@ -69,19 +80,21 @@ export function AutomationActionsConfig({ config, disabled, onSave }: {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(() => readConfig(config));
   const [properties, setProperties] = useState(() => Object.entries(readConfig(config).notion_properties));
-  const { slack_user_group_id, ...destinations } = draft;
+  const { slack_user_group_id, slack_pr_author_map_path, ...destinations } = draft;
   const configured = {
     ...destinations,
     ...(slack_user_group_id ? { slack_user_group_id } : {}),
+    ...(slack_pr_author_map_path ? { slack_pr_author_map_path } : {}),
     notion_properties: Object.fromEntries(properties),
   };
   const duplicateProperty = new Set(properties.map(([name]) => name)).size !== properties.length;
   const error = duplicateProperty ? "Notion property names must be distinct." : actionConfigError(configured);
   const has = (kind: Kind) => draft.actions.includes(kind);
-  const field = (key: "repository" | "label" | "team" | "notion_data_source_id" | "slack_channel_id" | "slack_user_group_id", label: string, placeholder: string) => (
+  const field = (key: "repository" | "label" | "team" | "notion_data_source_id" | "slack_channel_id" | "slack_user_group_id" | "slack_pr_author_map_path", label: string, placeholder: string, description?: string) => (
     <div className="space-y-1" key={key}>
       <Label htmlFor={`${id}-${key}`}>{label}</Label>
-      <Input id={`${id}-${key}`} value={draft[key]} placeholder={placeholder} onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} />
+      <Input id={`${id}-${key}`} value={draft[key]} placeholder={placeholder} aria-describedby={description ? `${id}-${key}-description` : undefined} onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} />
+      {description && <p id={`${id}-${key}-description`} className="text-xs text-muted-foreground">{description}</p>}
     </div>
   );
   return (
@@ -101,6 +114,7 @@ export function AutomationActionsConfig({ config, disabled, onSave }: {
           {has("github_team_review") && field("team", "GitHub team slug", "reviewers")}
           {has("slack_notification") && field("slack_channel_id", "Slack channel ID", "C0123456789")}
           {has("slack_notification") && field("slack_user_group_id", "Slack user group ID (optional)", "S0123456789")}
+          {has("slack_notification") && field("slack_pr_author_map_path", "PR author mapping file (optional)", "config/team.json", "In continuous PR sessions, tags the PR author using github_name and slack_id values from this JSON file on the repository’s default branch.")}
           {has("notion_tracking_row") && <>
             {field("notion_data_source_id", "Notion data source ID", "UUID from Manage data sources")}
             <p className="text-sm text-muted-foreground">Allow specific property names and types. Select values must already exist in Notion.</p>
