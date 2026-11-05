@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-type codeReviewGuidanceRecordStore interface {
+type codeReviewPromptCheckpointStore interface {
 	GetPromptRecordByKey(context.Context, uuid.UUID, string) (models.CodeReviewPromptRecord, error)
 	CreatePromptRecordIfAbsent(context.Context, *models.CodeReviewPromptRecord) (bool, error)
 }
@@ -41,7 +41,7 @@ func loadCodeReviewRepositoryGuidance(ctx context.Context, stores *Stores, servi
 
 // Non-reusable full reviews still need one immutable capture shared by every
 // reviewer, fallback reviewer, and synthesis attempt across controller retries.
-func captureCodeReviewGuidanceCheckpoint(ctx context.Context, records codeReviewGuidanceRecordStore, capturer codereviewsvc.RepositoryGuidanceCapturer, job runCodeReviewPayload, reviewersStarted bool) (*models.CodeReviewRepositoryGuidance, error) {
+func captureCodeReviewGuidanceCheckpoint(ctx context.Context, records codeReviewPromptCheckpointStore, capturer codereviewsvc.RepositoryGuidanceCapturer, job runCodeReviewPayload, reviewersStarted bool) (*models.CodeReviewRepositoryGuidance, error) {
 	key := codeReviewPromptRecordRoot(models.CodeReviewSessionMetadata{}, job) + "/repository-guidance"
 	record, err := records.GetPromptRecordByKey(ctx, job.OrgID, key)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {

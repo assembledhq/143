@@ -158,7 +158,7 @@ func TestCodeReviewCapturedGuidancePrompts(t *testing.T) {
 			require.Equal(t, tt.guidance, guidance, "assessment guidance must remain pinned")
 			cfg := models.DefaultCodeReviewPolicyConfig()
 			cfg.ReviewInstructions = "Apply organization conventions."
-			reviewer := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{}, guidance)
+			reviewer := codeReviewReviewerPrompt(agentsvc.CodeReviewInputTarget{}, models.PullRequest{}, cfg, nil, models.CodeReviewVisualEvidenceSnapshot{}, guidance, codeReviewPullRequestContext{})
 			synthesis := codeReviewOrchestratorPrompt(runCodeReviewPayload{RepositoryGuidance: guidance}, models.PullRequest{}, nil, cfg, 1, "", nil, nil, nil, models.CodeReviewVisualEvidenceSnapshot{})
 			if guidance != nil {
 				require.Less(t, strings.Index(synthesis, "<repository_review_guidance>"), strings.Index(synthesis, "STRICT OUTPUT CONTRACT"), "machine-readable output contract must follow repository guidance")

@@ -9,6 +9,7 @@ import (
 
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/models"
+	ghservice "github.com/assembledhq/143/internal/services/github"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
@@ -49,6 +50,11 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	setWorkerSessionColumn(sessionRow, "revision_context", revision)
 	mock.ExpectQuery("(?s)SELECT .*FROM sessions").WithArgs(pgx.NamedArgs{"id": sessionID, "org_id": orgID}).
 		WillReturnRows(pgxmock.NewRows(workerSessionColumns).AddRow(sessionRow...))
+	contextKey := codeReviewPromptRecordRoot(models.CodeReviewSessionMetadata{}, job) + "/pull-request-context"
+	mock.ExpectQuery("(?s)SELECT .*FROM code_review_prompt_records").
+		WithArgs(pgx.NamedArgs{"org_id": orgID, "record_key": contextKey}).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "org_id", "session_id", "record_key", "role", "agent_provider", "content", "metadata", "created_at"}).
+			AddRow(uuid.New(), orgID, sessionID, contextKey, "reviewer", "", "{\"title\":\"Original intent\",\"description\":\"Requires the compatibility layer.\"}", json.RawMessage("{}"), now))
 	recordKey := "review-prompts/reviewer-03-claude_code"
 	var capturedPrompt string
 	mock.ExpectQuery("INSERT INTO code_review_prompt_records").
@@ -86,9 +92,10 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 		WillReturnRows(newCodeReviewAgentResultRows().AddRow(resultID, orgID, sessionID, "claude_code", stringPtr(models.DefaultClaudeCodeModel),
 			models.CodeReviewAgentRoleReviewer, models.CodeReviewAgentResultStatusQueued, nil, json.RawMessage(`{}`), now))
 
-	err = ensureCodeReviewReviewerThreads(context.Background(), stores, nil, zerolog.Nop(), job, models.PullRequest{}, policy, metadata, nil, models.CodeReviewVisualEvidenceSnapshot{})
+	err = ensureCodeReviewReviewerThreads(context.Background(), stores, nil, zerolog.Nop(), job, models.PullRequest{}, policy, metadata, nil, models.CodeReviewVisualEvidenceSnapshot{}, nil, ghservice.CodeReviewPullRequestSnapshot{})
 	require.NoError(t, err, "a fallback already dispatched before result persistence should recover without sending another turn")
 	require.Contains(t, capturedPrompt, job.HeadSHA, "fallback review must use the same captured PR head")
+	require.Contains(t, capturedPrompt, "Requires the compatibility layer.", "fallback prompt must include the original captured PR description")
 	require.NoError(t, mock.ExpectationsWereMet(), "recovery should create only the missing attempt and preserve the completed peer")
 
 	fallback := models.CodeReviewAgentResult{ID: resultID, OrgID: orgID, SessionID: sessionID, AgentProvider: "claude_code", AgentModel: stringPtr(models.DefaultClaudeCodeModel),
@@ -126,7 +133,7 @@ func TestCodeReviewReviewerFallbackRecoversAndCompletes(t *testing.T) {
 	require.Equal(t, originalResults, finalResults[:2], "fallback must preserve the original reports and failure history")
 	mock.ExpectQuery("(?s)SELECT .*FROM code_review_agent_results").WithArgs(pgx.NamedArgs{"org_id": orgID, "session_id": sessionID}).
 		WillReturnRows(codeReviewRankedResultRowsForTest(orgID, sessionID, finalResults))
-	err = ensureCodeReviewReviewerThreads(context.Background(), stores, nil, zerolog.Nop(), job, models.PullRequest{}, policy, metadata, nil, models.CodeReviewVisualEvidenceSnapshot{})
+	err = ensureCodeReviewReviewerThreads(context.Background(), stores, nil, zerolog.Nop(), job, models.PullRequest{}, policy, metadata, nil, models.CodeReviewVisualEvidenceSnapshot{}, nil, ghservice.CodeReviewPullRequestSnapshot{})
 	require.NoError(t, err, "another worker poll should leave the unused fallback untouched")
 	require.NoError(t, mock.ExpectationsWereMet(), "a satisfied reviewer count should cause no new prompt, result, or thread writes")
 }

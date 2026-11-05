@@ -280,6 +280,9 @@ type CodeReviewReviewerPromptData struct {
 	PullNumber              int
 	PullRequestURL          string
 	Title                   string
+	PRBody                  string
+	PRBodyOmitted           bool
+	PRContextUnavailable    bool
 	Author                  string
 	BaseSHA                 string
 	HeadSHA                 string
@@ -327,6 +330,8 @@ type CodeReviewDescriptionRequirementPromptData struct {
 }
 
 func CodeReviewReviewerPrompt(data CodeReviewReviewerPromptData) string {
+	data.Title = sanitizeUntrustedXML(data.Title)
+	data.PRBody = sanitizeUntrustedXML(data.PRBody)
 	data.VisualEvidence = sanitizeCodeReviewVisualEvidence(data.VisualEvidence)
 	return render("code_review_reviewer.template", data)
 }

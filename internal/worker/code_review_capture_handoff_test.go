@@ -95,7 +95,7 @@ func TestCodeReviewPreflightCaptureFallback(t *testing.T) {
 			if tt.missing {
 				services.CodeReviewInputCapture = nil
 			}
-			assessment, captured, err := prepareCodeReviewPreflight(context.Background(), &Stores{CodeReviewAssessments: db.NewCodeReviewAssessmentStore(mock)}, services, zerolog.Nop(), job, models.CodeReviewSessionMetadata{})
+			assessment, captured, _, err := prepareCodeReviewPreflight(context.Background(), &Stores{CodeReviewAssessments: db.NewCodeReviewAssessmentStore(mock)}, services, zerolog.Nop(), job, models.CodeReviewSessionMetadata{})
 			if tt.want == nil {
 				require.NoError(t, err, "fallback should preserve a usable legacy preflight")
 			} else {
@@ -137,7 +137,7 @@ func TestCodeReviewPreflightRejectsUnownedScheduledExecution(t *testing.T) {
 			capture := &captureHandoffProbe{}
 			syncs := 0
 			services := &Services{CodeReviewAssessmentsEnabled: true, CodeReviewInputCapture: capture, CodeReviewLifecycle: validator, PR: &stubPRService{syncPullRequestStateFn: func(context.Context, uuid.UUID, uuid.UUID) error { syncs++; return nil }}}
-			assessment, captured, err := prepareCodeReviewPreflight(context.Background(), &Stores{}, services, zerolog.Nop(), job, models.CodeReviewSessionMetadata{})
+			assessment, captured, _, err := prepareCodeReviewPreflight(context.Background(), &Stores{}, services, zerolog.Nop(), job, models.CodeReviewSessionMetadata{})
 			require.ErrorIs(t, err, tt.want, "invalid admission must retain its original scheduling outcome")
 			require.Nil(t, assessment, "an unowned scheduled execution must not create an assessment")
 			require.Nil(t, captured, "an unowned scheduled execution must not acquire capture authority")
@@ -204,7 +204,7 @@ func TestCodeReviewPreflightLeavesWorkspacePreparationPhase(t *testing.T) {
 				return nil
 			}}}
 			stores := &Stores{CodeReviews: db.NewCodeReviewStore(mock), CodeReviewAssessments: db.NewCodeReviewAssessmentStore(mock)}
-			_, _, err = prepareCodeReviewPreflight(context.Background(), stores, services, zerolog.Nop(), job, models.CodeReviewSessionMetadata{Phase: tt.phase})
+			_, _, _, err = prepareCodeReviewPreflight(context.Background(), stores, services, zerolog.Nop(), job, models.CodeReviewSessionMetadata{Phase: tt.phase})
 			if tt.want != nil {
 				require.ErrorIs(t, err, tt.want, "ownership and persistence errors must prevent provider work")
 				require.Equal(t, 0, syncs, "failed transition must not start GitHub synchronization")

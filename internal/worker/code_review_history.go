@@ -23,7 +23,7 @@ const codeReviewHistoryInputsChangedMessage = "review history inputs changed bef
 var errCodeReviewHistoryNotRead = errors.New("requested review history was not consulted")
 
 type codeReviewHistoryPromptStore interface {
-	codeReviewGuidanceRecordStore
+	codeReviewPromptCheckpointStore
 	ListPriorRounds(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, *uuid.UUID, int) ([]db.CodeReviewHistoryRound, error)
 }
 

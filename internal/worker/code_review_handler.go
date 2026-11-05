@@ -305,7 +305,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 				avoidReprepareAfterPreflight = ready.Ready
 			}
 		}
-		assessment, capturedAssessment, err := prepareCodeReviewPreflight(ctx, stores, services, logger, job, metadata)
+		assessment, capturedAssessment, startupSnapshot, err := prepareCodeReviewPreflight(ctx, stores, services, logger, job, metadata)
 		if err != nil {
 			if errors.Is(err, errCodeReviewSchedulingSuperseded) {
 				return nil
@@ -440,7 +440,7 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 			if _, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseReviewing); err != nil {
 				return fmt.Errorf("set code review reviewer phase: %w", err)
 			}
-			if err := ensureCodeReviewReviewerThreads(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles, visualEvidence); err != nil {
+			if err := ensureCodeReviewReviewerThreads(ctx, stores, services, logger, job, pr, policy, metadata, changedFiles, visualEvidence, assessment, startupSnapshot); err != nil {
 				return err
 			}
 			if err := harvestCodeReviewReviewerResults(ctx, stores, services, logger, job, policy, metadata, changedFiles); err != nil {
@@ -1049,16 +1049,16 @@ type codeReviewExecutionValidator interface {
 // refresh as the startup refresh. Existing assessments and legacy or incomplete
 // captures still take the ordinary live-sync path; nothing is cached across
 // controller attempts or carried into the final publication check.
-func prepareCodeReviewPreflight(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata) (assessment *models.CodeReviewAssessment, captured *codereviewsvc.AssessmentInputCaptureResult, returnErr error) {
+func prepareCodeReviewPreflight(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, metadata models.CodeReviewSessionMetadata) (assessment *models.CodeReviewAssessment, captured *codereviewsvc.AssessmentInputCaptureResult, snapshot ghservice.CodeReviewPullRequestSnapshot, returnErr error) {
 	stage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "github_preflight")
 	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
 	if err := validateCodeReviewScheduledExecution(ctx, services, job); err != nil {
-		return nil, nil, err
+		return nil, nil, snapshot, err
 	}
 	if metadata.Phase != nil && *metadata.Phase == models.CodeReviewPhasePreparingWorkspace {
 		updated, err := stores.CodeReviews.SetOperationalPhase(ctx, job.OrgID, job.SessionID, models.CodeReviewPhaseSyncingGitHub)
 		if err != nil {
-			return nil, nil, fmt.Errorf("set code review GitHub preflight phase: %w", err)
+			return nil, nil, snapshot, fmt.Errorf("set code review GitHub preflight phase: %w", err)
 		}
 		metadata = updated
 	}
@@ -1069,29 +1069,34 @@ func prepareCodeReviewPreflight(ctx context.Context, stores *Stores, services *S
 			// also runs under the publication lock. Preserve the ordinary startup
 			// sync's self-healing transition when this capture is ineligible.
 			if syncErr := refreshCodeReviewPullRequestState(ctx, services, logger, job); syncErr != nil {
-				return nil, nil, syncErr
+				return nil, nil, snapshot, syncErr
 			}
 		}
 		if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
-			return nil, nil, codeReviewMergeabilityRetry(err)
+			return nil, nil, snapshot, codeReviewMergeabilityRetry(err)
 		}
-		return assessment, captured, fmt.Errorf("capture full code review assessment: %w", err)
+		return assessment, captured, snapshot, fmt.Errorf("capture full code review assessment: %w", err)
 	}
 	if captured == nil {
-		if err := refreshCodeReviewPullRequestState(ctx, services, logger, job); err != nil {
-			return nil, nil, err
+		if assessment == nil {
+			snapshot, err = refreshCodeReviewPullRequestStateWithSnapshot(ctx, services, logger, job, true)
+		} else {
+			err = refreshCodeReviewPullRequestState(ctx, services, logger, job)
+		}
+		if err != nil {
+			return nil, nil, snapshot, err
 		}
 		if assessment != nil {
 			// Ordinary sync can reconcile a closed PR or retire its review. Keep
 			// the same post-sync assessment state that the legacy ordering read.
 			current, err := stores.CodeReviewAssessments.GetBySessionID(ctx, job.OrgID, job.SessionID)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, snapshot, err
 			}
 			assessment = &current
 		}
 	}
-	return assessment, captured, nil
+	return assessment, captured, snapshot, nil
 }
 
 func syncCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) (returnErr error) {
@@ -1129,25 +1134,45 @@ func validateCodeReviewScheduledExecution(ctx context.Context, services *Service
 }
 
 func refreshCodeReviewPullRequestState(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload) error {
+	_, err := refreshCodeReviewPullRequestStateWithSnapshot(ctx, services, logger, job, false)
+	return err
+}
+
+func refreshCodeReviewPullRequestStateWithSnapshot(ctx context.Context, services *Services, logger zerolog.Logger, job runCodeReviewPayload, capture bool) (ghservice.CodeReviewPullRequestSnapshot, error) {
+	var snapshot ghservice.CodeReviewPullRequestSnapshot
 	if services == nil || services.PR == nil {
-		return nil
+		return snapshot, nil
 	}
 	syncCtx := ghservice.WithPullRequestSyncReason(ctx, ghservice.PullRequestSyncReasonCodeReview)
-	if err := services.PR.SyncPullRequestState(syncCtx, job.OrgID, job.PullRequestID); err != nil {
+	var err error
+	if pr, ok := services.PR.(interface {
+		SyncCodeReviewPullRequestState(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshot, error)
+	}); capture && ok {
+		snapshot, err = pr.SyncCodeReviewPullRequestState(syncCtx, job.OrgID, job.PullRequestID)
+		if err == nil && strings.EqualFold(strings.TrimSpace(snapshot.State), "closed") {
+			// Capture suppresses closed-PR repair because it also runs during
+			// publication. Preserve ordinary startup reconciliation here.
+			snapshot = ghservice.CodeReviewPullRequestSnapshot{}
+			err = services.PR.SyncPullRequestState(syncCtx, job.OrgID, job.PullRequestID)
+		}
+	} else {
+		err = services.PR.SyncPullRequestState(syncCtx, job.OrgID, job.PullRequestID)
+	}
+	if err != nil {
 		if errors.Is(err, ghservice.ErrPullRequestMergeabilityPending) {
-			return codeReviewMergeabilityRetry(err)
+			return snapshot, codeReviewMergeabilityRetry(err)
 		}
 		if errors.Is(err, ghservice.ErrPullRequestRepositoryDisconnected) {
 			logger.Info().
 				Str("org_id", job.OrgID.String()).
 				Str("pull_request_id", job.PullRequestID.String()).
 				Msg("skipping code review PR state sync for disconnected repository")
-			return nil
+			return snapshot, nil
 		}
 		wrapped := fmt.Errorf("sync code review pull request state: %w", err)
-		return classifyGitHubJobError(wrapped, job.SessionID.String())
+		return snapshot, classifyGitHubJobError(wrapped, job.SessionID.String())
 	}
-	return nil
+	return snapshot, nil
 }
 
 func codeReviewMergeabilityRetry(err error) error {
@@ -1420,7 +1445,7 @@ func (r *codeReviewOrchestratorStructuredResult) UnmarshalJSON(data []byte) erro
 	return nil
 }
 
-func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot) (returnErr error) {
+func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, services *Services, logger zerolog.Logger, job runCodeReviewPayload, pr models.PullRequest, policy models.CodeReviewPolicyRecord, metadata models.CodeReviewSessionMetadata, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot, assessment *models.CodeReviewAssessment, startupSnapshot ghservice.CodeReviewPullRequestSnapshot) (returnErr error) {
 	stage := observability.BeginStage(true, codeReviewTimingLogger(ctx, logger, job), "reviewer_dispatch_check")
 	defer func() { stage.End(codeReviewStageOutcome(ctx, returnErr)) }()
 	results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
@@ -1443,6 +1468,7 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 		return err
 	}
 	var target *agentsvc.CodeReviewInputTarget
+	var promptText string
 	for _, selection := range selections {
 		idx := selection.Index
 		agentType := selection.AgentType
@@ -1478,8 +1504,12 @@ func ensureCodeReviewReviewerThreads(ctx context.Context, stores *Stores, servic
 				return fmt.Errorf("reviewer job does not match captured review input session")
 			}
 			target = &captured
+			prContext, err := loadCodeReviewPullRequestContext(ctx, stores.CodeReviews, job, *target, startupSnapshot, assessment, results)
+			if err != nil {
+				return fmt.Errorf("load reviewer pull request context: %w", err)
+			}
+			promptText = codeReviewReviewerPrompt(*target, pr, cfg, changedFiles, visualEvidence, job.RepositoryGuidance, prContext)
 		}
-		promptText := codeReviewReviewerPrompt(*target, pr, cfg, changedFiles, visualEvidence, job.RepositoryGuidance)
 		recordKey := fmt.Sprintf("%s/reviewer-%02d-%s", rootKey, idx+1, agentType)
 		recordMetadata, err := json.Marshal(map[string]any{
 			"reviewer_key":         key,
@@ -2014,9 +2044,9 @@ func revertCodeReviewReadOnlyThread(ctx context.Context, stores *Stores, service
 	return true
 }
 
-func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot, guidance *models.CodeReviewRepositoryGuidance) string {
+func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.PullRequest, cfg models.CodeReviewPolicyConfig, changedFiles []codereviewsvc.PullRequestFile, visualEvidence models.CodeReviewVisualEvidenceSnapshot, guidance *models.CodeReviewRepositoryGuidance, prContext codeReviewPullRequestContext) string {
 	cfg = models.ResolveCodeReviewPolicyConfig(&cfg)
-	return strings.TrimSpace(prompts.CodeReviewReviewerPrompt(prompts.CodeReviewReviewerPromptData{
+	data := prompts.CodeReviewReviewerPromptData{
 		RepositoryGuidance:    guidance,
 		ManifestPath:          target.ManifestPath,
 		DiffPath:              target.DiffPath,
@@ -2024,12 +2054,27 @@ func codeReviewReviewerPrompt(target agentsvc.CodeReviewInputTarget, pr models.P
 		Repository:            target.Repository,
 		PullNumber:            target.PullRequestNumber,
 		PullRequestURL:        pr.GitHubPRURL,
+		Title:                 prContext.Title,
+		PRBody:                prContext.Description,
+		PRContextUnavailable:  prContext.Unavailable,
 		BaseSHA:               target.BaseSHA,
 		HeadSHA:               target.HeadSHA,
 		ChangedFiles:          codeReviewChangedPaths(changedFiles),
 		VisualEvidence:        codeReviewVisualEvidenceForPrompt(visualEvidence),
 		VisualEvidenceOmitted: visualEvidence.OmittedSourceCount,
-	}))
+	}
+	prompt := strings.TrimSpace(prompts.CodeReviewReviewerPrompt(data))
+	if len(prompt) > threadsvc.MaxThreadMessageBytes && data.PRBody != "" {
+		data.PRBody = ""
+		data.PRBodyOmitted = true
+		prompt = strings.TrimSpace(prompts.CodeReviewReviewerPrompt(data))
+	}
+	if len(prompt) > threadsvc.MaxThreadMessageBytes && data.Title != "" {
+		data.Title = ""
+		data.PRContextUnavailable = true
+		prompt = strings.TrimSpace(prompts.CodeReviewReviewerPrompt(data))
+	}
+	return prompt
 }
 
 func codeReviewOrchestratorPrompt(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse, cfg models.CodeReviewPolicyConfig, policyVersion int, baseSHA string, changedFiles []codereviewsvc.PullRequestFile, agentResults []models.CodeReviewAgentResult, findings []models.CodeReviewFinding, visualEvidence models.CodeReviewVisualEvidenceSnapshot, history ...*prompts.CodeReviewHistoryPromptData) string {
