@@ -210,9 +210,7 @@ func (p *Providers) Send(ctx context.Context, scope models.AutomationActionScope
 		if p.slack == nil {
 			return Receipt{}, &SendFailure{Code: "SLACK_NOT_CONNECTED", Definitive: true}
 		}
-		// Disable automatic parsing of user-controlled mention and link syntax by escaping Slack delimiters.
-		escape := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-		text := escape.Replace(payload.Request.Text)
+		text := renderSlackActionText(payload.Request.Text, scope.RepositoryName)
 		if scope.Config.SlackUserGroupID != "" {
 			text = "<!subteam^" + scope.Config.SlackUserGroupID + "> " + text
 		}
