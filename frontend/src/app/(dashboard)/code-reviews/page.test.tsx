@@ -1,6 +1,7 @@
 import { policyMerge, type PolicyPatch } from "@/lib/code-review-autosave";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { act } from "react";
+import { notifyManager } from "@tanstack/react-query";
 import { delay, http, HttpResponse } from "msw";
 import { createTestQueryClient, fireEvent, renderWithProviders as renderWithBaseProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
@@ -2493,8 +2494,11 @@ describe("CodeReviewsPage", () => {
         args[1] === 1_000 ? [setInterval.mock.results[index].value] : []);
       expect(durationTimers).toHaveLength(2);
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      await act(async () => {
+        await new Promise<void>((resolve) => notifyManager.schedule(resolve));
+      });
       summaryRenders.mockClear();
-      await act(async () => vi.advanceTimersByTime(1_000));
+      act(() => vi.advanceTimersByTime(1_000));
       expect(within(table).getByText("6m 51s")).toBeInTheDocument();
       expect(summaryRenders).not.toHaveBeenCalled();
     } finally {
