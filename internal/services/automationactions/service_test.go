@@ -293,6 +293,7 @@ func TestActionConflictAndInterruptedSend(t *testing.T) {
 	}{
 		{"changed text", func(_ *testStore, r *models.AutomationActionRequest) { r.Text = "changed" }, db.ErrAutomationActionConflict},
 		{"changed destination", func(s *testStore, _ *models.AutomationActionRequest) { s.scope.Config.SlackChannelID = "C9999999999" }, db.ErrAutomationActionConflict},
+		{"changed Slack group", func(s *testStore, _ *models.AutomationActionRequest) { s.scope.Config.SlackUserGroupID = "S0123456789" }, db.ErrAutomationActionConflict},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -306,6 +307,10 @@ func TestActionConflictAndInterruptedSend(t *testing.T) {
 			require.ErrorIs(t, err, tt.want, "same keys cannot replace content")
 			require.Equal(t, models.AutomationActionDelivered, result.Status, "conflict preserves receipt")
 			require.Equal(t, 1, p.sends, "conflict does not create another effect")
+			result, err = svc.Execute(context.Background(), models.AutomationActionActor{}, r.AutomationActionKey, nil)
+			require.NoError(t, err, "the original successful receipt remains readable after a configuration change")
+			require.True(t, result.Reused, "a changed destination must not resend a successful action")
+			require.Equal(t, 1, p.sends, "reading the original receipt must not add another mention")
 		})
 	}
 }

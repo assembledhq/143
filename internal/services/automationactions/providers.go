@@ -213,6 +213,9 @@ func (p *Providers) Send(ctx context.Context, scope models.AutomationActionScope
 		// Disable automatic parsing of user-controlled mention and link syntax by escaping Slack delimiters.
 		escape := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 		text := escape.Replace(payload.Request.Text)
+		if scope.Config.SlackUserGroupID != "" {
+			text = "<!subteam^" + scope.Config.SlackUserGroupID + "> " + text
+		}
 		posted, err := p.slack.PostMessage(ctx, token, scope.Config.SlackChannelID, "", text)
 		if errors.Is(err, ingestion.ErrSlackRateLimited) {
 			return Receipt{}, &SendFailure{Code: "SLACK_RATE_LIMITED", Definitive: true}
