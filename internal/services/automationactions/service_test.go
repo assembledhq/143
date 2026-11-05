@@ -294,6 +294,9 @@ func TestActionConflictAndInterruptedSend(t *testing.T) {
 		{"changed text", func(_ *testStore, r *models.AutomationActionRequest) { r.Text = "changed" }, db.ErrAutomationActionConflict},
 		{"changed destination", func(s *testStore, _ *models.AutomationActionRequest) { s.scope.Config.SlackChannelID = "C9999999999" }, db.ErrAutomationActionConflict},
 		{"changed Slack group", func(s *testStore, _ *models.AutomationActionRequest) { s.scope.Config.SlackUserGroupID = "S0123456789" }, db.ErrAutomationActionConflict},
+		{"changed Slack author map", func(s *testStore, _ *models.AutomationActionRequest) {
+			s.scope.Config.SlackPRAuthorMapPath = "config/team.json"
+		}, db.ErrAutomationActionConflict},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

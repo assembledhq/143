@@ -87,14 +87,15 @@ func (s AutomationActionDeliveryStatus) Validate() error {
 
 // AutomationActionConfig grants selected primitives and fixed destinations.
 type AutomationActionConfig struct {
-	Actions            []AutomationActionKind                  `json:"actions"`
-	Repository         string                                  `json:"repository,omitempty"`
-	Label              string                                  `json:"label,omitempty"`
-	Team               string                                  `json:"team,omitempty"`
-	NotionDataSourceID string                                  `json:"notion_data_source_id,omitempty"`
-	NotionProperties   map[string]AutomationActionPropertyType `json:"notion_properties,omitempty"`
-	SlackChannelID     string                                  `json:"slack_channel_id,omitempty"`
-	SlackUserGroupID   string                                  `json:"slack_user_group_id,omitempty"`
+	Actions              []AutomationActionKind                  `json:"actions"`
+	Repository           string                                  `json:"repository,omitempty"`
+	Label                string                                  `json:"label,omitempty"`
+	Team                 string                                  `json:"team,omitempty"`
+	NotionDataSourceID   string                                  `json:"notion_data_source_id,omitempty"`
+	NotionProperties     map[string]AutomationActionPropertyType `json:"notion_properties,omitempty"`
+	SlackChannelID       string                                  `json:"slack_channel_id,omitempty"`
+	SlackUserGroupID     string                                  `json:"slack_user_group_id,omitempty"`
+	SlackPRAuthorMapPath string                                  `json:"slack_pr_author_map_path,omitempty"`
 }
 
 type AutomationActionPropertyType string
@@ -118,6 +119,7 @@ func (p AutomationActionPropertyType) Validate() error {
 var automationActionTeamPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$`)
 var automationActionChannelPattern = regexp.MustCompile(`^[CG][A-Z0-9]{8,31}$`)
 var automationActionUserGroupPattern = regexp.MustCompile(`^S[A-Z0-9]{8,31}$`)
+var automationActionJSONPathPattern = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
 var automationActionRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
 var automationActionSHAPattern = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 var automationActionKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$`)
@@ -185,6 +187,11 @@ func (c AutomationActionConfig) Validate() error {
 	}
 	if c.Allows(AutomationActionSlack) && c.SlackUserGroupID != "" && !automationActionUserGroupPattern.MatchString(c.SlackUserGroupID) {
 		return errors.New("slack_user_group_id must identify a Slack user group")
+	}
+	if c.Allows(AutomationActionSlack) && c.SlackPRAuthorMapPath != "" &&
+		(len(c.SlackPRAuthorMapPath) > 256 || !automationActionJSONPathPattern.MatchString(c.SlackPRAuthorMapPath) ||
+			!strings.HasSuffix(c.SlackPRAuthorMapPath, ".json") || !validAutomationReviewPath(c.SlackPRAuthorMapPath)) {
+		return errors.New("slack_pr_author_map_path must be a safe relative JSON file path of at most 256 bytes")
 	}
 	if c.Allows(AutomationActionNotion) {
 		if id, err := uuid.Parse(c.NotionDataSourceID); err != nil || id == uuid.Nil {

@@ -206,6 +206,7 @@ func TestAutomationActionPostgresAuthorization(t *testing.T) {
 		{name: "wrong job session", sql: `UPDATE jobs SET payload='{}'`},
 		{name: "changed config", sql: `UPDATE agent_capability_policy_grants SET config=config || '{"slack_channel_id":"C9999999999"}'::jsonb`},
 		{name: "changed Slack group", sql: `UPDATE agent_capability_policy_grants SET config=config || '{"slack_user_group_id":"S0123456789"}'::jsonb`},
+		{name: "changed Slack author map", sql: `UPDATE agent_capability_policy_grants SET config=config || '{"slack_pr_author_map_path":"config/team.json"}'::jsonb`},
 		{name: "retired generation", sql: `UPDATE automation_target_sessions SET status='retired'`, targetOnly: true},
 		{name: "other generation", sql: `UPDATE automation_targets SET active_generation=2`, targetOnly: true},
 		{name: "closed target", sql: `UPDATE automation_targets SET lifecycle_state='closed'`, targetOnly: true},
