@@ -6,7 +6,10 @@ import { source } from "@/lib/source";
 
 export default function PublicDocsLayout({ children }: { children: ReactNode }) {
   return (
-    <RootProvider theme={{ enabled: false }} search={{ options: { api: "/api/search" } }}>
+    <RootProvider
+      theme={{ enabled: false }}
+      search={{ options: { type: "static", api: "/docs/search-index.json" } }}
+    >
       <DocsLayout
         {...docsLayoutOptions()}
         tree={source.getPageTree()}
