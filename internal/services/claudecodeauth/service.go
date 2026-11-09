@@ -39,6 +39,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -982,19 +983,7 @@ func harvestedSubscriptionIsNewer(current, harvested models.AnthropicSubscriptio
 		current.ExpiresAt.UnixMilli() != harvested.ExpiresAt.UnixMilli() ||
 		current.AccountType != harvested.AccountType ||
 		current.RateLimitTier != harvested.RateLimitTier ||
-		!stringSlicesEqual(current.Scopes, harvested.Scopes)
-}
-
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+		!slices.Equal(current.Scopes, harvested.Scopes)
 }
 
 func isClaudeRefreshTokenReused(body []byte) bool {

@@ -783,6 +783,67 @@ func TestStoreTokenByID_DoesNotOverwriteNewerStoredToken(t *testing.T) {
 	require.Equal(t, 0, store.upsertByIDCalls, "StoreTokenByID should not persist stale harvested credentials")
 }
 
+func TestHarvestedSubscriptionIsNewer(t *testing.T) {
+	t.Parallel()
+
+	baseExpiry := time.Unix(1_700_000_000, 0)
+	current := models.AnthropicSubscription{
+		AccessToken:   "access",
+		RefreshToken:  "refresh",
+		ExpiresAt:     baseExpiry,
+		AccountType:   "max",
+		RateLimitTier: "tier-1",
+		Scopes:        []string{"profile", "inference"},
+	}
+
+	tests := []struct {
+		name      string
+		harvested models.AnthropicSubscription
+		expected  bool
+	}{
+		{
+			name: "later expiry at a different millisecond is newer",
+			harvested: models.AnthropicSubscription{
+				AccessToken: "access", RefreshToken: "refresh", ExpiresAt: baseExpiry.Add(time.Minute),
+				AccountType: "max", RateLimitTier: "tier-1", Scopes: []string{"profile", "inference"},
+			},
+			expected: true,
+		},
+		{
+			name: "equivalent scopes do not create a change within the same millisecond",
+			harvested: models.AnthropicSubscription{
+				AccessToken: "access", RefreshToken: "refresh", ExpiresAt: baseExpiry.Add(time.Nanosecond),
+				AccountType: "max", RateLimitTier: "tier-1", Scopes: []string{"profile", "inference"},
+			},
+			expected: false,
+		},
+		{
+			name: "same expiry is not newer",
+			harvested: models.AnthropicSubscription{
+				AccessToken: "different", RefreshToken: "refresh", ExpiresAt: baseExpiry,
+				AccountType: "max", RateLimitTier: "tier-1", Scopes: []string{"profile", "inference"},
+			},
+			expected: false,
+		},
+		{
+			name: "scope ordering remains significant",
+			harvested: models.AnthropicSubscription{
+				AccessToken: "access", RefreshToken: "refresh", ExpiresAt: baseExpiry.Add(time.Nanosecond),
+				AccountType: "max", RateLimitTier: "tier-1", Scopes: []string{"inference", "profile"},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tt.expected, harvestedSubscriptionIsNewer(current, tt.harvested), "harvested-token freshness behavior should remain unchanged")
+		})
+	}
+}
+
 func TestRefreshTokenByID_PreservesRefreshTokenWhenEmpty(t *testing.T) {
 	t.Parallel()
 	store := newMockCredentialStore()
