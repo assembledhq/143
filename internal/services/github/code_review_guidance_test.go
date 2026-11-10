@@ -28,9 +28,9 @@ import (
 func TestCaptureCodeReviewRepositoryGuidance(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, branch, content, mode                                               string
-		missing, truncated, badHash, badEncoding, malformed, invalidTree, wantErr bool
-		failPath                                                                  string
+		name, branch, content, mode                                    string
+		missing, badHash, badEncoding, malformed, invalidTree, wantErr bool
+		failPath                                                       string
 	}{
 		{name: "current master", branch: "master", content: "Use current master guidance."},
 		{name: "renamed default branch", branch: "release/review", content: "Updated guidance."},
@@ -40,7 +40,6 @@ func TestCaptureCodeReviewRepositoryGuidance(t *testing.T) {
 		{name: "unavailable repository", branch: "master", failPath: "repo", wantErr: true},
 		{name: "unavailable tree", branch: "master", failPath: "tree", wantErr: true},
 		{name: "unavailable blob", branch: "master", failPath: "blob", wantErr: true},
-		{name: "truncated tree", branch: "master", truncated: true, wantErr: true},
 		{name: "malformed tree", branch: "master", invalidTree: true, wantErr: true},
 		{name: "symlink", branch: "master", mode: "120000", wantErr: true},
 		{name: "oversized", branch: "master", content: strings.Repeat("a", models.CodeReviewGuidanceMaxBytes+1), wantErr: true},
@@ -70,6 +69,7 @@ func TestCaptureCodeReviewRepositoryGuidance(t *testing.T) {
 					kind = "repo"
 					response = map[string]any{"default_branch": tt.branch}
 				case "/repos/acme/widget/git/trees/" + tt.branch:
+					require.Equal(t, "recursive=1", r.URL.RawQuery, "guidance discovery must include nested rubrics from the same tree")
 					kind = "tree"
 					entries := []map[string]any{}
 					if !tt.missing {
@@ -79,7 +79,7 @@ func TestCaptureCodeReviewRepositoryGuidance(t *testing.T) {
 						}
 						entries = append(entries, map[string]any{"path": "REVIEW.md", "mode": mode, "type": "blob", "size": len(tt.content), "sha": blobSHA})
 					}
-					response = map[string]any{"sha": strings.Repeat("c", 40), "tree": entries, "truncated": tt.truncated}
+					response = map[string]any{"sha": strings.Repeat("c", 40), "tree": entries}
 					if tt.invalidTree {
 						response = map[string]any{}
 					}
@@ -169,11 +169,16 @@ func TestCaptureCodeReviewRepositoryGuidanceCache(t *testing.T) {
 	repoNotModified := step{path: root, ifNoneMatch: `"repo-1"`, status: http.StatusNotModified}
 	treeNotModified := step{path: root + "/git/trees/main", ifNoneMatch: `"tree-1"`, status: http.StatusNotModified}
 	originalGuidance := models.CodeReviewRepositoryGuidance{Branch: "main", Present: true, BlobSHA: originalSHA, Content: original}
+	nestedTree := tree(original)
+	nestedTree["tree"] = append(nestedTree["tree"].([]map[string]any), map[string]any{
+		"path": "frontend/REVIEW.md", "type": "blob", "mode": "100644", "size": len(updated), "sha": updatedSHA,
+	})
 	tests := []struct {
 		name          string
 		next          []step
 		want          models.CodeReviewRepositoryGuidance
 		wantForbidden bool
+		repeat        bool
 	}{
 		{name: "unchanged across workers", next: []step{repoNotModified, treeNotModified}, want: originalGuidance},
 		{name: "unrelated tree change reuses blob", next: []step{repoNotModified, {
@@ -183,6 +188,12 @@ func TestCaptureCodeReviewRepositoryGuidanceCache(t *testing.T) {
 			path: root + "/git/trees/main", ifNoneMatch: `"tree-1"`, etag: `"tree-2"`, status: http.StatusOK, response: tree(updated),
 		}, {path: root + "/git/blobs/" + updatedSHA, status: http.StatusOK, response: blob(updated)}},
 			want: models.CodeReviewRepositoryGuidance{Branch: "main", Present: true, BlobSHA: updatedSHA, Content: updated}},
+		{name: "nested addition survives cache across workers", next: []step{repoNotModified, {
+			path: root + "/git/trees/main", ifNoneMatch: `"tree-1"`, etag: `"tree-2"`, status: http.StatusOK, response: nestedTree,
+		}, {path: root + "/git/blobs/" + updatedSHA, status: http.StatusOK, response: blob(updated)}},
+			want: models.CodeReviewRepositoryGuidance{Branch: "main", Present: true, BlobSHA: originalSHA, Content: original, NestedFiles: []models.CodeReviewGuidanceFile{
+				{Path: "frontend/REVIEW.md", BlobSHA: updatedSHA, Content: updated},
+			}}, repeat: true},
 		{name: "deletion uses new tree", next: []step{repoNotModified, {
 			path: root + "/git/trees/main", ifNoneMatch: `"tree-1"`, etag: `"tree-2"`, status: http.StatusOK,
 			response: map[string]any{"sha": strings.Repeat("d", 40), "tree": []any{}},
@@ -207,6 +218,9 @@ func TestCaptureCodeReviewRepositoryGuidanceCache(t *testing.T) {
 				{path: root + "/git/trees/main", etag: `"tree-1"`, status: http.StatusOK, response: tree(original)},
 				{path: root + "/git/blobs/" + originalSHA, status: http.StatusOK, response: blob(original)},
 			}, tt.next...)
+			if tt.repeat {
+				steps = append(steps, repoNotModified, step{path: root + "/git/trees/main", ifNoneMatch: `"tree-2"`, status: http.StatusNotModified})
+			}
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				index := int(requests.Add(1)) - 1
@@ -216,6 +230,9 @@ func TestCaptureCodeReviewRepositoryGuidanceCache(t *testing.T) {
 					return
 				}
 				step := steps[index]
+				if strings.Contains(step.path, "/git/trees/") {
+					require.Equal(t, "recursive=1", r.URL.RawQuery, "cached tree revalidation must cover the full rubric hierarchy")
+				}
 				if r.URL.Path != step.path || r.Header.Get("If-None-Match") != step.ifNoneMatch || r.Header.Get("Authorization") != "token fixture-token" {
 					t.Errorf("unexpected guidance request %s with ETag %q, expected %s with ETag %q", r.URL.Path, r.Header.Get("If-None-Match"), step.path, step.ifNoneMatch)
 					http.Error(w, `{"message":"unexpected request"}`, http.StatusBadRequest)
@@ -261,7 +278,120 @@ func TestCaptureCodeReviewRepositoryGuidanceCache(t *testing.T) {
 				require.NoError(t, err, "warm capture must revalidate current GitHub state")
 				require.Equal(t, tt.want, got, "warm capture must use the exact current default-branch file or absence")
 			}
+			if tt.repeat {
+				again, err := newService().CaptureCodeReviewRepositoryGuidance(t.Context(), orgID, repoID)
+				require.NoError(t, err, "nested guidance must survive metadata and blob cache reuse")
+				require.Equal(t, tt.want, again, "warm caches must preserve the entire sorted rubric capture")
+			}
 			require.Equal(t, int32(len(steps)), requests.Load(), "each capture must make exactly the expected GitHub requests")
+		})
+	}
+}
+
+func TestCaptureCodeReviewNestedRepositoryGuidance(t *testing.T) {
+	t.Parallel()
+	const root = "/repos/acme/widget"
+	entry := func(path, content string) reviewGuidanceTreeEntry {
+		return reviewGuidanceTreeEntry{Path: path, Type: "blob", Mode: "100644", SHA: fmt.Sprintf("%x", sha1.Sum([]byte(fmt.Sprintf("blob %d\x00%s", len(content), content)))), Size: len(content)}
+	}
+	rootEntry := entry("REVIEW.md", "Global rules")
+	frontendEntry := entry("frontend/REVIEW.md", "Apply ../shared/REVIEW.md")
+	sharedEntry := entry("shared/REVIEW.md", "Shared rules")
+	oversized := entry("shared/REVIEW.md", "Shared rules")
+	oversized.Size = models.CodeReviewGuidanceMaxBytes
+	unsafe := entry("../REVIEW.md", "Unsafe path")
+	symlink := entry("frontend/REVIEW.md", "../../elsewhere")
+	symlink.Mode = "120000"
+	submodule := entry("frontend/REVIEW.md", "")
+	submodule.Mode, submodule.Type = "160000", "commit"
+	tests := []struct {
+		name    string
+		entries []reviewGuidanceTreeEntry
+		want    models.CodeReviewRepositoryGuidance
+		invalid bool
+	}{
+		{
+			name: "root nested and shared rubrics sorted from one tree",
+			entries: []reviewGuidanceTreeEntry{sharedEntry, frontendEntry, rootEntry,
+				{Path: "external", Type: "commit", Mode: "160000", SHA: strings.Repeat("d", 40)},
+				{Path: "linked", Type: "blob", Mode: "120000", SHA: strings.Repeat("e", 40)},
+				entry("notes.md", "Ignore this"),
+			},
+			want: models.CodeReviewRepositoryGuidance{Branch: "main", Present: true, BlobSHA: rootEntry.SHA, Content: "Global rules", NestedFiles: []models.CodeReviewGuidanceFile{
+				{Path: "frontend/REVIEW.md", BlobSHA: frontendEntry.SHA, Content: "Apply ../shared/REVIEW.md"},
+				{Path: "shared/REVIEW.md", BlobSHA: sharedEntry.SHA, Content: "Shared rules"},
+			}},
+		},
+		{
+			name:    "nested guidance without root",
+			entries: []reviewGuidanceTreeEntry{sharedEntry, frontendEntry},
+			want: models.CodeReviewRepositoryGuidance{Branch: "main", NestedFiles: []models.CodeReviewGuidanceFile{
+				{Path: "frontend/REVIEW.md", BlobSHA: frontendEntry.SHA, Content: "Apply ../shared/REVIEW.md"},
+				{Path: "shared/REVIEW.md", BlobSHA: sharedEntry.SHA, Content: "Shared rules"},
+			}},
+		},
+		{name: "aggregate size rejected before blobs", entries: []reviewGuidanceTreeEntry{rootEntry, oversized}, invalid: true},
+		{name: "duplicate root rejected before blobs", entries: []reviewGuidanceTreeEntry{rootEntry, rootEntry}, invalid: true},
+		{name: "duplicate nested path rejected before blobs", entries: []reviewGuidanceTreeEntry{frontendEntry, frontendEntry}, invalid: true},
+		{name: "path traversal rejected before blobs", entries: []reviewGuidanceTreeEntry{unsafe}, invalid: true},
+		{name: "nested symlink rejected before blobs", entries: []reviewGuidanceTreeEntry{symlink}, invalid: true},
+		{name: "rubric named submodule rejected before blobs", entries: []reviewGuidanceTreeEntry{submodule}, invalid: true},
+		{name: "file count rejected before blobs", entries: make([]reviewGuidanceTreeEntry, models.CodeReviewGuidanceMaxFiles+1), invalid: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			entries := append([]reviewGuidanceTreeEntry(nil), tt.entries...)
+			for i := range entries {
+				if entries[i].Path == "" {
+					entries[i] = entry(fmt.Sprintf("section-%02d/REVIEW.md", i), "")
+				}
+			}
+			orgID, repoID := uuid.New(), uuid.New()
+			var treeReads, blobReads atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var response any
+				switch r.URL.Path {
+				case root:
+					response = map[string]string{"default_branch": "main"}
+				case root + "/git/trees/main":
+					require.Equal(t, "recursive=1", r.URL.RawQuery, "one recursive tree must capture every trusted path")
+					treeReads.Add(1)
+					response = map[string]any{"sha": strings.Repeat("c", 40), "tree": entries}
+				case root + "/git/blobs/" + rootEntry.SHA, root + "/git/blobs/" + frontendEntry.SHA, root + "/git/blobs/" + sharedEntry.SHA:
+					blobReads.Add(1)
+					contents := map[string]string{rootEntry.SHA: "Global rules", frontendEntry.SHA: "Apply ../shared/REVIEW.md", sharedEntry.SHA: "Shared rules"}
+					sha := strings.TrimPrefix(r.URL.Path, root+"/git/blobs/")
+					response = map[string]string{"sha": sha, "encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte(contents[sha]))}
+				default:
+					t.Errorf("capture followed a reference instead of a pinned tree blob: %s", r.URL.String())
+					http.NotFound(w, r)
+					return
+				}
+				require.NoError(t, json.NewEncoder(w).Encode(response), "guidance fixture must encode")
+			}))
+			t.Cleanup(server.Close)
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			t.Cleanup(transport.CloseIdleConnections)
+			mock := newMockPool(t)
+			now := time.Now().UTC()
+			mock.ExpectQuery("SELECT id, org_id, integration_id, github_id").WithArgs(pgx.NamedArgs{"id": repoID, "org_id": orgID}).WillReturnRows(pgxmock.NewRows(prTestRepoColumns).AddRow(repoID, orgID, uuid.New(), int64(1), "acme/widget", "stale-default", false, nil, nil, "https://github.com/acme/widget.git", int64(456), "active", nil, nil, []byte(`{}`), now, now))
+			svc := &PRService{repos: db.NewRepositoryStore(mock), tokenProvider: &Service{cache: map[int64]*cachedToken{456: {Token: "fixture-token", ExpiresAt: now.Add(time.Hour)}}}, logger: zerolog.Nop(), baseURL: server.URL, httpClient: &http.Client{Transport: transport}}
+			got, err := svc.CaptureCodeReviewRepositoryGuidance(t.Context(), orgID, repoID)
+			require.NoError(t, mock.ExpectationsWereMet(), "nested capture must authorize the repository before reading guidance")
+			require.Equal(t, int32(1), treeReads.Load(), "all rubric paths must be pinned by one default-branch tree read")
+			if tt.invalid {
+				require.ErrorIs(t, err, models.ErrInvalidCodeReviewGuidanceFile, "unsafe or excessive guidance must require a repository correction")
+				require.Equal(t, int32(0), blobReads.Load(), "invalid tree metadata must fail before content requests")
+			} else {
+				require.NoError(t, err, "nested guidance must capture without following repository links")
+				require.Equal(t, tt.want, got, "capture must preserve sorted paths, exact content, and pinned blob identities")
+				wantReads := len(tt.want.NestedFiles)
+				if tt.want.Present {
+					wantReads++
+				}
+				require.Equal(t, int32(wantReads), blobReads.Load(), "only discovered regular rubrics should be read")
+			}
 		})
 	}
 }

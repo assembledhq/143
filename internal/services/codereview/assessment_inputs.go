@@ -155,6 +155,7 @@ func BuildReviewInputManifest(input ReviewInputCapture) (ReviewInputManifest, er
 	// as immutable source evidence for the assessment.
 	if input.Contract.RepositoryGuidance != nil {
 		guidance := *input.Contract.RepositoryGuidance
+		guidance.NestedFiles = append([]models.CodeReviewGuidanceFile(nil), guidance.NestedFiles...)
 		input.Contract.RepositoryGuidance = &guidance
 	}
 	input.Code.Files = append([]ReviewChangedFile(nil), input.Code.Files...)

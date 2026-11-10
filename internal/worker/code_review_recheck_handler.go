@@ -530,8 +530,8 @@ func publishCodeReviewRecheck(ctx context.Context, stores *Stores, services *Ser
 				Fresh: true, CapturedContract: &manifest.Contract,
 				RequestContext: &codereviewsvc.ReviewRequestContext{Body: manifest.Request.SubstantiveText, UseReviewHistory: manifest.Request.UseReviewHistory},
 			})
-			if errors.Is(captureErr, models.ErrInvalidCodeReviewGuidanceFile) && current.PublicationState == models.CodeReviewPublicationReserved {
-				// No send has started, so a permanent file error can fail safely.
+			if isPermanentCodeReviewGuidanceError(captureErr) && current.PublicationState == models.CodeReviewPublicationReserved {
+				// No send has started, so a permanent guidance error can fail safely.
 				// Uncertain sends must still reconcile their possible receipt.
 				return captureErr
 			}

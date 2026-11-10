@@ -970,7 +970,11 @@ func codeReviewTerminalFailureStatus(err error) (models.CodeReviewStatusCode, st
 	}
 	if errors.Is(err, models.ErrInvalidCodeReviewGuidanceFile) {
 		return models.CodeReviewStatusCodeWorkerFailed,
-			"REVIEW.md on the repository default branch is invalid. Fix it as a regular UTF-8 text file of at most 64 KiB, then request a new review.", false
+			"Review guidance on the repository default branch is invalid. Fix the root or nested REVIEW.md files: use regular UTF-8 text, at most 64 files, and at most 64 KiB combined. Then request a new review.", false
+	}
+	if errors.Is(err, models.ErrIncompleteCodeReviewGuidance) {
+		return models.CodeReviewStatusCodeWorkerFailed,
+			"Review guidance could not be fully inspected because the repository tree is incomplete or exceeds supported traversal limits. Contact support before requesting a new review.", false
 	}
 	if errors.Is(err, errFullAssessmentFreshnessInconclusive) {
 		return models.CodeReviewStatusCodeGitHubUnavailable,

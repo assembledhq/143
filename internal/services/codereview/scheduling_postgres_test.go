@@ -166,6 +166,9 @@ func TestCodeReviewSchedulingLifecyclePostgres(t *testing.T) {
 		{"invalid repository guidance is terminal", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "invalid guidance")
 		}},
+		{"incomplete repository guidance is terminal", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
+			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "incomplete guidance")
+		}},
 		{"capture failure is terminal", func(t *testing.T, p *pgxpool.Pool, org, repo, pr uuid.UUID, snapshot *schedulingSnapshotFixture) {
 			testRecheckCaptureFailure(t, p, org, repo, pr, snapshot, "immediate")
 		}},
