@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
+	"sort"
 	"time"
 
 	"github.com/assembledhq/143/internal/models"
@@ -15,10 +17,6 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// CaptureCodeReviewRepositoryGuidance reads the base repository's live default
-// branch, independently of the PR head and target branch. The root tree pins
-// the blob before its bytes are read; unrelated default-branch commits do not
-// change the captured guidance identity. Errors never fall back to PR content.
 func (s *PRService) CaptureCodeReviewRepositoryGuidance(ctx context.Context, orgID, repositoryID uuid.UUID) (models.CodeReviewRepositoryGuidance, error) {
 	var result models.CodeReviewRepositoryGuidance
 	repository, err := s.repos.GetByID(ctx, orgID, repositoryID)
@@ -32,7 +30,7 @@ func (s *PRService) CaptureCodeReviewRepositoryGuidance(ctx context.Context, org
 	ctx = withGitHubResolutionContext(ctx, resolution, repository.InstallationID, "code_review_repository_guidance")
 	owner, repo := splitRepo(repository.FullName)
 	root := fmt.Sprintf("/repos/%s/%s", owner, repo)
-	cacheKey := fmt.Sprintf("github:review-guidance:v1:%s:%s:%d:%s", orgID, repositoryID, resolution.InstallationID, repository.FullName)
+	cacheKey := fmt.Sprintf("github:review-guidance:v2:%s:%s:%d:%s", orgID, repositoryID, resolution.InstallationID, repository.FullName)
 	details, err := readReviewGuidanceResource(ctx, s, resolution.Token, root, cacheKey+":repository", decodeReviewGuidanceRepository)
 	if err != nil {
 		return result, fmt.Errorf("read review guidance default branch: %w", err)
@@ -42,33 +40,59 @@ func (s *PRService) CaptureCodeReviewRepositoryGuidance(ctx context.Context, org
 		return result, err
 	}
 	branch := url.PathEscape(result.Branch)
-	entry, err := readReviewGuidanceResource(ctx, s, resolution.Token, root+"/git/trees/"+branch, cacheKey+":tree:"+branch, decodeReviewGuidanceTree)
+	entries, err := readReviewGuidanceResource(ctx, s, resolution.Token, root+"/git/trees/"+branch+"?recursive=1", cacheKey+":tree:"+branch, decodeReviewGuidanceTree)
 	if err != nil {
 		return result, fmt.Errorf("read review guidance tree: %w", err)
 	}
-	if entry.Path == "" {
-		return result, nil
+	if len(entries) > models.CodeReviewGuidanceMaxFiles {
+		return result, fmt.Errorf("%w: at most %d files are supported", models.ErrInvalidCodeReviewGuidanceFile, models.CodeReviewGuidanceMaxFiles)
 	}
-	if entry.Type != "blob" || (entry.Mode != "100644" && entry.Mode != "100755") || entry.Size < 0 || entry.Size > models.CodeReviewGuidanceMaxBytes {
-		return result, fmt.Errorf("%w: must be a regular file of at most %d bytes", models.ErrInvalidCodeReviewGuidanceFile, models.CodeReviewGuidanceMaxBytes)
+	totalBytes := 0
+	for _, entry := range entries {
+		if entry.Type != "blob" || (entry.Mode != "100644" && entry.Mode != "100755") || entry.Size < 0 || entry.Size > models.CodeReviewGuidanceMaxBytes {
+			return result, fmt.Errorf("%w: %s must be a regular file of at most %d bytes", models.ErrInvalidCodeReviewGuidanceFile, entry.Path, models.CodeReviewGuidanceMaxBytes)
+		}
+		totalBytes += entry.Size
+		if totalBytes > models.CodeReviewGuidanceMaxBytes {
+			return result, fmt.Errorf("%w: combined content must be at most %d bytes", models.ErrInvalidCodeReviewGuidanceFile, models.CodeReviewGuidanceMaxBytes)
+		}
+		if entry.Path == "REVIEW.md" {
+			if result.Present {
+				return result, fmt.Errorf("%w: duplicate root file", models.ErrInvalidCodeReviewGuidanceFile)
+			}
+			result.Present, result.BlobSHA = true, entry.SHA
+		} else {
+			result.NestedFiles = append(result.NestedFiles, models.CodeReviewGuidanceFile{Path: entry.Path, BlobSHA: entry.SHA})
+		}
 	}
-	result.Present, result.BlobSHA = true, entry.SHA
 	if err := result.Validate(); err != nil {
 		return result, err
 	}
-	blobKey := cacheKey + ":blob:" + entry.SHA
-	if raw, found := s.readReviewGuidanceCache(ctx, blobKey); found && reviewGuidanceBlobMatches(entry, string(raw)) {
-		result.Content = string(raw)
-		return result, result.Validate()
+	nestedIndex := 0
+	for _, entry := range entries {
+		blobKey := cacheKey + ":blob:" + entry.SHA
+		raw, found := s.readReviewGuidanceCache(ctx, blobKey)
+		content := string(raw)
+		cached := found && reviewGuidanceBlobMatches(entry, content)
+		if !cached {
+			content, err = s.readReviewGuidanceBlob(ctx, resolution.Token, root, entry)
+			if err != nil {
+				return result, err
+			}
+		}
+		if entry.Path == "REVIEW.md" {
+			result.Content = content
+		} else {
+			result.NestedFiles[nestedIndex].Content = content
+			nestedIndex++
+		}
+		if err := result.Validate(); err != nil {
+			return result, err
+		}
+		if !cached {
+			s.writeReviewGuidanceCache(ctx, blobKey, []byte(content))
+		}
 	}
-	result.Content, err = s.readReviewGuidanceBlob(ctx, resolution.Token, root, entry)
-	if err != nil {
-		return result, err
-	}
-	if err := result.Validate(); err != nil {
-		return result, err
-	}
-	s.writeReviewGuidanceCache(ctx, blobKey, []byte(result.Content))
 	return result, nil
 }
 
@@ -90,24 +114,26 @@ type reviewGuidanceTreeEntry struct {
 	Size int    `json:"size"`
 }
 
-func decodeReviewGuidanceTree(body []byte) (reviewGuidanceTreeEntry, error) {
+func decodeReviewGuidanceTree(body []byte) ([]reviewGuidanceTreeEntry, error) {
 	var tree struct {
 		SHA       string                    `json:"sha"`
 		Truncated bool                      `json:"truncated"`
 		Entries   []reviewGuidanceTreeEntry `json:"tree"`
 	}
 	if err := json.Unmarshal(body, &tree); err != nil {
-		return reviewGuidanceTreeEntry{}, err
+		return nil, err
 	}
 	if tree.SHA == "" || tree.Truncated || tree.Entries == nil {
-		return reviewGuidanceTreeEntry{}, fmt.Errorf("review guidance root tree is incomplete")
+		return nil, fmt.Errorf("review guidance recursive tree is incomplete")
 	}
+	entries := make([]reviewGuidanceTreeEntry, 0)
 	for _, entry := range tree.Entries {
-		if entry.Path == "REVIEW.md" {
-			return entry, nil
+		if path.Base(entry.Path) == "REVIEW.md" {
+			entries = append(entries, entry)
 		}
 	}
-	return reviewGuidanceTreeEntry{}, nil
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	return entries, nil
 }
 
 const reviewGuidanceCacheTTL = 24 * time.Hour
@@ -117,8 +143,6 @@ type reviewGuidanceCacheEntry[T any] struct {
 	Value *T     `json:"value"`
 }
 
-// Cache only the decoded branch or REVIEW.md tree entry, and reuse it only
-// after GitHub validates the response for this repository and installation.
 func readReviewGuidanceResource[T any](ctx context.Context, s *PRService, token, path, key string, decode func([]byte) (T, error)) (T, error) {
 	var cached reviewGuidanceCacheEntry[T]
 	if raw, found := s.readReviewGuidanceCache(ctx, key); found {

@@ -152,7 +152,7 @@ func classifyGitHubJobError(err error, retryKey string) error {
 		if errors.As(err, &fatal) {
 			return err
 		}
-		return &FatalError{Err: fmt.Errorf("%w; fix root REVIEW.md on the repository default branch and request a new review", err)}
+		return &FatalError{Err: fmt.Errorf("%w; fix the root or nested REVIEW.md files on the repository default branch (at most 64 regular UTF-8 files and 64 KiB combined) and request a new review", err)}
 	}
 	if errors.Is(err, db.ErrCodeReviewPublicationLockBusy) {
 		delay := 15 * time.Second
