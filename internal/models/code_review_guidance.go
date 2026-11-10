@@ -16,6 +16,9 @@ const CodeReviewGuidanceMaxFiles = 64
 // ErrInvalidCodeReviewGuidanceFile requires a repository change, not a retry.
 var ErrInvalidCodeReviewGuidanceFile = errors.New("invalid REVIEW.md")
 
+// ErrIncompleteCodeReviewGuidance stops retries when discovery cannot be completed within supported limits.
+var ErrIncompleteCodeReviewGuidance = errors.New("repository review guidance discovery incomplete")
+
 type CodeReviewRepositoryGuidance struct {
 	Branch      string                   `json:"branch"`
 	Present     bool                     `json:"present"`

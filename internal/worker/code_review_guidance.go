@@ -17,6 +17,10 @@ type codeReviewPromptCheckpointStore interface {
 	CreatePromptRecordIfAbsent(context.Context, *models.CodeReviewPromptRecord) (bool, error)
 }
 
+func isPermanentCodeReviewGuidanceError(err error) bool {
+	return errors.Is(err, models.ErrInvalidCodeReviewGuidanceFile) || errors.Is(err, models.ErrIncompleteCodeReviewGuidance)
+}
+
 func loadCodeReviewRepositoryGuidance(ctx context.Context, stores *Stores, services *Services, job runCodeReviewPayload, assessment *models.CodeReviewAssessment, reviewersStarted bool) (*models.CodeReviewRepositoryGuidance, error) {
 	if assessment != nil {
 		var manifest codereviewsvc.ReviewInputManifest

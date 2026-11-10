@@ -27,9 +27,12 @@ func TestRecheckPublicationInvalidGuidancePostgres(t *testing.T) {
 	tests := []struct {
 		name      string
 		uncertain bool
+		cause     error
 	}{
-		{name: "unsent publication fails promptly"},
-		{name: "uncertain send still reconciles", uncertain: true},
+		{name: "unsent invalid guidance fails promptly", cause: models.ErrInvalidCodeReviewGuidanceFile},
+		{name: "uncertain send still reconciles invalid guidance", uncertain: true, cause: models.ErrInvalidCodeReviewGuidanceFile},
+		{name: "unsent incomplete discovery fails promptly", cause: models.ErrIncompleteCodeReviewGuidance},
+		{name: "uncertain send still reconciles incomplete discovery", uncertain: true, cause: models.ErrIncompleteCodeReviewGuidance},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -49,7 +52,7 @@ func TestRecheckPublicationInvalidGuidancePostgres(t *testing.T) {
 				require.NoError(t, f.stores.CodeReviewAssessments.MarkPublicationAttemptUncertain(ctx, f.job.OrgID, f.assessment, 2, manifest.InputDigest), "retain a possible previous send")
 			}
 			publisher := &fakeRecheckPublisher{}
-			capture := &fixedRecheckCapture{captureErr: fmt.Errorf("default branch file: %w", models.ErrInvalidCodeReviewGuidanceFile)}
+			capture := &fixedRecheckCapture{captureErr: fmt.Errorf("default branch guidance: %w", tt.cause)}
 			services := &Services{CodeReviewInputCapture: capture, CodeReviews: publisher}
 			job, err := json.Marshal(codeReviewRecheckJob{OrgID: f.job.OrgID, AssessmentID: f.assessment})
 			require.NoError(t, err, "encode the publication supervisor")
@@ -63,7 +66,7 @@ func TestRecheckPublicationInvalidGuidancePostgres(t *testing.T) {
 			} else {
 				var fatal *FatalError
 				require.ErrorAs(t, err, &fatal, "an unsent review must stop instead of retrying permanent invalid guidance")
-				require.ErrorIs(t, err, models.ErrInvalidCodeReviewGuidanceFile, "terminal failure must preserve the repairable repository cause")
+				require.ErrorIs(t, err, tt.cause, "terminal failure must preserve the permanent guidance cause")
 				require.Empty(t, publisher.reconciliations, "no send means there is no receipt to reconcile")
 			}
 		})

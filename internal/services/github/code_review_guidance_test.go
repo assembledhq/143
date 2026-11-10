@@ -28,9 +28,9 @@ import (
 func TestCaptureCodeReviewRepositoryGuidance(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, branch, content, mode                                               string
-		missing, truncated, badHash, badEncoding, malformed, invalidTree, wantErr bool
-		failPath                                                                  string
+		name, branch, content, mode                                    string
+		missing, badHash, badEncoding, malformed, invalidTree, wantErr bool
+		failPath                                                       string
 	}{
 		{name: "current master", branch: "master", content: "Use current master guidance."},
 		{name: "renamed default branch", branch: "release/review", content: "Updated guidance."},
@@ -40,7 +40,6 @@ func TestCaptureCodeReviewRepositoryGuidance(t *testing.T) {
 		{name: "unavailable repository", branch: "master", failPath: "repo", wantErr: true},
 		{name: "unavailable tree", branch: "master", failPath: "tree", wantErr: true},
 		{name: "unavailable blob", branch: "master", failPath: "blob", wantErr: true},
-		{name: "truncated tree", branch: "master", truncated: true, wantErr: true},
 		{name: "malformed tree", branch: "master", invalidTree: true, wantErr: true},
 		{name: "symlink", branch: "master", mode: "120000", wantErr: true},
 		{name: "oversized", branch: "master", content: strings.Repeat("a", models.CodeReviewGuidanceMaxBytes+1), wantErr: true},
@@ -80,7 +79,7 @@ func TestCaptureCodeReviewRepositoryGuidance(t *testing.T) {
 						}
 						entries = append(entries, map[string]any{"path": "REVIEW.md", "mode": mode, "type": "blob", "size": len(tt.content), "sha": blobSHA})
 					}
-					response = map[string]any{"sha": strings.Repeat("c", 40), "tree": entries, "truncated": tt.truncated}
+					response = map[string]any{"sha": strings.Repeat("c", 40), "tree": entries}
 					if tt.invalidTree {
 						response = map[string]any{}
 					}

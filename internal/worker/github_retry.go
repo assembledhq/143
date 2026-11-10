@@ -147,12 +147,15 @@ func classifyGitHubJobError(err error, retryKey string) error {
 		delay := 45*time.Second + githubRateLimitJitter(retryKey)
 		return &RetryableError{Err: err, RetryAfter: &delay, BypassMaxRetryDuration: true}
 	}
-	if errors.Is(err, models.ErrInvalidCodeReviewGuidanceFile) {
+	if isPermanentCodeReviewGuidanceError(err) {
 		var fatal *FatalError
 		if errors.As(err, &fatal) {
 			return err
 		}
-		return &FatalError{Err: fmt.Errorf("%w; fix the root or nested REVIEW.md files on the repository default branch (at most 64 regular UTF-8 files and 64 KiB combined) and request a new review", err)}
+		if errors.Is(err, models.ErrInvalidCodeReviewGuidanceFile) {
+			return &FatalError{Err: fmt.Errorf("%w; fix the root or nested REVIEW.md files on the repository default branch (at most 64 regular UTF-8 files and 64 KiB combined) and request a new review", err)}
+		}
+		return &FatalError{Err: err}
 	}
 	if errors.Is(err, db.ErrCodeReviewPublicationLockBusy) {
 		delay := 15 * time.Second

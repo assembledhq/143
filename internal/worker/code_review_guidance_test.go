@@ -252,6 +252,32 @@ func TestInvalidGuidanceTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestIncompleteGuidanceTerminalStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "direct", err: models.ErrIncompleteCodeReviewGuidance},
+		{name: "wrapped", err: fmt.Errorf("tree request budget: %w", models.ErrIncompleteCodeReviewGuidance)},
+		{name: "already fatal", err: &FatalError{Err: models.ErrIncompleteCodeReviewGuidance}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			classified := classifyGitHubJobError(tt.err, "review")
+			var fatal *FatalError
+			require.ErrorAs(t, classified, &fatal, "deterministic discovery failures must stop without consuming generic retries")
+			require.ErrorIs(t, classified, models.ErrIncompleteCodeReviewGuidance, "classification must preserve the discovery failure")
+			require.Same(t, classified, classifyGitHubJobError(classified, "review"), "classification must preserve an already terminal discovery error")
+			code, message, retryable := codeReviewTerminalFailureStatus(classified)
+			require.Equal(t, models.CodeReviewStatusCodeWorkerFailed, code, "incomplete discovery must use the existing failure status")
+			require.Equal(t, "Review guidance could not be fully inspected because the repository tree is incomplete or exceeds supported traversal limits. Contact support before requesting a new review.", message, "discovery failures must explain the supported limit without blaming rubric contents")
+			require.False(t, retryable, "retrying the same incomplete tree cannot complete discovery")
+		})
+	}
+}
+
 func TestCodeReviewPublicationUsesCapturedGuidance(t *testing.T) {
 	t.Parallel()
 	digest := strings.Repeat("a", 64)

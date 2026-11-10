@@ -4196,7 +4196,13 @@ type githubRESTResponse struct {
 	header http.Header
 }
 
+var errGitHubRESTResponseLimit = errors.New("GitHub REST response limit exceeded")
+
 func (s *PRService) doGitHubRESTRequest(ctx context.Context, token, method, path string, body any, accept, etag string) (githubRESTResponse, error) {
+	return s.doGitHubRESTRequestWithResponseLimit(ctx, token, method, path, body, accept, etag, 0)
+}
+
+func (s *PRService) doGitHubRESTRequestWithResponseLimit(ctx context.Context, token, method, path string, body any, accept, etag string, responseLimit int64) (githubRESTResponse, error) {
 	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(ctx, token))
 	jsonResponse := strings.Contains(accept, "json") && !strings.Contains(accept, ".raw") && !strings.Contains(accept, ".diff") && !strings.Contains(accept, ".patch") && !strings.Contains(accept, ".html")
 	if jsonResponse {
@@ -4230,7 +4236,14 @@ func (s *PRService) doGitHubRESTRequest(ctx context.Context, token, method, path
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	var responseReader io.Reader = resp.Body
+	if responseLimit > 0 {
+		responseReader = io.LimitReader(resp.Body, responseLimit+1)
+	}
+	respBody, err := io.ReadAll(responseReader)
+	if err == nil && responseLimit > 0 && int64(len(respBody)) > responseLimit && resp.StatusCode < 400 {
+		err = fmt.Errorf("%w: %d bytes", errGitHubRESTResponseLimit, responseLimit)
+	}
 	if err != nil {
 		githubtelemetry.ObserveJSONResponse(ctx, err)
 		return githubRESTResponse{}, NewGitHubResponseReadError(ctx, method, path, resp, respBody, err)
