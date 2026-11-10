@@ -122,7 +122,7 @@ test("selects Analytics metrics without another request and exposes comparison d
     }
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
-  await page.goto("/code-reviews?tab=analytics&range=this_month");
+  await page.goto("/code-reviews?tab=analytics&range=this_month", { waitUntil: "domcontentloaded" });
   const chart = page.getByLabel("Code review analytics trend", { exact: true });
   const average = page.getByRole("button", { name: /^Show Average rounds to approval trend/ });
   await expect(average).toHaveAttribute("aria-pressed", "true");
@@ -181,7 +181,9 @@ test("selects Analytics metrics without another request and exposes comparison d
     () => pendingFixtureRequests.size === 0 && Date.now() - Math.max(lastFixtureRequestActivityAt, drainStartedAt) >= 500,
     { message: "Fixture API requests should finish and remain quiet before reload" },
   ).toBe(true);
-  await page.reload({ waitUntil: "networkidle" });
+  // The selected metric below is the readiness signal. Next dev resources and
+  // independent shell polling need not become idle for persisted state to render.
+  await page.reload({ waitUntil: "domcontentloaded" });
   await expect(page.getByRole("button", { name: /^Show P95 rounds to approval trend/ })).toHaveAttribute("aria-pressed", "true");
   expect(pageErrors).toEqual([]);
 });

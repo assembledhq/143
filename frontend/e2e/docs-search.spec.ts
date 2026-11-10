@@ -1,10 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 test.beforeAll(async ({ request }) => {
-  // Next dev compiles the docs and its index on their first requests. Keep
-  // that cold-start work outside the interaction test's timeout.
+  // Next dev compiles each docs route and its index on their first requests.
+  // Warm the result destination too, so navigation measures the search UI
+  // instead of waiting for an uncompiled MDX page.
   test.setTimeout(120_000);
-  for (const path of ["/docs", "/docs/search-index.json"]) {
+  for (const path of ["/docs", "/docs/search-index.json", "/docs/guides/private-packages"]) {
     const response = await request.get(path, { timeout: 120_000 });
     expect(response.ok(), `${path} should be served by the frontend`).toBe(true);
   }

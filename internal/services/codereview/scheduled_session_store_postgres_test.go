@@ -258,7 +258,26 @@ func newScheduledSessionPostgresPool(t *testing.T) *pgxpool.Pool {
 	_, err = admin.Exec(ctx, "CREATE DATABASE "+identifier)
 	require.NoError(t, err, "create only this independently generated synthetic fixture database")
 	t.Cleanup(func() {
-		cleanup, stop := context.WithTimeout(context.Background(), 10*time.Second)
+		drain, cancelDrain := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelDrain()
+		ticker := time.NewTicker(25 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			var clients int
+			err := admin.QueryRow(drain, `SELECT count(*) FROM pg_stat_activity WHERE datname=$1 AND backend_type='client backend'`, name).Scan(&clients)
+			require.NoError(t, err, "inspect client connections to only this generated fixture database")
+			if clients == 0 {
+				break
+			}
+			select {
+			case <-drain.Done():
+				require.FailNow(t, "fixture connections did not close", "%d client connections remain in the generated database", clients)
+			case <-ticker.C:
+			}
+		}
+		// DROP DATABASE can wait for a checkpoint after all clients disconnect.
+		// Match the shared fixture's allowance without force-terminating leaks.
+		cleanup, stop := context.WithTimeout(context.Background(), 30*time.Second)
 		defer stop()
 		_, err := admin.Exec(cleanup, "DROP DATABASE "+identifier)
 		require.NoError(t, err, "drop only this generated database after owned connections close, without forced termination")
