@@ -51,6 +51,8 @@ function report(): CodeReviewAnalytics {
 }
 
 test("selects Analytics metrics without another request and exposes comparison data", async ({ context, page }, testInfo) => {
+  // Two full dashboard loads and screenshot capture share this test's budget.
+  test.setTimeout(60_000);
   const pageErrors: string[] = [];
   const analyticsRequests: string[] = [];
   const pendingFixtureRequests = new Set<Request>();
@@ -122,7 +124,19 @@ test("selects Analytics metrics without another request and exposes comparison d
     }
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
-  await page.goto("/code-reviews?tab=analytics&range=this_month", { waitUntil: "domcontentloaded" });
+  const waitForAnalyticsResponse = async () => {
+    const response = await page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/code-reviews/analytics",
+    );
+    expect(response.status(), "the analytics fixture should load successfully").toBe(200);
+    expect(await response.finished(), "the analytics response should finish before checking chart readiness").toBeNull();
+  };
+  // DOM readiness can precede dashboard hydration and its first API query.
+  // Register the response wait before navigating so a fast fixture cannot race it.
+  await Promise.all([
+    waitForAnalyticsResponse(),
+    page.goto("/code-reviews?tab=analytics&range=this_month"),
+  ]);
   const chart = page.getByLabel("Code review analytics trend", { exact: true });
   const average = page.getByRole("button", { name: /^Show Average rounds to approval trend/ });
   await expect(average).toHaveAttribute("aria-pressed", "true");
@@ -181,9 +195,12 @@ test("selects Analytics metrics without another request and exposes comparison d
     () => pendingFixtureRequests.size === 0 && Date.now() - Math.max(lastFixtureRequestActivityAt, drainStartedAt) >= 500,
     { message: "Fixture API requests should finish and remain quiet before reload" },
   ).toBe(true);
-  // The selected metric below is the readiness signal. Next dev resources and
-  // independent shell polling need not become idle for persisted state to render.
-  await page.reload({ waitUntil: "domcontentloaded" });
+  // Await this document's browser resources and analytics query, without waiting
+  // for unrelated shell polling or Next dev traffic to become globally idle.
+  await Promise.all([
+    waitForAnalyticsResponse(),
+    page.reload({ waitUntil: "load" }),
+  ]);
   await expect(page.getByRole("button", { name: /^Show P95 rounds to approval trend/ })).toHaveAttribute("aria-pressed", "true");
   expect(pageErrors).toEqual([]);
 });
