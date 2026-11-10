@@ -375,11 +375,12 @@ func newRunCodeReviewHandler(stores *Stores, services *Services, logger zerolog.
 		stableRisk := codeReviewStableDeterministicRisk(policy.Config(), job, pr, health, changedFiles, changedFilesAvailable)
 		if !stableRisk.Acceptable && metadata.FinalReviewBody == nil {
 			provisionalBody := models.BuildCodeReviewProvisionalBody(models.CodeReviewFinalReviewInput{
-				RiskReasons:       stableRisk.ReasonDetails,
-				SessionURL:        codeReviewSessionURL(services.FrontendURL, job.SessionID),
-				PolicySettingsURL: codeReviewPolicySettingsURL(services.FrontendURL),
-				HeadSHA:           job.HeadSHA,
-				AssessedAt:        time.Now().UTC(),
+				RiskReasons:          stableRisk.ReasonDetails,
+				SessionURL:           codeReviewSessionURL(services.FrontendURL, job.SessionID),
+				PolicySettingsURL:    codeReviewPolicySettingsURL(services.FrontendURL),
+				SizeLimitOverrideURL: codeReviewSizeLimitOverrideURL(policy.Config(), codeReviewAvailableReviewNowURL(services, job.SessionID)),
+				HeadSHA:              job.HeadSHA,
+				AssessedAt:           time.Now().UTC(),
 			})
 			// A concurrent supersede, stale mark, or cancellation moves the session
 			// out of queued/running and makes this update match no rows. Returning

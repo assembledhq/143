@@ -49,9 +49,19 @@ func BuildCodeReviewProvisionalBody(input CodeReviewFinalReviewInput) string {
 		paragraphs = append(paragraphs, assessment)
 	}
 	return WithCodeReviewCommentFooter(strings.Join(paragraphs, "\n\n"), CodeReviewCommentFooter{
-		DetailURL:   input.SessionURL,
-		DetailLabel: CodeReviewCommentDetailLabel(input.SessionURL, true),
+		DetailURL:            input.SessionURL,
+		DetailLabel:          CodeReviewCommentDetailLabel(input.SessionURL, true),
+		SizeLimitOverrideURL: codeReviewSizeLimitOverrideURLForReasons(input.RiskReasons, input.SizeLimitOverrideURL),
 	})
+}
+
+func codeReviewSizeLimitOverrideURLForReasons(reasons []CodeReviewRiskReason, overrideURL string) string {
+	for _, reason := range reasons {
+		if IsCodeReviewSizeLimitRiskReason(reason.Code) {
+			return overrideURL
+		}
+	}
+	return ""
 }
 
 func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) string {
@@ -125,12 +135,7 @@ func buildDefaultCodeReviewFinalReviewBody(input CodeReviewFinalReviewInput) str
 	}
 	if !input.Acceptable && input.Decision != CodeReviewDecisionApproved {
 		footer.ReviewNowURL = input.ReviewNowURL
-		for _, reason := range input.RiskReasons {
-			if IsCodeReviewSizeLimitRiskReason(reason.Code) {
-				footer.SizeLimitOverrideURL = input.SizeLimitOverrideURL
-				break
-			}
-		}
+		footer.SizeLimitOverrideURL = codeReviewSizeLimitOverrideURLForReasons(input.RiskReasons, input.SizeLimitOverrideURL)
 		if codeReviewBlockerCount(input.RiskReasons, blockingFindings) == 1 {
 			if revision := codeReviewShortSHA(input.HeadSHA); revision != "" {
 				paragraphs = append(paragraphs, "This is the only blocker as of `"+revision+"`.")

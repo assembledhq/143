@@ -493,6 +493,7 @@ func TestCodeReviewStatusCommentFooterRoutes(t *testing.T) {
 	const assessmentURL = "https://143.test/code-reviews?assessment=current"
 	const reviewURL = "https://143.test/code-reviews?review_now=current"
 	const evidenceURL = "https://143.test/code-reviews?recheck=baseline"
+	const overrideURL = "https://143.test/code-reviews?override_size_limits=true&review_now=current"
 	const start = "<!-- 143-code-review-footer:start -->"
 	const end = "<!-- 143-code-review-footer:end -->"
 	const oldMarkedBody = "Preserved blocker details.\n\n" + start + "\n[Re-check evidence](" + evidenceURL + ") · [View full review](https://143.test/sessions/old)\n" + end
@@ -524,6 +525,7 @@ func TestCodeReviewStatusCommentFooterRoutes(t *testing.T) {
 		{name: "active staged result remains hidden", status: models.CodeReviewSessionStatusRunning, body: oldMarkedBody, expectedContent: "143 Code Reviewer has started reviewing this pull request.", expectedLinks: "[Follow review](" + detailURL + ")"},
 		{name: "queued uses follow", status: models.CodeReviewSessionStatusQueued, expectedContent: "143 Code Reviewer has started reviewing this pull request.", expectedLinks: "[Follow review](" + detailURL + ")"},
 		{name: "active provisional strips actions", status: models.CodeReviewSessionStatusRunning, body: models.CodeReviewProvisionalReviewHeading + "\n\n" + oldMarkedBody, expectedContent: models.CodeReviewProvisionalReviewHeading + "\n\nPreserved blocker details.", expectedLinks: "[Follow review](" + detailURL + ")"},
+		{name: "active provisional keeps the size override", status: models.CodeReviewSessionStatusRunning, body: models.CodeReviewProvisionalReviewHeading + "\n\nPreserved blocker details.\n\n" + start + "\n[Re-check evidence](" + evidenceURL + ") · [Override size limits](" + overrideURL + ") · [Follow review](" + detailURL + ")\n" + end, expectedContent: models.CodeReviewProvisionalReviewHeading + "\n\nPreserved blocker details.", expectedLinks: "[Override size limits](" + overrideURL + ") · [Follow review](" + detailURL + ")"},
 		{name: "empty URLs omit footer", status: models.CodeReviewSessionStatusCompleted, body: "Preserved blocker details.", noURLs: true, expectedContent: "Preserved blocker details."},
 	}
 	for _, tt := range tests {
