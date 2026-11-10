@@ -1543,15 +1543,19 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
     local caddy_id="$1" service="$2"
     docker exec "$caddy_id" sh -c '
       service="$1"
-      if command -v getent >/dev/null 2>&1; then
-        getent hosts "$service" | while read -r ip _; do
-          case "$ip" in
-            *:*) ;;
-            *) echo "$ip" ;;
+      # BusyBox getent hosts may return only one address during a rolling
+      # deploy. Prefer the full DNS answer set when nslookup is available.
+      if command -v nslookup >/dev/null 2>&1; then
+        lookup_output="$(nslookup "$service")" || exit $?
+        answer_section=0
+        printf "%s\n" "$lookup_output" | while read -r first second third _; do
+          case "$first" in
+            Server:) answer_section=0; continue ;;
+            Name:) answer_section=1; continue ;;
           esac
-        done
-      elif command -v nslookup >/dev/null 2>&1; then
-        nslookup "$service" | while read -r first second third _; do
+          # Resolver headers also contain Address rows; only service answers
+          # after Name belong to the upstream set.
+          [ "$answer_section" -eq 1 ] || continue
           case "$first" in
             Address:)
               ip="$second"
@@ -1566,6 +1570,14 @@ ssh "${SSH_OPTS[@]}" deploy@"$HOST" \
               continue
               ;;
           esac
+          case "$ip" in
+            ""|*:*) ;;
+            *) echo "$ip" ;;
+          esac
+        done
+      elif command -v getent >/dev/null 2>&1; then
+        lookup_output="$(getent hosts "$service")" || exit $?
+        printf "%s\n" "$lookup_output" | while read -r ip _; do
           case "$ip" in
             ""|*:*) ;;
             *) echo "$ip" ;;
