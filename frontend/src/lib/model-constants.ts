@@ -1,3 +1,4 @@
+export const CLAUDE_CODE_MODEL_FABLE_52 = "claude-fable-5-2";
 export const CLAUDE_CODE_MODEL_FABLE_51 = "claude-fable-5-1";
 export const CLAUDE_CODE_MODEL_FABLE_5 = "claude-fable-5";
 export const CLAUDE_CODE_MODEL_OPUS_55 = "claude-opus-5-5";
@@ -14,6 +15,7 @@ export const CLAUDE_CODE_MODEL_HAIKU_45 = "claude-haiku-4-5";
 // Explicit IDs for API and subscription auth; access depends on the credential,
 // provider, region and CLI version. Mirror the backend accepted model catalog.
 export const AVAILABLE_CLAUDE_CODE_MODELS = [
+  CLAUDE_CODE_MODEL_FABLE_52,
   CLAUDE_CODE_MODEL_FABLE_51,
   CLAUDE_CODE_MODEL_FABLE_5,
   CLAUDE_CODE_MODEL_OPUS_55,

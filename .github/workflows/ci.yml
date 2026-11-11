@@ -748,9 +748,13 @@ jobs:
     # required-checks treats a skipped job as passing, so a plain job-level
     # condition is enough — matching every other conditional job here.
     if: needs.changes.outputs.session_transcript_e2e == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    container:
+      # Match frontend/package-lock.json; browsers and OS dependencies are preinstalled.
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
     defaults:
       run:
+        shell: bash
         working-directory: frontend
     steps:
       - uses: actions/checkout@v6
@@ -761,13 +765,6 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         run: npm ci
-      - name: Install browser engines
-        run: |
-          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            npx playwright install --with-deps chromium webkit
-          else
-            npx playwright install --with-deps chromium
-          fi
       - name: Run focused transcript browser suite
         env:
           SESSION_ACTIVITY_BROWSER_MATRIX: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1' || '0' }}
