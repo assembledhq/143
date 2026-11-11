@@ -748,7 +748,8 @@ jobs:
     # required-checks treats a skipped job as passing, so a plain job-level
     # condition is enough — matching every other conditional job here.
     if: needs.changes.outputs.session_transcript_e2e == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    # Keep browser dependency installation stable during the Ubuntu 26.04 rollout.
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: frontend
