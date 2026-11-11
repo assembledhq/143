@@ -11,7 +11,7 @@ func TestClaudeCodeModelConstants(t *testing.T) {
 
 	require.Equal(t, ClaudeCodeModelOpus5, DefaultClaudeCodeModel, "DefaultClaudeCodeModel should use Opus 5")
 	require.Equal(t,
-		[]string{ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus55, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet55, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku55, ClaudeCodeModelHaiku45},
+		[]string{ClaudeCodeModelFable52, ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus55, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet55, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku55, ClaudeCodeModelHaiku45},
 		AvailableClaudeCodeModels,
 		"AvailableClaudeCodeModels should be ordered by capability",
 	)
@@ -240,6 +240,7 @@ func TestValidateModelForAgentType(t *testing.T) {
 		{name: "API GPT 5.4 mini remains valid", agentType: AgentTypeCodex, model: "gpt-5.4-mini"},
 		{name: "saved Spark settings remain valid", agentType: AgentTypeCodex, model: "gpt-5.3-codex-spark"},
 		{name: "valid claude model", agentType: AgentTypeClaudeCode, model: ClaudeCodeModelSonnet45},
+		{name: "valid Fable 5.2", agentType: AgentTypeClaudeCode, model: "claude-fable-5-2"},
 		{name: "valid Sonnet 5.5", agentType: AgentTypeClaudeCode, model: "claude-sonnet-5-5"},
 		{name: "valid Haiku 5.5", agentType: AgentTypeClaudeCode, model: "claude-haiku-5-5"},
 		{name: "valid amp mode", agentType: AgentTypeAmp, model: AmpModeSmart},
@@ -319,6 +320,7 @@ func TestAgentTypeForModel(t *testing.T) {
 		{"claude-sonnet-5-5", AgentTypeClaudeCode},
 		{"claude-haiku-5-5", AgentTypeClaudeCode},
 		{"claude-fable-5-1", AgentTypeClaudeCode},
+		{"claude-fable-5-2", AgentTypeClaudeCode},
 		{"gpt-6-sol", AgentTypeCodex},
 		{"gpt-6-luna", AgentTypeCodex},
 		{"claude-opus-5-5", AgentTypeClaudeCode},
@@ -377,6 +379,17 @@ func TestValidateSettingsModels(t *testing.T) {
 			name:     "rejects negative max_concurrent_runs",
 			settings: OrgSettings{MaxConcurrentRuns: -1},
 			wantErr:  true,
+		},
+		{
+			name: "accepts Fable 5.2 in agent config and defaults",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"claude_code": {"ANTHROPIC_MODEL": "claude-fable-5-2"},
+				},
+				CodingAgentModelDefaults: map[AgentType]string{
+					AgentTypeClaudeCode: "claude-fable-5-2",
+				},
+			},
 		},
 		{
 			name: "accepts Astra and Fable 5.1 in agent config and defaults",

@@ -40,6 +40,7 @@ var AvailablePiModels = []string{
 }
 
 const (
+	ClaudeCodeModelFable52  = "claude-fable-5-2"
 	ClaudeCodeModelFable51  = "claude-fable-5-1"
 	ClaudeCodeModelFable5   = "claude-fable-5"
 	ClaudeCodeModelOpus55   = "claude-opus-5-5"
@@ -58,7 +59,7 @@ const DefaultClaudeCodeModel = ClaudeCodeModelOpus5
 
 // AvailableClaudeCodeModels accepts explicit IDs for API and subscription auth;
 // actual access depends on the credential, provider, region and CLI version.
-var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus55, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet55, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku55, ClaudeCodeModelHaiku45}
+var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable52, ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus55, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet55, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku55, ClaudeCodeModelHaiku45}
 
 const (
 	CodexModelGPT6Astra       = "gpt-6-astra"
