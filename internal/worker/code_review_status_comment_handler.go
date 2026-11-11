@@ -248,8 +248,10 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 			provisionalBody = ""
 		}
 		if provisionalBody != "" {
-			provisionalBody, _ = models.SplitCodeReviewCommentFooter(provisionalBody, sessionURL)
+			var savedFooter models.CodeReviewCommentFooter
+			provisionalBody, savedFooter = models.SplitCodeReviewCommentFooter(provisionalBody, sessionURL)
 			paragraphs = append(paragraphs, provisionalBody)
+			footer.SizeLimitOverrideURL = savedFooter.SizeLimitOverrideURL
 		} else {
 			announcement := "143 Code Reviewer has started reviewing this pull request"
 			if !metadata.CreatedAt.IsZero() {
