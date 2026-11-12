@@ -87,7 +87,7 @@ The selected versions are also used by subsequent repository bootstrap commands.
 
 Package credentials belong to the selected repository. They are not injected as environment variables, exposed to coding agents, or available to arbitrary repository scripts. Preview applications and preview secret bundles use their existing configuration separately.
 
-Authenticated setup requires a trusted repository configuration. Reviews from forks or with unknown source trust cannot use repository package credentials. This initial setup supports scoped npm packages downloaded over HTTPS and npm workspace links. Git, SSH, HTTP, file dependencies, and direct tarball URL dependency specifications are rejected. Other package managers and registry credentials are not supported.
+Authenticated setup requires a trusted repository configuration. Reviews from forks or with unknown source trust cannot use repository package credentials. Setup supports scoped npm packages downloaded over HTTPS and npm workspace links. A configured npm target can declare a `file:` dependency on a package directory under any configured target. The lockfile must link to that same directory, and only the package manifest is staged for installation. Git, SSH, HTTP, local tarballs, and direct tarball URL dependency specifications are rejected. Other package managers and registry credentials are not supported.
 
 ## Troubleshooting
 

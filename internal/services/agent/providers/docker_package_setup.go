@@ -391,7 +391,7 @@ func validateNPMSetupArchive(file *os.File, files map[string]string) error {
 }
 
 const npmSetupProbePython = `
-import hashlib,json,os,pathlib,stat,sys
+import hashlib,json,os,pathlib,re,stat,sys
 p=json.loads(sys.argv[1]);root=pathlib.Path(p['work_dir'])
 if not root.is_absolute() or root.resolve()!=root: raise RuntimeError('unsafe workspace')
 files={};total=0;managed_parents=set()
@@ -415,25 +415,56 @@ for target in p['targets']:
    total+=len(raw)
    if len(files)>=512 or total>16*1024*1024: raise RuntimeError('manifest capacity')
    files[relative]=raw.decode()
- manifest=json.loads(files[(pathlib.PurePosixPath(directory)/'package.json').as_posix()])
+
+# npm ci leaves local directories as links with --install-links=false. Match
+# only direct file: declarations to a lock link and a safely collected manifest.
+def local_manifest(directory, value):
+ if not isinstance(value,str) or not re.fullmatch(r'(?:\./)?(?:\.\./)*(?:[a-zA-Z0-9_@.-]+/)*[a-zA-Z0-9_@.-]+',value): raise RuntimeError('unsafe local package path')
+ base=pathlib.PurePosixPath(directory)
+ parts=value.removeprefix('./').split('/')
+ while parts and parts[0]=='..':
+  if base==pathlib.PurePosixPath('.'): raise RuntimeError('local package escapes repository')
+  base=base.parent;parts=parts[1:]
+ if not parts or any(part in {'.','..','.git','.143','node_modules'} for part in parts): raise RuntimeError('unsafe local package path')
+ return (base.joinpath(*parts)/'package.json').as_posix()
+
+dependency_fields=('dependencies','devDependencies','optionalDependencies')
+verified_specs=set()
+for target in p['targets']:
+ directory=target['directory']
+ manifest_path=(pathlib.PurePosixPath(directory)/'package.json').as_posix()
+ manifest=json.loads(files[manifest_path])
  lock=json.loads(files[(pathlib.PurePosixPath(directory)/'package-lock.json').as_posix()])
  if lock.get('lockfileVersion') not in (2,3) or not isinstance(lock.get('packages'),dict): raise RuntimeError('lock version')
+ local_links={}
+ for field in dependency_fields:
+  for name,spec in manifest.get(field,{}).items():
+   if not isinstance(spec,str) or not spec.startswith('file:'): continue
+   candidate=local_manifest(directory,spec[len('file:'):])
+   link='node_modules/'+name
+   entry=lock['packages'].get(link,{})
+   if entry.get('link') is not True or local_manifest(directory,entry.get('resolved'))!=candidate or candidate not in files: raise RuntimeError('unsupported local dependency')
+   local_links[link]=candidate
+   verified_specs.add((manifest_path,name,spec))
  for name,entry in lock['packages'].items():
   if entry.get('link'):
-   resolved=entry.get('resolved','')
-   candidate=pathlib.PurePosixPath(directory)/resolved/'package.json'
-   if '..' in candidate.parts or candidate.is_absolute() or candidate.as_posix() not in files: raise RuntimeError('unsafe workspace link')
-   managed_parents.add(candidate.parent.as_posix())
+   candidate=local_links.get(name)
+   if candidate is None:
+    workspace=pathlib.PurePosixPath(directory)/entry.get('resolved','')/'package.json'
+    if '..' in workspace.parts or workspace.is_absolute() or workspace.as_posix() not in files: raise RuntimeError('unsafe workspace link')
+    candidate=workspace.as_posix()
+   managed_parents.add(pathlib.PurePosixPath(candidate).parent.as_posix())
   elif entry.get('resolved'):
    from urllib.parse import urlparse
    url=urlparse(entry['resolved'])
    if url.scheme!='https' or not url.hostname or url.username or url.password: raise RuntimeError('unsupported dependency transport')
- for relative,raw in files.items():
-  if not relative.endswith('package.json') or pathlib.PurePosixPath(relative).parent.as_posix() not in managed_parents: continue
-  package=json.loads(raw)
-  for field in ('dependencies','devDependencies','optionalDependencies'):
-   for spec in package.get(field,{}).values():
-    if not isinstance(spec,str) or spec.startswith(('file:','link:','git:','git+','http:','https:','ssh:','github:')) or '/' in spec and not spec.startswith(('npm:','@')): raise RuntimeError('unsupported dependency')
+for relative,raw in files.items():
+ if not relative.endswith('package.json') or pathlib.PurePosixPath(relative).parent.as_posix() not in managed_parents: continue
+ package=json.loads(raw)
+ for field in dependency_fields:
+  for name,spec in package.get(field,{}).items():
+   if isinstance(spec,str) and (relative,name,spec) in verified_specs: continue
+   if not isinstance(spec,str) or spec.startswith(('file:','link:','git:','git+','http:','https:','ssh:','github:')) or '/' in spec and not spec.startswith(('npm:','@')): raise RuntimeError('unsupported dependency')
 # Capture selectors only at the repository and explicit setup-target roots.
 for directory in sorted(set(['.']+[t['directory'] for t in p['targets']])):
  for name in ('.nvmrc','.node-version','package.json'):

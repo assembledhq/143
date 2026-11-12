@@ -84,6 +84,95 @@ func TestNPMSetupProbeRejectsUnsafeManifests(t *testing.T) {
 	}
 }
 
+func TestNPMSetupProbeAcceptsLockBackedLocalDirectories(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		targets []repoconfig.NPMSetup
+	}{
+		{name: "root before nested", targets: []repoconfig.NPMSetup{{Directory: "."}, {Directory: "packages/ui"}}},
+		{name: "nested before root", targets: []repoconfig.NPMSetup{{Directory: "packages/ui"}, {Directory: "."}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err, "fixture paths should be canonical")
+			manifests := map[string]string{
+				"package.json":                  `{"name":"app","version":"1.0.0","dependencies":{"example":"file:vendor/example"}}`,
+				"package-lock.json":             `{"lockfileVersion":3,"packages":{"":{"name":"app","version":"1.0.0","dependencies":{"example":"file:vendor/example"}},"node_modules/example":{"link":true,"resolved":"vendor/example"},"vendor/example":{"version":"1.0.0"}}}`,
+				"packages/ui/package.json":      `{"name":"ui","version":"1.0.0","devDependencies":{"example":"file:../../vendor/example"}}`,
+				"packages/ui/package-lock.json": `{"lockfileVersion":3,"packages":{"":{"name":"ui","version":"1.0.0","devDependencies":{"example":"file:../../vendor/example"}},"node_modules/example":{"link":true,"resolved":"../../vendor/example"},"../../vendor/example":{"version":"1.0.0"}}}`,
+				"vendor/example/package.json":   `{"name":"example","version":"1.0.0","main":"index.js"}`,
+			}
+			for name, content := range manifests {
+				writeNPMProbeFixtureFile(t, root, name, content)
+			}
+			writeNPMProbeFixtureFile(t, root, "vendor/example/index.js", "module.exports = 'fixture';")
+
+			result, err := runSetupProbeFixture(t, root, map[string]any{"targets": tt.targets})
+			require.NoError(t, err, "install targets should accept the same in-repository vendored package")
+			require.Equal(t, manifests, result.Files, "only manifests should cross into the credential-bearing installer")
+		})
+	}
+}
+
+func TestNPMSetupProbeRejectsUnsafeLocalDirectories(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		spec            string
+		lockEntry       string
+		linkedDirectory bool
+		nestedOnly      bool
+	}{
+		{name: "outside repository", spec: "file:../../../outside", lockEntry: `,"node_modules/example":{"link":true,"resolved":"../../../outside"},"../../../outside":{"version":"1.0.0"}`},
+		{name: "missing lock link", spec: "file:../../vendor/example"},
+		{name: "mismatched lock link", spec: "file:../../vendor/example", lockEntry: `,"node_modules/example":{"link":true,"resolved":"../../vendor/other"},"../../vendor/other":{"version":"1.0.0"}`},
+		{name: "local tarball", spec: "file:../../vendor/example.tgz", lockEntry: `,"node_modules/example":{"resolved":"file:../../vendor/example.tgz","version":"1.0.0"}`},
+		{name: "symlinked local directory", spec: "file:../../vendor/example", lockEntry: `,"node_modules/example":{"link":true,"resolved":"../../vendor/example"},"../../vendor/example":{"version":"1.0.0"}`, linkedDirectory: true},
+		{name: "uncollected local directory", spec: "file:../../vendor/example", lockEntry: `,"node_modules/example":{"link":true,"resolved":"../../vendor/example"},"../../vendor/example":{"version":"1.0.0"}`, nestedOnly: true},
+		{name: "reserved local directory", spec: "file:../../.143/example", lockEntry: `,"node_modules/example":{"link":true,"resolved":"../../.143/example"},"../../.143/example":{"version":"1.0.0"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			parent, err := filepath.EvalSymlinks(t.TempDir())
+			require.NoError(t, err, "fixture paths should be canonical")
+			root := filepath.Join(parent, "repo")
+			writeNPMProbeFixtureFile(t, root, "package.json", `{"name":"app","version":"1.0.0"}`)
+			writeNPMProbeFixtureFile(t, root, "package-lock.json", `{"lockfileVersion":3,"packages":{"":{"name":"app","version":"1.0.0"}}}`)
+			writeNPMProbeFixtureFile(t, root, "packages/ui/package.json",
+				fmt.Sprintf(`{"name":"ui","version":"1.0.0","dependencies":{"example":%q}}`, tt.spec))
+			writeNPMProbeFixtureFile(t, root, "packages/ui/package-lock.json",
+				fmt.Sprintf(`{"lockfileVersion":3,"packages":{"":{"name":"ui","version":"1.0.0","dependencies":{"example":%q}}%s}}`, tt.spec, tt.lockEntry))
+			writeNPMProbeFixtureFile(t, parent, "outside/package.json", `{"name":"example","version":"1.0.0"}`)
+			writeNPMProbeFixtureFile(t, root, "vendor/other/package.json", `{"name":"example","version":"1.0.0"}`)
+			writeNPMProbeFixtureFile(t, root, ".143/example/package.json", `{"name":"example","version":"1.0.0"}`)
+			writeNPMProbeFixtureFile(t, root, "vendor/example.tgz", "fixture tarball contents")
+			if tt.linkedDirectory {
+				require.NoError(t, os.Symlink("other", filepath.Join(root, "vendor", "example")), "fixture should link the package directory")
+			} else {
+				writeNPMProbeFixtureFile(t, root, "vendor/example/package.json", `{"name":"example","version":"1.0.0"}`)
+			}
+
+			targets := []repoconfig.NPMSetup{{Directory: "packages/ui"}, {Directory: "."}}
+			if tt.nestedOnly {
+				targets = targets[:1]
+			}
+			_, err = runSetupProbeFixture(t, root, map[string]any{"targets": targets})
+			require.Error(t, err, "unsafe or unverified local dependencies must fail before credential resolution")
+		})
+	}
+}
+
+func writeNPMProbeFixtureFile(t *testing.T, root, name, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(name))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700), "fixture directory should exist for %s", name)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600), "fixture file should exist for %s", name)
+}
+
 func TestNPMSetupProbeLinkedGitWorktreeAndExistingOutputs(t *testing.T) {
 	t.Parallel()
 	parent, err := filepath.EvalSymlinks(t.TempDir())
