@@ -279,22 +279,7 @@ func (c *WorkerPreviewClient) newRequest(
 func decodeWorkerResponse[T any](resp *http.Response) (*T, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		var payload models.ErrorResponse
-		if err := json.Unmarshal(body, &payload); err == nil && payload.Error.Code != "" {
-			return nil, &WorkerRequestError{
-				StatusCode:   resp.StatusCode,
-				Code:         payload.Error.Code,
-				Message:      payload.Error.Message,
-				Details:      payload.Error.Details,
-				WorkerNodeID: responseWorkerNodeID(resp),
-			}
-		}
-		return nil, &WorkerRequestError{
-			StatusCode:   resp.StatusCode,
-			Message:      strings.TrimSpace(string(body)),
-			WorkerNodeID: responseWorkerNodeID(resp),
-		}
+		return nil, decodeWorkerError(resp)
 	}
 	var payload models.SingleResponse[T]
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -306,28 +291,32 @@ func decodeWorkerResponse[T any](resp *http.Response) (*T, error) {
 func decodeWorkerListResponse[T any](resp *http.Response) ([]T, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		var payload models.ErrorResponse
-		if err := json.Unmarshal(body, &payload); err == nil && payload.Error.Code != "" {
-			return nil, &WorkerRequestError{
-				StatusCode:   resp.StatusCode,
-				Code:         payload.Error.Code,
-				Message:      payload.Error.Message,
-				Details:      payload.Error.Details,
-				WorkerNodeID: responseWorkerNodeID(resp),
-			}
-		}
-		return nil, &WorkerRequestError{
-			StatusCode:   resp.StatusCode,
-			Message:      strings.TrimSpace(string(body)),
-			WorkerNodeID: responseWorkerNodeID(resp),
-		}
+		return nil, decodeWorkerError(resp)
 	}
 	var payload models.ListResponse[T]
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	return payload.Data, nil
+}
+
+func decodeWorkerError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	var payload models.ErrorResponse
+	if err := json.Unmarshal(body, &payload); err == nil && payload.Error.Code != "" {
+		return &WorkerRequestError{
+			StatusCode:   resp.StatusCode,
+			Code:         payload.Error.Code,
+			Message:      payload.Error.Message,
+			Details:      payload.Error.Details,
+			WorkerNodeID: responseWorkerNodeID(resp),
+		}
+	}
+	return &WorkerRequestError{
+		StatusCode:   resp.StatusCode,
+		Message:      strings.TrimSpace(string(body)),
+		WorkerNodeID: responseWorkerNodeID(resp),
+	}
 }
 
 func responseWorkerNodeID(resp *http.Response) string {
