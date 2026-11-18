@@ -32,6 +32,12 @@ export const AVAILABLE_CLAUDE_CODE_MODELS = [
 
 export const DEFAULT_CLAUDE_CODE_MODEL = CLAUDE_CODE_MODEL_OPUS_5;
 
+export const CODEX_MODEL_GPT_6_2_ASTRA = "gpt-6.2-astra";
+// Local alias: the adapter sends gpt-6.2-astra with service_tier="priority".
+export const CODEX_MODEL_GPT_6_2_ASTRA_FAST = "gpt-6.2-astra-fast";
+export const CODEX_MODEL_GPT_6_2_SOL = "gpt-6.2-sol";
+// Local alias: the adapter sends gpt-6.2-sol with service_tier="priority".
+export const CODEX_MODEL_GPT_6_2_SOL_FAST = "gpt-6.2-sol-fast";
 export const CODEX_MODEL_GPT_6_ASTRA = "gpt-6-astra";
 export const CODEX_MODEL_GPT_6_1_SOL = "gpt-6.1-sol";
 // Local alias: the adapter sends gpt-6.1-sol with service_tier="priority".
@@ -62,7 +68,12 @@ export const CODEX_MODEL_GPT_5_3_CODEX_SPARK = "gpt-5.3-codex-spark";
 // retired entirely. This shared list does not establish account access.
 // See https://learn.chatgpt.com/docs/models for current auth-specific availability.
 export const AVAILABLE_CODEX_MODELS = [
+  // Keep the first entry stable for picker fallbacks that use models[0].
   CODEX_MODEL_GPT_6_ASTRA,
+  CODEX_MODEL_GPT_6_2_ASTRA,
+  CODEX_MODEL_GPT_6_2_ASTRA_FAST,
+  CODEX_MODEL_GPT_6_2_SOL,
+  CODEX_MODEL_GPT_6_2_SOL_FAST,
   CODEX_MODEL_GPT_6_1_SOL,
   CODEX_MODEL_GPT_6_1_SOL_FAST,
   CODEX_MODEL_GPT_6_1_TERRA,

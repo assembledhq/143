@@ -62,6 +62,10 @@ const DefaultClaudeCodeModel = ClaudeCodeModelOpus5
 var AvailableClaudeCodeModels = []string{ClaudeCodeModelFable52, ClaudeCodeModelFable51, ClaudeCodeModelFable5, ClaudeCodeModelOpus55, ClaudeCodeModelOpus5, ClaudeCodeModelOpus48, ClaudeCodeModelOpus47, ClaudeCodeModelOpus46, ClaudeCodeModelSonnet55, ClaudeCodeModelSonnet46, ClaudeCodeModelSonnet45, ClaudeCodeModelHaiku55, ClaudeCodeModelHaiku45}
 
 const (
+	CodexModelGPT62Astra      = "gpt-6.2-astra"
+	CodexModelGPT62AstraFast  = "gpt-6.2-astra-fast"
+	CodexModelGPT62Sol        = "gpt-6.2-sol"
+	CodexModelGPT62SolFast    = "gpt-6.2-sol-fast"
 	CodexModelGPT6Astra       = "gpt-6-astra"
 	CodexModelGPT61Sol        = "gpt-6.1-sol"
 	CodexModelGPT61SolFast    = "gpt-6.1-sol-fast"
@@ -94,6 +98,10 @@ const DefaultCodexModel = CodexModelGPT56Sol
 // See https://learn.chatgpt.com/docs/models for current auth-specific availability.
 var AvailableCodexModels = []string{
 	CodexModelGPT6Astra,
+	CodexModelGPT62Astra,
+	CodexModelGPT62AstraFast,
+	CodexModelGPT62Sol,
+	CodexModelGPT62SolFast,
 	CodexModelGPT61Sol,
 	CodexModelGPT61SolFast,
 	CodexModelGPT61Terra,
@@ -223,6 +231,10 @@ type CodexRuntimeSpec struct {
 // model ID Codex CLI accepts plus a priority-service-tier flag.
 func CodexRuntimeModel(model string) CodexRuntimeSpec {
 	switch model {
+	case CodexModelGPT62AstraFast:
+		return CodexRuntimeSpec{Model: CodexModelGPT62Astra, PriorityTier: true}
+	case CodexModelGPT62SolFast:
+		return CodexRuntimeSpec{Model: CodexModelGPT62Sol, PriorityTier: true}
 	case CodexModelGPT61SolFast:
 		return CodexRuntimeSpec{Model: CodexModelGPT61Sol, PriorityTier: true}
 	case CodexModelGPT61TerraFast:

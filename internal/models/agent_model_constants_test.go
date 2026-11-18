@@ -24,6 +24,10 @@ func TestCodexModelConstants(t *testing.T) {
 	require.Equal(t,
 		[]string{
 			CodexModelGPT6Astra,
+			CodexModelGPT62Astra,
+			CodexModelGPT62AstraFast,
+			CodexModelGPT62Sol,
+			CodexModelGPT62SolFast,
 			CodexModelGPT61Sol,
 			CodexModelGPT61SolFast,
 			CodexModelGPT61Terra,
@@ -137,6 +141,10 @@ func TestCodexRuntimeModel(t *testing.T) {
 		expected     string
 		priorityTier bool
 	}{
+		{name: "gpt 6.2 astra fast maps to astra priority", model: CodexModelGPT62AstraFast, expected: "gpt-6.2-astra", priorityTier: true},
+		{name: "regular gpt 6.2 astra stays unchanged", model: CodexModelGPT62Astra, expected: "gpt-6.2-astra"},
+		{name: "gpt 6.2 sol fast maps to sol priority", model: CodexModelGPT62SolFast, expected: "gpt-6.2-sol", priorityTier: true},
+		{name: "regular gpt 6.2 sol stays unchanged", model: CodexModelGPT62Sol, expected: "gpt-6.2-sol"},
 		{name: "gpt 6.1 sol fast maps to gpt 6.1 sol priority", model: CodexModelGPT61SolFast, expected: "gpt-6.1-sol", priorityTier: true},
 		{name: "regular gpt 6.1 sol stays unchanged", model: CodexModelGPT61Sol, expected: "gpt-6.1-sol"},
 		{name: "gpt 6.1 terra fast maps to gpt 6.1 terra priority", model: CodexModelGPT61TerraFast, expected: "gpt-6.1-terra", priorityTier: true},
@@ -235,6 +243,10 @@ func TestValidateModelForAgentType(t *testing.T) {
 		{name: "valid GPT 6.1 Sol fast alias", agentType: AgentTypeCodex, model: "gpt-6.1-sol-fast"},
 		{name: "valid GPT 6.1 Terra", agentType: AgentTypeCodex, model: "gpt-6.1-terra"},
 		{name: "valid GPT 6.1 Terra fast alias", agentType: AgentTypeCodex, model: "gpt-6.1-terra-fast"},
+		{name: "valid GPT 6.2 Astra", agentType: AgentTypeCodex, model: "gpt-6.2-astra"},
+		{name: "valid GPT 6.2 Astra fast alias", agentType: AgentTypeCodex, model: "gpt-6.2-astra-fast"},
+		{name: "valid GPT 6.2 Sol", agentType: AgentTypeCodex, model: "gpt-6.2-sol"},
+		{name: "valid GPT 6.2 Sol fast alias", agentType: AgentTypeCodex, model: "gpt-6.2-sol-fast"},
 		{name: "API GPT 5.5 remains valid", agentType: AgentTypeCodex, model: "gpt-5.5"},
 		{name: "API GPT 5.4 remains valid", agentType: AgentTypeCodex, model: "gpt-5.4"},
 		{name: "API GPT 5.4 mini remains valid", agentType: AgentTypeCodex, model: "gpt-5.4-mini"},
@@ -316,6 +328,10 @@ func TestAgentTypeForModel(t *testing.T) {
 		{"gpt-6.1-sol-fast", AgentTypeCodex},
 		{"gpt-6.1-terra", AgentTypeCodex},
 		{"gpt-6.1-terra-fast", AgentTypeCodex},
+		{"gpt-6.2-astra", AgentTypeCodex},
+		{"gpt-6.2-astra-fast", AgentTypeCodex},
+		{"gpt-6.2-sol", AgentTypeCodex},
+		{"gpt-6.2-sol-fast", AgentTypeCodex},
 		{"gpt-5.3-codex-spark", AgentTypeCodex},
 		{"claude-sonnet-5-5", AgentTypeClaudeCode},
 		{"claude-haiku-5-5", AgentTypeClaudeCode},
@@ -379,6 +395,24 @@ func TestValidateSettingsModels(t *testing.T) {
 			name:     "rejects negative max_concurrent_runs",
 			settings: OrgSettings{MaxConcurrentRuns: -1},
 			wantErr:  true,
+		},
+		{
+			name: "accepts GPT 6.2 Astra fast config and Sol default",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"codex": {"OPENAI_MODEL": "gpt-6.2-astra-fast"},
+				},
+				CodingAgentModelDefaults: map[AgentType]string{AgentTypeCodex: "gpt-6.2-sol"},
+			},
+		},
+		{
+			name: "accepts GPT 6.2 Sol fast config and Astra default",
+			settings: OrgSettings{
+				AgentConfig: AgentEnvConfig{
+					"codex": {"OPENAI_MODEL": "gpt-6.2-sol-fast"},
+				},
+				CodingAgentModelDefaults: map[AgentType]string{AgentTypeCodex: "gpt-6.2-astra"},
+			},
 		},
 		{
 			name: "accepts Fable 5.2 in agent config and defaults",
