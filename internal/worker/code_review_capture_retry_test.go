@@ -62,7 +62,11 @@ func TestFullAssessmentCaptureGitHubRetry(t *testing.T) {
 						require.NoError(t, mock.ExpectationsWereMet(), "initial capture must look up only the owning organization's session")
 						calls = capture.calls
 					case "publication freshness":
-						_, err = captureFreshFullAssessment(context.Background(), services, job, models.CodeReviewAssessment{})
+						assessment := models.CodeReviewAssessment{
+							InputManifest: []byte(`{"input_digest":"fixture-input"}`),
+							InputDigest:   "fixture-input",
+						}
+						_, err = captureFreshFullAssessment(context.Background(), services, job, assessment)
 						calls = capture.calls
 					case "visual discovery":
 						visual := &assessmentVisualCheckpoint{captureErr: cause}

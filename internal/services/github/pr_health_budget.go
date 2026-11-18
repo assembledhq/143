@@ -10,9 +10,49 @@ import (
 
 	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/github/identity"
+	githubtelemetry "github.com/assembledhq/143/internal/services/github/telemetry"
 )
 
 var errPullRequestBackgroundQuotaDeferred = errors.New("pull request background quota budget deferred")
+
+// ErrPullRequestCheckRefreshDeferred is local admission backpressure. It must
+// not open a provider cooldown or spend the job's normal retry attempts.
+var ErrPullRequestCheckRefreshDeferred = errors.New("pull request check refresh budget deferred")
+
+func (s *PRService) syncWebhookPullRequestChecks(ctx context.Context, orgID, pullRequestID uuid.UUID) error {
+	needed, err := s.refreshPullRequestChecksNeeded(ctx, orgID, pullRequestID)
+	if err != nil || !needed {
+		return err
+	}
+	resolved, err := s.resolvePullRequestHealthSync(ctx, orgID, pullRequestID)
+	if err != nil {
+		return err
+	}
+	installationID := resolved.resolution.InstallationID
+	admitted, err := s.backgroundQuotaController.AdmitCheckRefresh(ctx, installationID)
+	if err := checkRefreshAdmissionError(admitted, err); err != nil {
+		return err
+	}
+	return s.syncResolvedPullRequestState(ctx, orgID, pullRequestID, resolved, false)
+}
+
+func (s *PRService) checkRefreshContinuation(ctx context.Context) error {
+	if PullRequestSyncReasonFromContext(ctx) != PullRequestSyncReasonIncomplete {
+		return nil
+	}
+	metadata, _ := githubtelemetry.RequestMetadataFromContext(ctx)
+	return checkRefreshAdmissionError(s.backgroundQuotaController.CheckRefreshHasHeadroom(ctx, metadata.InstallationID))
+}
+
+func checkRefreshAdmissionError(admitted bool, err error) error {
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrPullRequestCheckRefreshDeferred, err)
+	}
+	if !admitted {
+		return ErrPullRequestCheckRefreshDeferred
+	}
+	return nil
+}
 
 func (s *PRService) backgroundQuotaFlightKey(ctx context.Context, key string, resolution *identity.Resolution) string {
 	if s.backgroundQuotaFlightNeedsResolution(ctx) && resolution != nil && resolution.Source == identity.SourceApp && s.backgroundQuotaController.EnforcesBackgroundQuota(resolution.InstallationID) {

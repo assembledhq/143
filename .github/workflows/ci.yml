@@ -27,6 +27,7 @@ env:
 jobs:
   changes:
     name: Detect Changes
+    # Keep change detection independent of the external runner fleet.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -53,6 +54,10 @@ jobs:
               - 'go.sum'
               - '.143/config.json'
               - '.143/review-dependencies*'
+              - 'scripts/verify_code_review_export.py'
+              - 'scripts/test_verify_code_review_export.py'
+              - 'scripts/code_review_export_*.py'
+              - 'scripts/test_code_review_export_custodian.py'
             frontend:
               - 'frontend/**'
             migrations:
@@ -72,6 +77,8 @@ jobs:
               - 'frontend/Dockerfile*'
               - 'sandbox/Dockerfile*'
               - 'sandbox/versions.json'
+              - 'sandbox/install_node_toolchains.py'
+              - 'internal/nodetoolchain/catalog.json'
               - '.dockerignore'
             deploy:
               - 'deploy/**'
@@ -81,6 +88,12 @@ jobs:
               - 'go.mod'
               - 'go.sum'
             ci:
+              - '.githooks/**'
+              - 'scripts/preflight.py'
+              - 'scripts/test_preflight.py'
+              - 'Makefile'
+              - 'setup.sh'
+              - '.golangci.yml'
               - '.github/workflows/**'
               - '.github/scripts/**'
             # Keep this deliberately broad while activity capsules own the
@@ -96,7 +109,7 @@ jobs:
     name: Backend Lint
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.migrations == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
@@ -109,12 +122,17 @@ jobs:
         with:
           version: v2.10.1
 
-  backend-test:
-    name: Backend Test
+  backend-test-suites:
+    name: Backend Test (${{ matrix.suite }})
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.suite == 'unit' && 'ubuntu-latest' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, database, commands]
     env:
+      BACKEND_TEST_SUITE: ${{ matrix.suite }}
       DATABASE_URL: postgres://onefortythree:dev@localhost:5432/onefortythree?sslmode=disable
       # Drives DB-backed migration behavior tests (e.g. the coding-credential
       # versioning test in internal/db). They self-skip when unset, so this
@@ -125,12 +143,16 @@ jobs:
         with:
           persist-credentials: false
       - name: Test CI helper scripts
-        run: python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
+        if: matrix.suite == 'unit'
+        run: |
+          python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'
+          python3 -B -m unittest discover -s scripts -p 'test_preflight.py'
       - name: Start Postgres with registry fallback
         id: postgres
         timeout-minutes: 10
         run: bash .github/scripts/start-ci-postgres.sh
       - name: Preload preview infrastructure test image
+        if: matrix.suite == 'database'
         timeout-minutes: 10
         # Fail early if every source is unavailable, before compiling the suite.
         # Preserve the production template's image name and PostgreSQL variant.
@@ -142,8 +164,55 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
+          # Lightweight jobs must not populate Backend Test's build cache.
+          cache: false
+
+      - name: Set up Node for isolated npm setup tests
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Identify backend Go cache
+        id: go-cache
+        run: |
+          go_version="$(go env GOVERSION)"
+          go_build_cache="$(go env GOCACHE)"
+          go_module_cache="$(go env GOMODCACHE)"
+          mode=count
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=race-atomic
+          fi
+          family="backend-go-v2-${RUNNER_OS}-${RUNNER_ARCH}-${ImageOS}-${go_version}-${BACKEND_TEST_SUITE}"
+          {
+            echo "family=$family"
+            echo "scope=${family}-${mode}"
+            echo "build=$go_build_cache"
+            echo "modules=$go_module_cache"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Cache backend Go modules and build outputs
+        uses: actions/cache@v5
+        with:
+          path: |
+            ${{ steps.go-cache.outputs.build }}
+            ${{ steps.go-cache.outputs.modules }}
+          # Cache entries are immutable. Each commit saves the complete warmed
+          # suite cache after success. Suites never compete to publish one key.
+          key: ${{ steps.go-cache.outputs.scope }}-${{ hashFiles('go.mod', 'go.sum') }}-${{ github.sha }}
+          # New PRs can fall back to this suite's main race-mode cache: Go keys
+          # objects by build flags, while modules are reusable across modes.
+          restore-keys: |
+            ${{ steps.go-cache.outputs.scope }}-${{ hashFiles('go.mod', 'go.sum') }}-
+            ${{ steps.go-cache.outputs.scope }}-
+            ${{ steps.go-cache.outputs.family }}-
+
+      - name: Reset cached Go test results
+        # Cached results do not track external PostgreSQL state. Keep compiled
+        # objects and downloaded modules, but execute every test against its fixtures.
+        run: go clean -testcache
 
       - name: Test review dependency recipe
+        if: matrix.suite == 'unit'
         run: python3 -B .143/review-dependencies_test.py
 
       - name: Download Go modules
@@ -164,16 +233,19 @@ jobs:
           echo "max_locks_per_transaction=$actual"
           test "$actual" = "256"
 
-      - name: Run go vet and migrations
-        run: |
-          go run cmd/migrate/main.go up
-          go vet ./...
+      - name: Run migrations
+        run: go run cmd/migrate/main.go up
+
+      - name: Run go vet
+        if: matrix.suite == 'unit'
+        run: go vet ./...
 
       - name: Validate demo seed against the migrated schema
-        if: needs.changes.outputs.demo_seed == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
+        if: matrix.suite == 'database' && (needs.changes.outputs.demo_seed == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push')
         run: make demo-seed-check
 
-      - name: Run backend unit tests outside database, agent, and worker packages
+      - name: Run backend unit tests outside database, demoseed, agent, and worker packages
+        if: matrix.suite == 'unit'
         timeout-minutes: 10
         run: |
           mode=count
@@ -188,17 +260,20 @@ jobs:
           unit_packages=()
           while IFS= read -r package; do
             if [[ "$package" != "github.com/assembledhq/143/internal/db" && \
+                  "$package" != "github.com/assembledhq/143/internal/demoseed" && \
                   "$package" != "github.com/assembledhq/143/internal/services/agent" && \
                   "$package" != "github.com/assembledhq/143/internal/worker" ]]; then
               unit_packages+=("$package")
             fi
           done <<< "$packages"
-          go test "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
+          go test -json "${unit_packages[@]}" -skip '^TestBrowserChromeDP' -coverpkg=./internal/... \
             -coverprofile=coverage-unit-other.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
-      # Full-schema Postgres fixtures need their own bounded package budget.
-      # Keep database work outside the concurrent general package suite.
-      - name: Run database tests
+      # Demo checks create, migrate, seed, and drop complete sibling databases.
+      # Serialize those fixtures outside the general concurrent package batch.
+      - name: Run demoseed tests
+        if: matrix.suite == 'database'
+        id: demoseed_tests
         timeout-minutes: 10
         run: |
           mode=count
@@ -209,12 +284,109 @@ jobs:
             race=(-race)
             package_timeout=360s
           fi
-          go test ./internal/db -coverpkg=./internal/... -coverprofile=coverage-unit-db.out \
-            -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
+          diagnostics="${RUNNER_TEMP:?}/ci-demoseed-diagnostics"
+          mkdir -p "$diagnostics"
+          set +e
+          go test -json ./internal/demoseed -p=1 -parallel=1 -count=1 -coverpkg=./internal/... \
+            -coverprofile=coverage-unit-demoseed.out -covermode="$mode" "${race[@]}" -timeout="$package_timeout" \
+            2>"$diagnostics/go-test.stderr.log" | tee "$diagnostics/go-test.jsonl"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          capture_status="${statuses[1]}"
+          if ! cat "$diagnostics/go-test.stderr.log" >&2; then
+            echo "::warning::Could not replay demoseed test stderr"
+            capture_status=1
+          fi
+          if ! printf 'go_test=%s\njson_capture=%s\n' "${statuses[0]}" "$capture_status" >"$diagnostics/exit-status.txt"; then
+            echo "::warning::Could not retain demoseed test exit statuses"
+            capture_status=1
+          fi
+          # Preserve the test failure even if diagnostic capture also fails.
+          if [[ "${statuses[0]}" != "0" ]]; then
+            exit "${statuses[0]}"
+          fi
+          exit "$capture_status"
+
+      - name: Collect demoseed test PostgreSQL diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'database' && (steps.demoseed_tests.outcome == 'success' || steps.demoseed_tests.outcome == 'failure') }}
+        timeout-minutes: 1
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+          CI_POSTGRES_DIAGNOSTICS_SCOPE: demoseed
+        run: bash .github/scripts/collect-ci-postgres-diagnostics.sh
+
+      - name: Upload demoseed test diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'database' && (steps.demoseed_tests.outcome == 'success' || steps.demoseed_tests.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: demoseed-test-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-demoseed-diagnostics/
+          retention-days: 7
+          if-no-files-found: error
+
+      # Full-schema Postgres fixtures need their own bounded package budget.
+      # Keep database work outside the concurrent general package suite.
+      # Bound overlapping fixtures, not the concurrency exercised inside a test.
+      - name: Run database tests
+        if: matrix.suite == 'database'
+        id: database_tests
+        timeout-minutes: 10
+        run: |
+          mode=count
+          race=()
+          package_timeout=300s
+          if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            mode=atomic
+            race=(--race)
+            package_timeout=360s
+          fi
+          diagnostics="${RUNNER_TEMP:?}/ci-db-diagnostics"
+          mkdir -p "$diagnostics"
+          # Partition root tests so suite growth cannot exhaust one package budget.
+          # Every root (including fuzz seeds and examples) runs in exactly one shard.
+          # Keep stderr separate so compiler/Redis warnings cannot corrupt JSONL.
+          # Disable errexit only while copying both pipeline statuses immediately.
+          set +e
+          python3 -B .github/scripts/run_go_test_shards.py --shards=4 --diagnostics="$diagnostics" \
+            --coverprofile=coverage-unit-db.out --covermode="$mode" --timeout="$package_timeout" "${race[@]}" \
+            2>"$diagnostics/go-test.stderr.log" | tee "$diagnostics/go-test.jsonl"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          capture_status="${statuses[1]}"
+          if ! cat "$diagnostics/go-test.stderr.log" >&2; then
+            echo "::warning::Could not replay database test stderr"
+            capture_status=1
+          fi
+          if ! printf 'go_test=%s\njson_capture=%s\n' "${statuses[0]}" "$capture_status" >"$diagnostics/exit-status.txt"; then
+            echo "::warning::Could not retain database test exit statuses"
+            capture_status=1
+          fi
+          # A diagnostic/capture failure must never replace the original test failure.
+          if [[ "${statuses[0]}" != "0" ]]; then
+            exit "${statuses[0]}"
+          fi
+          exit "$capture_status"
+
+      - name: Collect database test PostgreSQL diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'database' && (steps.database_tests.outcome == 'success' || steps.database_tests.outcome == 'failure') }}
+        timeout-minutes: 1
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+        run: bash .github/scripts/collect-ci-postgres-diagnostics.sh
+
+      - name: Upload database test diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'database' && (steps.database_tests.outcome == 'success' || steps.database_tests.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: database-test-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-db-diagnostics/
+          retention-days: 7
+          if-no-files-found: error
 
       # Full-schema Postgres fixtures in worker need their own bounded budget.
       # Run that package separately from the concurrent general package suite.
       - name: Run worker unit tests
+        if: matrix.suite == 'database'
         timeout-minutes: 10
         run: |
           mode=count
@@ -225,10 +397,12 @@ jobs:
             race=(-race)
             package_timeout=360s
           fi
-          go test ./internal/worker -coverpkg=./internal/... -coverprofile=coverage-unit-worker.out \
+          # Retain individual test events when a failure has only a package summary.
+          go test -json ./internal/worker -coverpkg=./internal/... -coverprofile=coverage-unit-worker.out \
             -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
       - name: Run agent unit tests
+        if: matrix.suite == 'unit'
         timeout-minutes: 10
         run: |
           mode=count
@@ -242,22 +416,101 @@ jobs:
           go test ./internal/services/agent -coverpkg=./internal/... -coverprofile=coverage-unit-agent.out \
             -covermode="$mode" "${race[@]}" -timeout="$package_timeout"
 
-      - name: Combine backend unit coverage
-        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-db.out coverage-unit-worker.out coverage-unit-agent.out
+      - name: Test offline review export archive utilities
+        if: matrix.suite == 'unit'
+        run: python3 -B -m unittest discover -s scripts -p 'test_*code_review_export*.py'
 
       - name: Run command tests
-        timeout-minutes: 5
+        if: matrix.suite == 'commands'
+        id: command_tests
+        timeout-minutes: 10
         run: |
           race=()
+          shard_race=()
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
             race=(-race)
+            shard_race=(--race)
           fi
-          go test ./cmd/... -count=1 "${race[@]}" -timeout=120s
+          # Bound fresh-database creation/drop across packages and parallel tests,
+          # without reducing concurrency exercised inside individual tests.
+          diagnostics="${RUNNER_TEMP:?}/ci-command-diagnostics"
+          mkdir -p "$diagnostics"
+          run_command_partitions() {
+            local packages package ordinary_status migration_status
+            local command_packages=()
+            local migration_found=0
+            packages="$(go list ./cmd/...)" || return "$?"
+            while IFS= read -r package; do
+              if [[ "$package" == "github.com/assembledhq/143/cmd/migrate" ]]; then
+                migration_found=1
+              elif [[ -n "$package" ]]; then
+                command_packages+=("$package")
+              fi
+            done <<< "$packages"
+            if [[ "$migration_found" != "1" || "${#command_packages[@]}" == "0" ]]; then
+              echo "::error::Unable to discover both command test partitions" >&2
+              return 1
+            fi
+            go test -json "${command_packages[@]}" -p=1 -parallel=2 -count=1 "${race[@]}" -timeout=300s
+            ordinary_status="$?"
+            # Each exact root runs once, with all its subtests, in a fresh
+            # bounded process. Keep the same in-test concurrency and timeout.
+            python3 -B .github/scripts/run_go_test_shards.py --package=./cmd/migrate --shards=4 \
+              --diagnostics="$diagnostics/migrate-shards" --timeout=300s "${shard_race[@]}"
+            migration_status="$?"
+            if ! printf 'ordinary_commands=%s\nmigration_shards=%s\n' "$ordinary_status" "$migration_status" >"$diagnostics/partition-status.txt"; then
+              echo "::warning::Could not retain command partition statuses" >&2
+              if [[ "$ordinary_status" == "0" && "$migration_status" == "0" ]]; then
+                return 1
+              fi
+            fi
+            if [[ "$ordinary_status" != "0" ]]; then
+              return "$ordinary_status"
+            fi
+            return "$migration_status"
+          }
+          set +e
+          run_command_partitions \
+            2>"$diagnostics/go-test.stderr.log" | tee "$diagnostics/go-test.jsonl"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          capture_status="${statuses[1]}"
+          if ! cat "$diagnostics/go-test.stderr.log" >&2; then
+            echo "::warning::Could not replay command test stderr"
+            capture_status=1
+          fi
+          if ! printf 'go_test=%s\njson_capture=%s\n' "${statuses[0]}" "$capture_status" >"$diagnostics/exit-status.txt"; then
+            echo "::warning::Could not retain command test exit statuses"
+            capture_status=1
+          fi
+          # Preserve the test failure even if diagnostic capture also fails.
+          if [[ "${statuses[0]}" != "0" ]]; then
+            exit "${statuses[0]}"
+          fi
+          exit "$capture_status"
+
+      - name: Collect command test PostgreSQL diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'commands' && (steps.command_tests.outcome == 'success' || steps.command_tests.outcome == 'failure') }}
+        timeout-minutes: 1
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+          CI_POSTGRES_DIAGNOSTICS_SCOPE: command
+        run: bash .github/scripts/collect-ci-postgres-diagnostics.sh
+
+      - name: Upload command test diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'commands' && (steps.command_tests.outcome == 'success' || steps.command_tests.outcome == 'failure') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: command-test-diagnostics-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-command-diagnostics/
+          retention-days: 7
+          if-no-files-found: error
 
       # Chrome startup and rendering need CPU that the parallel backend suite
       # can otherwise consume. Keep real browser fixtures in a serial step,
       # with the same race mode and their own coverage contribution.
       - name: Run preview browser lifecycle tests
+        if: matrix.suite == 'database'
         timeout-minutes: 5
         env:
           TEST_BROWSER_REQUIRED: "1"
@@ -265,18 +518,14 @@ jobs:
           preview_chrome_path="$(command -v google-chrome)"
           preview_chrome_binary="$(readlink -f "$preview_chrome_path")"
           test -x "$preview_chrome_binary"
-          preview_chrome_version="$(timeout 5s "$preview_chrome_binary" --version)"
-          case "$preview_chrome_version" in
-            "Google Chrome "*) ;;
-            *) echo "CI browser must identify as Google Chrome" >&2; exit 1 ;;
-          esac
+          preview_chrome_version="$(bash .github/scripts/probe-preview-chrome.sh "$preview_chrome_binary")"
           preview_chrome_dir="$(mktemp -d "${RUNNER_TEMP:?}/preview-chrome.XXXXXX")"
           trap 'rm -rf "$preview_chrome_dir"' EXIT
           # chromedp discovers headless_shell and Chromium before Google Chrome.
           # This runner-owned alias selects validated Google Chrome for this fixture step.
           ln -s "$preview_chrome_binary" "$preview_chrome_dir/headless_shell"
           test "$(readlink -f "$preview_chrome_dir/headless_shell")" = "$preview_chrome_binary"
-          printf 'Preview test browser: %s (%s)\n' "$preview_chrome_binary" "$preview_chrome_version"
+          printf 'Preview test browser: %s\n' "$preview_chrome_version"
           mode=count
           race=()
           if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
@@ -292,6 +541,7 @@ jobs:
       # infra. Build-tag gating means they don't run during the unit-test
       # step above, so we don't double-charge CI for the same code paths.
       - name: Run integration tests
+        if: matrix.suite == 'database'
         run: |
           mode=count
           race=()
@@ -308,7 +558,75 @@ jobs:
       # Exercise real image-declared volumes: mocks cannot prove that Docker
       # removed preview data or preserved explicitly named storage.
       - name: Verify preview infrastructure volume lifecycle
+        if: matrix.suite == 'database'
         run: go test -tags=docker_integration ./internal/services/preview/providers -run '^TestDockerIntegration' -count=1 -timeout=180s
+
+      - name: Upload unit suite coverage
+        if: ${{ !cancelled() && matrix.suite == 'unit' && hashFiles('coverage*.out') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-suite-unit
+          overwrite: true
+          if-no-files-found: error
+          path: |
+            coverage-unit-other.out
+            coverage-unit-agent.out
+
+      - name: Upload database suite coverage
+        if: ${{ !cancelled() && matrix.suite == 'database' && hashFiles('coverage*.out') != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-suite-database
+          overwrite: true
+          if-no-files-found: error
+          path: |
+            coverage-unit-demoseed.out
+            coverage-unit-db.out
+            coverage-unit-worker.out
+            coverage-browser.out
+            coverage-integration.out
+
+      - name: Stop CI Postgres
+        if: always() && steps.postgres.outputs.container_id != ''
+        env:
+          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
+        run: docker rm --force --volumes "$POSTGRES_CONTAINER"
+
+  # Preserve the required check name while every suite owns its runner and database.
+  backend-test:
+    name: Backend Test
+    needs: [changes, backend-test-suites]
+    if: ${{ !cancelled() && (needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || needs.changes.outputs.demo_seed == 'true' || github.event_name == 'push') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify backend suites
+        env:
+          SUITE_RESULT: ${{ needs.backend-test-suites.result }}
+        run: |
+          if [[ "$SUITE_RESULT" != "success" ]]; then
+            echo "::error::Every backend test suite must succeed"
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      # Exact artifact names and profile lists fail closed on missing suite evidence.
+      # Stable names also allow rerunning this job after only a failed suite reruns.
+      - name: Download unit suite coverage
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-suite-unit
+      - name: Download database suite coverage
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-suite-database
+
+      - name: Combine backend unit coverage
+        run: python3 .github/scripts/merge_go_coverage.py coverage-unit.out coverage-unit-other.out coverage-unit-demoseed.out coverage-unit-db.out coverage-unit-worker.out coverage-unit-agent.out
 
       # Measure all backend code exercised by the successful suites, without
       # double-counting statements shared by multiple test binaries.
@@ -329,21 +647,17 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: backend-coverage
+          overwrite: true
           path: |
             coverage.out
             coverage-unit.out
             coverage-unit-other.out
+            coverage-unit-demoseed.out
             coverage-unit-db.out
             coverage-unit-worker.out
             coverage-unit-agent.out
             coverage-browser.out
             coverage-integration.out
-
-      - name: Stop CI Postgres
-        if: always() && steps.postgres.outputs.container_id != ''
-        env:
-          POSTGRES_CONTAINER: ${{ steps.postgres.outputs.container_id }}
-        run: docker rm --force --volumes "$POSTGRES_CONTAINER"
 
   frontend-lint:
     name: Frontend Lint & Typecheck
@@ -369,7 +683,7 @@ jobs:
     name: Frontend Test
     needs: changes
     if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     defaults:
       run:
         working-directory: frontend
@@ -434,9 +748,13 @@ jobs:
     # required-checks treats a skipped job as passing, so a plain job-level
     # condition is enough — matching every other conditional job here.
     if: needs.changes.outputs.session_transcript_e2e == 'true' || github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    container:
+      # Match frontend/package-lock.json; browsers and OS dependencies are preinstalled.
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
     defaults:
       run:
+        shell: bash
         working-directory: frontend
     steps:
       - uses: actions/checkout@v6
@@ -447,13 +765,6 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend dependencies
         run: npm ci
-      - name: Install browser engines
-        run: |
-          if [[ "${{ github.event_name }}" == "schedule" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            npx playwright install --with-deps chromium webkit
-          else
-            npx playwright install --with-deps chromium
-          fi
       - name: Run focused transcript browser suite
         env:
           SESSION_ACTIVITY_BROWSER_MATRIX: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '1' || '0' }}
@@ -510,7 +821,7 @@ jobs:
     name: Docker Build
     needs: changes
     if: github.event_name == 'pull_request' && (needs.changes.outputs.docker == 'true' || needs.changes.outputs.ci == 'true')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       matrix:
         include:
@@ -528,29 +839,24 @@ jobs:
             tags: 143-frontend:latest
     steps:
       - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
+      - name: Set up Blacksmith Docker builder
+        uses: useblacksmith/setup-docker-builder@v2
         with:
-          # Bootstrap must use the cache before BuildKit's mirror config is active.
-          driver-opts: image=mirror.gcr.io/moby/buildkit:buildx-stable-1
-          # Cache Docker Hub images through Google's public mirror for CI builds.
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["mirror.gcr.io"]
+          # Keep each image's layers and build cache mounts on its own disk.
+          cache-key: ${{ matrix.file }}
       - name: Build ${{ matrix.name }} Docker image
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           push: false
           tags: ${{ matrix.tags }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
   security:
     name: Security Scan
     needs: changes
     if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.ci == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v6
 
@@ -597,8 +903,10 @@ jobs:
   required-checks:
     name: All Checks Pass
     needs: [changes, backend-lint, backend-test, frontend-lint, frontend-test, session-transcript-e2e, migration-check, docker-build, security, deploy-scripts-test, deploy-config-test]
+    # Keep final status reporting independent of the external runner fleet.
     runs-on: ubuntu-latest
-    if: always()
+    # Report dependency failures and skips, but let cancelled workflows stop.
+    if: ${{ !cancelled() }}
     steps:
       - name: Check all jobs passed
         run: |

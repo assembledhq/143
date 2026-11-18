@@ -6,10 +6,68 @@ import (
 	"testing"
 	"time"
 
+	"github.com/assembledhq/143/internal/db"
 	"github.com/pashagolub/pgxmock/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNodeManagerAdvertisesOnlyPassiveLifecycleVersion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, mode string
+		heartbeat  bool
+	}{
+		{name: "api registration", mode: "api"},
+		{name: "worker registration", mode: "worker"},
+		{name: "combined registration", mode: "all"},
+		{name: "api heartbeat", mode: "api", heartbeat: true},
+		{name: "reserved worker heartbeat", mode: "worker", heartbeat: true},
+		{name: "reserved combined heartbeat", mode: "all", heartbeat: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "create the expected registration or heartbeat store")
+			defer mock.Close()
+			var ordinary db.DBTX = mock
+			var opts []NodeManagerOption
+			if !tt.heartbeat {
+				control, err := pgxmock.NewPool()
+				require.NoError(t, err, "create a separate reserve that registration must not use")
+				defer control.Close()
+				opts = append(opts, WithControlPlaneDB(control))
+				defer func() {
+					require.NoError(t, control.ExpectationsWereMet(), "registration must leave the control-plane reserve unused")
+				}()
+			}
+			if tt.heartbeat && tt.mode != "api" {
+				// Any accidental ordinary-pool use fails instead of hiding a
+				// regression of the reserved heartbeat connection path.
+				ordinary = nil
+				opts = append(opts, WithControlPlaneDB(mock))
+			}
+			node := NewNodeManager(ordinary, zerolog.Nop(), "node-1", tt.mode, opts...)
+			node.SetMetadataProvider(func() map[string]any {
+				return map[string]any{"lifecycle_writer_version": 99}
+			})
+			metadata := []byte(`{"lifecycle_writer_version":99}`)
+			if tt.heartbeat {
+				mock.ExpectExec(`UPDATE nodes[\s\S]+lifecycle_writer_version = \$4`).
+					WithArgs("node-1", "active", metadata, 0).
+					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+				require.NoError(t, node.HeartbeatOnce(context.Background()), "heartbeat must advertise zero independently of provider metadata")
+			} else {
+				mock.ExpectExec(`INSERT INTO nodes[\s\S]+lifecycle_writer_version = EXCLUDED.lifecycle_writer_version`).
+					WithArgs("node-1", tt.mode, "worker.invalid", metadata, 0).
+					WillReturnResult(pgxmock.NewResult("INSERT", 1))
+				require.NoError(t, node.Register(context.Background(), "worker.invalid"), "registration and re-registration must advertise the passive binary version")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "the correct store must receive explicit version zero in the existing write")
+		})
+	}
+}
 
 func TestNodeManager_Register(t *testing.T) {
 	t.Parallel()
@@ -23,7 +81,7 @@ func TestNodeManager_Register(t *testing.T) {
 			name: "successful registration",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectExec("INSERT INTO nodes").
-					WithArgs("node-1", "worker", "localhost:8080", []byte("{}")).
+					WithArgs("node-1", "worker", "localhost:8080", []byte("{}"), 0).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 			},
 		},
@@ -31,7 +89,7 @@ func TestNodeManager_Register(t *testing.T) {
 			name: "upsert on conflict updates existing node",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectExec("INSERT INTO nodes").
-					WithArgs("node-1", "worker", "localhost:8080", []byte("{}")).
+					WithArgs("node-1", "worker", "localhost:8080", []byte("{}"), 0).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 		},
@@ -39,7 +97,7 @@ func TestNodeManager_Register(t *testing.T) {
 			name: "database error returns error",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectExec("INSERT INTO nodes").
-					WithArgs("node-1", "worker", "localhost:8080", []byte("{}")).
+					WithArgs("node-1", "worker", "localhost:8080", []byte("{}"), 0).
 					WillReturnError(fmt.Errorf("connection refused"))
 			},
 			expectErr: true,
@@ -83,7 +141,7 @@ func TestNodeManager_Register_UsesMetadataProviderAndSurfacesMarshalErrors(t *te
 					return map[string]any{"build_sha": "abc123"}
 				})
 				mock.ExpectExec("INSERT INTO nodes").
-					WithArgs("node-1", "worker", "localhost:8080", []byte(`{"build_sha":"abc123"}`)).
+					WithArgs("node-1", "worker", "localhost:8080", []byte(`{"build_sha":"abc123"}`), 0).
 					WillReturnResult(pgxmock.NewResult("INSERT", 1))
 			},
 		},
@@ -132,7 +190,7 @@ func TestNodeManager_Heartbeat(t *testing.T) {
 			name: "successful heartbeat update",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectExec("UPDATE nodes").
-					WithArgs("node-1", "active", []byte("{}")).
+					WithArgs("node-1", "active", []byte("{}"), 0).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 		},
@@ -140,7 +198,7 @@ func TestNodeManager_Heartbeat(t *testing.T) {
 			name: "heartbeat database error",
 			setupMock: func(mock pgxmock.PgxPoolIface) {
 				mock.ExpectExec("UPDATE nodes").
-					WithArgs("node-1", "active", []byte("{}")).
+					WithArgs("node-1", "active", []byte("{}"), 0).
 					WillReturnError(fmt.Errorf("connection lost"))
 			},
 			expectErr: true,
@@ -183,7 +241,7 @@ func TestNodeManager_Heartbeat_UsesDrainStatusAndMetadata(t *testing.T) {
 	nm.draining = true
 
 	mock.ExpectExec("UPDATE nodes").
-		WithArgs("node-1", "draining", []byte(`{"active_job_count":2}`)).
+		WithArgs("node-1", "draining", []byte(`{"active_job_count":2}`), 0).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	err = nm.HeartbeatOnce(context.Background())
@@ -202,7 +260,7 @@ func TestNodeManager_StartHeartbeat_StopsOnContextCancel(t *testing.T) {
 	nm.heartbeatInterval = 5 * time.Millisecond
 
 	mock.ExpectExec("UPDATE nodes").
-		WithArgs("node-1", "active", []byte("{}")).
+		WithArgs("node-1", "active", []byte("{}"), 0).
 		WillReturnError(fmt.Errorf("connection lost"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)

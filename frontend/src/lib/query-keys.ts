@@ -40,6 +40,7 @@ export const queryKeys = {
     all: ["repositories"] as const,
     summary: ["repositories", "summary"] as const,
     branches: (id: string, query = "") => ["repositories", id, "branches", query] as const,
+    packageRegistryCredentials: (id: string) => ["repositories", id, "package-registry-credentials"] as const,
     previewSecretBundles: (id: string) => ["repositories", id, "preview-secret-bundles"] as const,
   },
   codeReviews: {

@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/models"
 	ghservice "github.com/assembledhq/143/internal/services/github"
 )
 
@@ -139,6 +141,22 @@ func githubRateLimitJitter(retryKey string) time.Duration {
 }
 
 func classifyGitHubJobError(err error, retryKey string) error {
+	if errors.Is(err, ghservice.ErrPullRequestCheckRefreshDeferred) {
+		// Spread retries across the installation's next available slots instead
+		// of waking all waiting PRs together. Only this background lane waits.
+		delay := 45*time.Second + githubRateLimitJitter(retryKey)
+		return &RetryableError{Err: err, RetryAfter: &delay, BypassMaxRetryDuration: true}
+	}
+	if isPermanentCodeReviewGuidanceError(err) {
+		var fatal *FatalError
+		if errors.As(err, &fatal) {
+			return err
+		}
+		if errors.Is(err, models.ErrInvalidCodeReviewGuidanceFile) {
+			return &FatalError{Err: fmt.Errorf("%w; fix the root or nested REVIEW.md files on the repository default branch (at most 64 regular UTF-8 files and 64 KiB combined) and request a new review", err)}
+		}
+		return &FatalError{Err: err}
+	}
 	if errors.Is(err, db.ErrCodeReviewPublicationLockBusy) {
 		delay := 15 * time.Second
 		retryWindow := githubRateLimitMaxRetryDuration

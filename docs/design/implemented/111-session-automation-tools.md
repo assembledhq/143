@@ -37,9 +37,8 @@ or external API automation management:
 - `create` requires `repository_id`.
 - `create`, `update`, `run`, `pause`, and `resume` are limited to automations
   whose `repository_id` matches the session token repository.
-- `update`, `run`, `pause`, and `resume` only apply to org-identity automations;
-  personal-identity automations (which execute as a specific human user) cannot
-  be managed from a repo-scoped session.
+- `run`, `pause`, and `resume` only apply to org-identity automations. General
+  `update` also requires org identity, with the base-branch exception below.
 - A session may only grant an automation capabilities it holds itself, and never
   above its own access level. This prevents capability laundering (minting a
   high-capability automation and then running it).
@@ -49,6 +48,35 @@ or external API automation management:
 This preserves the existing invariant that sandbox tools use platform paths
 while avoiding cross-repo or org-wide mutations from a repository-scoped coding
 session.
+
+### Personal automation base-branch updates
+
+`PATCH /api/v1/internal/automations/{id}` accepts a Personal automation's own
+executing per-run session when the entire payload is
+`{"base_branch":"stack/parent"}`. This lets a routine prepare its next run on
+an open PR branch while retaining its Personal execution identity. It changes
+future runs; the current run's frozen config and checkout remain unchanged.
+
+The token must bind the run, session, thread, job, and attempt. Both run and
+session snapshots must grant `automation_management` write access. At the
+write, the server verifies the durable `session_automation_links` association,
+matching tenant and repository, Personal run and current routine identity,
+matching routine creator and session executing user, a running run, an active
+repository, an enabled routine, and the current unexpired `run_agent` or
+`continue_session` job lease. Per-target tool restrictions remain unchanged.
+
+The payload must contain only the exact `base_branch` key with a nonempty,
+valid branch string. Identity, capabilities, schedule, goal, unknown fields,
+and extra null-valued fields are rejected. Other Personal automations cannot
+be edited, even if they have the same creator or repository.
+
+The write locks the routine and updates only `base_branch` and `updated_at` in
+one transaction. It uses the existing branch validator, returns
+`{data: <automation>}`, and emits the existing automation-update audit event
+with the originating session. Invalid JSON returns `INVALID_BODY` (400), an
+invalid branch returns `INVALID_BASE_BRANCH` (400), unauthorized self-updates
+return `IDENTITY_SCOPE_FORBIDDEN` (403), and persistence failures return
+`UPDATE_FAILED` (500). No schema change is required.
 
 ## Goal Improvement Placement
 

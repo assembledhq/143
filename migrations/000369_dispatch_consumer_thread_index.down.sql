@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_dispatch_consumer_thread;

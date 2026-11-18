@@ -175,6 +175,10 @@ type reviewInputsAuthProvider struct {
 	tokens   []string
 }
 
+func (*reviewInputsAuthProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, os.ErrNotExist
+}
+
 func (p *reviewInputsAuthProvider) Exec(_ context.Context, sandbox *Sandbox, command string, _, _ io.Writer) (int, error) {
 	if strings.Contains(command, "marker, owner, mode = ") {
 		return 0, nil

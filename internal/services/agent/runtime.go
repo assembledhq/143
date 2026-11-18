@@ -359,6 +359,8 @@ type runtimeController struct {
 	stopFallback  context.CancelCauseFunc
 
 	mu            sync.Mutex
+	threadID      uuid.UUID
+	isolateParent bool
 	startedAt     time.Time
 	softDeadline  time.Time
 	hardDeadline  time.Time
@@ -392,6 +394,16 @@ func newRuntimeController(
 
 func (c *runtimeController) SetStopFallback(cancel context.CancelCauseFunc) {
 	c.stopFallback = cancel
+}
+
+// SetThreadScope limits policy stops to one thread. Isolated threads persist
+// their terminal reason through the thread lifecycle rather than marking the
+// shared parent session for the runtime reaper.
+func (c *runtimeController) SetThreadScope(threadID uuid.UUID, isolateParent bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.threadID = threadID
+	c.isolateParent = threadID != uuid.Nil && isolateParent
 }
 
 func (c *runtimeController) Begin(ctx context.Context, startedAt time.Time, capability models.CheckpointCapability) error {
@@ -428,9 +440,17 @@ func (c *runtimeController) RequestStop(reason StopReason) {
 		return
 	}
 	c.stopRequested = reason
+	threadID := c.threadID
+	isolateParent := c.isolateParent
 	c.mu.Unlock()
 	if c.cancels != nil {
-		if !c.cancels.RequestStop(c.sessionID, reason, c.cfg.GracefulShutdownWindow) && c.stopFallback != nil {
+		var requested bool
+		if threadID != uuid.Nil {
+			requested = c.cancels.RequestStopScoped(c.sessionID, threadID, reason, c.cfg.GracefulShutdownWindow)
+		} else {
+			requested = c.cancels.RequestStop(c.sessionID, reason, c.cfg.GracefulShutdownWindow)
+		}
+		if !requested && c.stopFallback != nil {
 			c.logger.Warn().
 				Str("session_id", c.sessionID.String()).
 				Str("stop_reason", string(reason)).
@@ -445,7 +465,7 @@ func (c *runtimeController) RequestStop(reason StopReason) {
 		c.stopFallback(cancelCauseForStopReason(reason))
 	}
 	runtimeReason := stopReasonToRuntime(reason)
-	if runtimeReason != models.RuntimeStopReasonNone {
+	if runtimeReason != models.RuntimeStopReasonNone && !isolateParent {
 		stopAfter := time.Now().UTC().Add(c.cfg.GracefulShutdownWindow + c.cfg.CheckpointFinalizeWindow + defaultRuntimeStallAge)
 		persistCtx, cancel := context.WithTimeout(context.Background(), runtimeStopPersistenceTimeout)
 		defer cancel()

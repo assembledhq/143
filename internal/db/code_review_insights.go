@@ -155,10 +155,22 @@ func (s *CodeReviewInsightStore) projectPullRequestDecisions(ctx context.Context
 }
 
 func (s *CodeReviewInsightStore) recordPullRequestLifecycle(ctx context.Context, orgID, pullRequestID uuid.UUID, merged bool, mergedAt *time.Time, terminal bool, observedAt time.Time) (bool, error) {
-	result, err := s.db.Exec(ctx, `WITH lifecycle AS (
+	return s.recordPullRequestLifecycleIfUnchanged(ctx, orgID, pullRequestID, merged, mergedAt, terminal, observedAt, nil)
+}
+
+func (s *CodeReviewInsightStore) recordPullRequestLifecycleIfUnchanged(ctx context.Context, orgID, pullRequestID uuid.UUID, merged bool, mergedAt *time.Time, terminal bool, observedAt time.Time, expectedUpdatedAt *time.Time) (bool, error) {
+	input := `VALUES (@org_id, @pull_request_id, @merged, @merged_at, @terminal, @observed_at)`
+	if expectedUpdatedAt != nil {
+		// Establish tenant ownership before inserting the composite-FK child.
+		// The outer UPDATE repeats this fence if a webhook races the statement.
+		input = `SELECT @org_id, @pull_request_id, @merged, @merged_at, @terminal, @observed_at
+			FROM pull_requests WHERE org_id = @org_id AND id = @pull_request_id
+			  AND status = 'closed' AND updated_at = @expected_updated_at`
+	}
+	query := `WITH lifecycle AS (
 		INSERT INTO code_review_pull_request_lifecycle_observations (
 			org_id, pull_request_id, merged, merged_at, terminal, observed_at
-		) VALUES (@org_id, @pull_request_id, @merged, @merged_at, @terminal, @observed_at)
+		) ` + input + `
 		ON CONFLICT (org_id, pull_request_id) DO UPDATE SET
 			merged = EXCLUDED.merged, merged_at = EXCLUDED.merged_at,
 			terminal = EXCLUDED.terminal, observed_at = EXCLUDED.observed_at
@@ -174,12 +186,18 @@ func (s *CodeReviewInsightStore) recordPullRequestLifecycle(ctx context.Context,
 		merged_at = CASE WHEN lifecycle.merged THEN lifecycle.merged_at ELSE NULL END,
 		updated_at = now()
 	FROM lifecycle
-	WHERE pull_request.org_id = @org_id AND pull_request.id = @pull_request_id`, pgx.NamedArgs{
+	WHERE pull_request.org_id = @org_id AND pull_request.id = @pull_request_id`
+	args := pgx.NamedArgs{
 		"org_id": orgID, "pull_request_id": pullRequestID, "merged": merged,
 		"merged_at": mergedAt, "terminal": terminal, "observed_at": observedAt,
 		"merged_status": models.PullRequestStatusMerged, "closed_status": models.PullRequestStatusClosed,
 		"open_status": models.PullRequestStatusOpen,
-	})
+	}
+	if expectedUpdatedAt != nil {
+		query += ` AND pull_request.status = 'closed' AND pull_request.updated_at = @expected_updated_at`
+		args["expected_updated_at"] = *expectedUpdatedAt
+	}
+	result, err := s.db.Exec(ctx, query, args)
 	if err != nil {
 		return false, fmt.Errorf("record pull request lifecycle observation: %w", err)
 	}

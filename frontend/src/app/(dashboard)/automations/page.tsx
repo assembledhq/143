@@ -261,7 +261,6 @@ function AutomationsWorkspace({
     {
       id: "automation",
       header: "Automation",
-      className: "w-[34%]",
       cellClassName: "min-w-0",
       render: (automation) => (
         <Link href={`/automations/${automation.id}`} className="block min-w-0 space-y-1">
@@ -275,7 +274,7 @@ function AutomationsWorkspace({
             <span className="truncate text-sm font-medium text-foreground">{automation.name}</span>
           </div>
           {automation.goal ? (
-            <p className="line-clamp-2 pl-9 text-xs leading-5 text-muted-foreground">
+            <p className="line-clamp-2 pl-9 text-xs leading-5 text-muted-foreground [overflow-wrap:anywhere]">
               {automation.goal}
             </p>
           ) : null}
@@ -285,7 +284,7 @@ function AutomationsWorkspace({
     {
       id: "status",
       header: "Status",
-      className: "w-28",
+      className: "w-[12%]",
       render: automationStatusBadge,
     },
     {
@@ -295,7 +294,7 @@ function AutomationsWorkspace({
       render: (automation) => {
         const timezone = automationScheduleTimezone(automation);
         return (
-          <div className="space-y-1">
+          <div className="space-y-1 [overflow-wrap:anywhere]">
             <div className="text-xs text-foreground">{formatAutomationSchedule(automation)}</div>
             {timezone ? (
               <div className="text-xs text-muted-foreground">{timezone}</div>
@@ -307,7 +306,7 @@ function AutomationsWorkspace({
     {
       id: "next",
       header: "Next run",
-      className: "w-32",
+      className: "w-[16%]",
       render: (automation) => (
         <span className="text-xs text-muted-foreground">
           {automation.enabled ? formatAutomationRunDate(automation.next_run_at) : "Paused"}
@@ -317,7 +316,7 @@ function AutomationsWorkspace({
     {
       id: "last",
       header: "Last run",
-      className: "w-28",
+      className: "w-[12%]",
       render: (automation) => (
         <span className="text-xs text-muted-foreground">
           {automation.last_run_at ? formatTimeAgo(automation.last_run_at) : "Never"}
@@ -327,7 +326,7 @@ function AutomationsWorkspace({
     {
       id: "actions",
       header: <span className="sr-only">Actions</span>,
-      className: "w-12 text-right",
+      className: "w-14 text-right",
       cellClassName: "text-right",
       render: (automation) => <AutomationActions automation={automation} canManage={canManage} />,
     },
@@ -368,6 +367,7 @@ function AutomationsWorkspace({
             items={filteredAutomations}
             getItemKey={(automation) => automation.id}
             columns={columns}
+            tableClassName="table-fixed"
             emptyState={
               query.trim()
                 ? "No automations match your search."
@@ -507,7 +507,7 @@ function AutomationMobileRow({ automation, canManage }: { automation: Automation
         </span>
       )}
       title={(
-        <Link href={`/automations/${automation.id}`} className="break-words text-sm leading-5 hover:underline">
+        <Link href={`/automations/${automation.id}`} className="break-words text-sm leading-5 hover:underline [overflow-wrap:anywhere]">
           {automation.name}
         </Link>
       )}

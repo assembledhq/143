@@ -1142,7 +1142,7 @@ func (s *DisputeService) BuildReply(ctx context.Context, orgID, disputeID uuid.U
 			return dispute, "", fmt.Errorf("load reassessment while building dispute reply: %w", metadataErr)
 		}
 		if codeReviewDisputeReviewTerminal(metadata.Status) {
-			detail := strings.TrimSpace(stringPtr(metadata.StatusMessage))
+			detail := DisputeReassessmentDetail(metadata)
 			if completeErr := s.disputes.CompleteReassessment(ctx, orgID, disputeID, *dispute.ReassessmentSessionID, metadata.Status, metadata.Decision, detail); completeErr != nil {
 				return dispute, "", completeErr
 			}
@@ -1165,6 +1165,28 @@ func codeReviewDisputeReviewTerminal(status models.CodeReviewSessionStatus) bool
 	}
 }
 
+// DisputeReassessmentDetail projects a safe explanation of the owning review's
+// outcome. FailureReason is diagnostic and must not flow into GitHub replies.
+func DisputeReassessmentDetail(metadata models.CodeReviewSessionMetadata) string {
+	if metadata.Status == models.CodeReviewSessionStatusStale {
+		return "The reassessment was superseded because the review target changed. The objection remains recorded."
+	}
+	if detail := strings.TrimSpace(stringPtr(metadata.StatusMessage)); detail != "" {
+		return detail
+	}
+	switch metadata.Status {
+	case models.CodeReviewSessionStatusCancelled:
+		return "The reassessment was cancelled before it could complete."
+	case models.CodeReviewSessionStatusFailed:
+		return "The reassessment stopped before it could complete. View the reassessment for details."
+	case models.CodeReviewSessionStatusCompleted:
+		if metadata.Decision == nil {
+			return "The reassessment ended without a decision."
+		}
+	}
+	return ""
+}
+
 func buildCodeReviewDisputeReply(dispute models.CodeReviewDispute, frontendURL string) string {
 	message := strings.TrimSpace(stringPtr(dispute.StatusDetail))
 	switch dispute.ReassessmentStatus {
@@ -1180,6 +1202,8 @@ func buildCodeReviewDisputeReply(dispute models.CodeReviewDispute, frontendURL s
 		}
 	case models.CodeReviewDisputeReassessmentFailed:
 		message = "The reassessment could not complete. The objection remains recorded and can be retried from 143."
+	case models.CodeReviewDisputeReassessmentSuperseded:
+		message = "The reassessment was superseded because the review target changed. The objection remains recorded."
 	}
 	if dispute.EscalatedAt != nil {
 		message = "This objection was sent to a policy owner for review."

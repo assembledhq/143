@@ -49,7 +49,7 @@ CREATE TABLE repositories(id uuid PRIMARY KEY,org_id uuid NOT NULL);
 CREATE UNIQUE INDEX repo_org_id ON repositories(org_id,id);
 CREATE TABLE pull_requests(id uuid PRIMARY KEY,org_id uuid NOT NULL);
 CREATE UNIQUE INDEX pr_org_id ON pull_requests(org_id,id);
-CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid NOT NULL,origin text NOT NULL,status text NOT NULL DEFAULT 'idle',container_id text,sandbox_state text NOT NULL DEFAULT 'none',turn_holding_container boolean NOT NULL DEFAULT false,snapshot_key text,pending_snapshot_key text,automation_owner_generation_id uuid,current_turn int NOT NULL DEFAULT 0,started_at timestamptz,completed_at timestamptz,last_activity_at timestamptz,workspace_generation bigint NOT NULL DEFAULT 0,agent_session_id text,token_usage jsonb,model_used text,result_summary text,diff text,error text,failure_explanation text,failure_category text,failure_next_steps text,failure_retry_advised boolean NOT NULL DEFAULT false,base_commit_sha text,diff_collected_at timestamptz,diff_stats jsonb,diff_history jsonb NOT NULL DEFAULT '[]');
+CREATE TABLE sessions(id uuid PRIMARY KEY,org_id uuid NOT NULL,origin text NOT NULL,status text NOT NULL DEFAULT 'idle',runtime_soft_deadline_at timestamptz,runtime_hard_deadline_at timestamptz,container_id text,sandbox_state text NOT NULL DEFAULT 'none',turn_holding_container boolean NOT NULL DEFAULT false,snapshot_key text,pending_snapshot_key text,automation_owner_generation_id uuid,current_turn int NOT NULL DEFAULT 0,started_at timestamptz,completed_at timestamptz,last_activity_at timestamptz,workspace_generation bigint NOT NULL DEFAULT 0,agent_session_id text,token_usage jsonb,model_used text,result_summary text,diff text,error text,failure_explanation text,failure_category text,failure_next_steps text,failure_retry_advised boolean NOT NULL DEFAULT false,base_commit_sha text,diff_collected_at timestamptz,diff_stats jsonb,diff_history jsonb NOT NULL DEFAULT '[]');
 CREATE UNIQUE INDEX session_org_id ON sessions(org_id,id);
 CREATE TABLE session_threads(id uuid PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,current_turn int NOT NULL DEFAULT 0,status text NOT NULL DEFAULT 'idle',archived_at timestamptz,cancel_requested_at timestamptz,pending_message_count int NOT NULL DEFAULT 0,started_at timestamptz,completed_at timestamptz,last_activity_at timestamptz,agent_session_id text,result_summary text,diff text,failure_explanation text,failure_category text);
 CREATE TABLE session_messages(id bigserial PRIMARY KEY,org_id uuid NOT NULL,session_id uuid NOT NULL,thread_id uuid,user_id uuid,turn_number int NOT NULL,role text NOT NULL,content text NOT NULL,attachments text[],"references" jsonb,commands jsonb,token_usage jsonb,source text NOT NULL DEFAULT '',created_at timestamptz NOT NULL DEFAULT now());
@@ -133,6 +133,11 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	require.ErrorIs(t, err, ErrCodeReviewRecheckFence, "draining holder must prevent dispatch into occupied conversation")
 	_, err = pool.Exec(ctx, `DELETE FROM session_sandbox_holders WHERE org_id=$1 AND session_id=$2`, org, session)
 	require.NoError(t, err, "drain holder before concurrent dispatch proof")
+	// The idle review session kept the deadlines of its last turn (the
+	// recheck settlement paths do not clear them); the claim must drop them
+	// so the queued recheck does not count as executing for the org quota.
+	_, err = pool.Exec(ctx, `UPDATE sessions SET runtime_soft_deadline_at=now(), runtime_hard_deadline_at=now() WHERE org_id=$1 AND id=$2`, org, session)
+	require.NoError(t, err, "retain the previous turn's runtime deadlines on the idle session")
 	const contenders = 4
 	var wg sync.WaitGroup
 	type result struct {
@@ -176,6 +181,12 @@ CREATE UNIQUE INDEX inbox_client_id ON thread_inbox_entries(org_id,thread_id,cli
 	require.NoError(t, pool.QueryRow(ctx, `SELECT started_at FROM session_threads WHERE org_id=$1 AND id=$2`, org, thread).Scan(&threadStarted), "read reused thread start time")
 	require.NotNil(t, sessionStarted, "reused session reaper clock must restart at dispatch")
 	require.NotNil(t, threadStarted, "reused thread reaper clock must restart at dispatch")
+	var claimedStatus string
+	var claimedSoft, claimedHard *time.Time
+	require.NoError(t, pool.QueryRow(ctx, `SELECT status, runtime_soft_deadline_at, runtime_hard_deadline_at FROM sessions WHERE org_id=$1 AND id=$2`, org, session).Scan(&claimedStatus, &claimedSoft, &claimedHard), "read the claimed review session")
+	require.Equal(t, string(models.SessionStatusRunning), claimedStatus, "the claim marks the session running for its queued recheck")
+	require.Nil(t, claimedHard, "the claim must clear the stale hard deadline so the queued recheck is not counted as executing")
+	require.Nil(t, claimedSoft, "the claim must clear the stale soft deadline")
 	var ownerErr *models.SessionCodeReviewOwnedError
 	require.ErrorAs(t, NewSessionStore(pool).RejectIfCodeReviewOwned(ctx, org, session), &ownerErr, "conversation must reject ordinary human messages")
 	require.Equal(t, pr, ownerErr.PullRequestID, "owner error must identify the review PR")

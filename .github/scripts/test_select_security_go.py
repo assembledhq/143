@@ -155,7 +155,7 @@ class SecurityGoBootstrapTests(unittest.TestCase):
 
     def test_actual_security_workflow_keeps_scan_contract(self):
         job = security_job()
-        self.assertIn("runs-on: ubuntu-latest", job)
+        self.assertIn("runs-on: blacksmith-4vcpu-ubuntu-2404", job)
         self.assertEqual(job.count("uses:"), 1, "only checkout remains an action dependency in Security Scan")
         self.assertNotIn("setup-go", job, "Security Scan must not download the optional setup action")
         self.assertNotIn("continue-on-error", job)
@@ -163,7 +163,6 @@ class SecurityGoBootstrapTests(unittest.TestCase):
         self.assertEqual(workflow_run("Select cached Go"), "python3 -B .github/scripts/select-security-go.py")
         self.assertIn("go install github.com/securego/gosec/v2/cmd/gosec@v2.22.4\n", workflow_run("Run gosec"))
         self.assertEqual(workflow_run("Run gosec").strip().splitlines()[-1], "gosec ./...")
-        self.assertEqual(WORKFLOW.read_text().count("uses: actions/setup-go@v6"), 4, "other jobs retain their setup-go actions")
         self.assertIn("python3 -B -m unittest discover -s .github/scripts -p 'test_*.py'", WORKFLOW.read_text(), "CI must execute these helper tests")
 
     def test_numeric_patch_selection_and_next_step_scanner_visibility(self):

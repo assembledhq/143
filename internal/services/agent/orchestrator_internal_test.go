@@ -2289,12 +2289,12 @@ func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
 	}
 	provider := &testInternalSandboxProvider{
 		execFn: func(cmd string, stdout, stderr io.Writer) (int, error) {
-			if cmd == "git rev-parse HEAD" {
+			if strings.Contains(cmd, " cat-file -e ") {
+				return 1, nil
+			}
+			if cmd == "git rev-parse HEAD" || (strings.Contains(cmd, " checkout -B ") && strings.Contains(cmd, "git rev-parse HEAD")) {
 				_, err := io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 				return 0, err
-			}
-			if strings.HasPrefix(cmd, "git cat-file -e") {
-				return 1, nil
 			}
 			return 0, nil
 		},
@@ -2311,8 +2311,8 @@ func TestSetupFreshSandbox_CodeReviewChecksOutPullRequestHead(t *testing.T) {
 	require.NoError(t, err, "setupFreshSandbox should check out the recorded PR head for code review sessions")
 	require.Contains(t, provider.execCalls, codeReviewFetchCommand(repo.CloneURL, strings.Repeat("a", 40)), "code review checkout should fetch the exact captured GitHub head using an authenticated URL, since origin has been scrubbed of its token and the credential helper is not configured yet")
 	require.NotContains(t, strings.Join(provider.execCalls, "\n"), "ghp_test123", "fetch commands must keep short-lived credentials out of logs")
-	require.Contains(t, provider.execCalls, "git checkout -B '143/88888888/code-review-for-assembledhq-143-42' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'", "code review checkout should reset the session branch to the PR head")
-	require.Contains(t, provider.execCalls, "git rev-parse HEAD", "code review checkout should verify the checked-out head SHA")
+	require.Contains(t, strings.Join(provider.execCalls, "\n"), "checkout -B '143/88888888/code-review-for-assembledhq-143-42' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'", "code review checkout should reset the session branch to the PR head")
+	require.Contains(t, strings.Join(provider.execCalls, "\n"), "git rev-parse HEAD", "code review checkout should verify the checked-out head SHA")
 	require.NotContains(t, provider.execCalls, "git checkout -b '143/88888888/code-review-for-assembledhq-143-42'", "code review checkout should not branch from the cloned target branch tip")
 
 	// Defense-in-depth ordering: the git credential helper must be configured

@@ -54,7 +54,7 @@ func TestNodeDrainSurvivesRecoveryPostgres(t *testing.T) {
 			}()
 			_, err = conn.Exec(ctx, "SET search_path TO "+schema)
 			require.NoError(t, err, "use isolated schema")
-			_, err = conn.Exec(ctx, `CREATE TABLE nodes(id text PRIMARY KEY,mode text,host text,started_at timestamptz,last_heartbeat_at timestamptz,status text,metadata jsonb,drain_intent text NOT NULL DEFAULT 'none',drain_requested_at timestamptz,drain_budget_expires_at timestamptz,drain_requested_by text DEFAULT '',drain_reason text DEFAULT '')`)
+			_, err = conn.Exec(ctx, `CREATE TABLE nodes(id text PRIMARY KEY,mode text,host text,started_at timestamptz,last_heartbeat_at timestamptz,status text,metadata jsonb,drain_intent text NOT NULL DEFAULT 'none',drain_requested_at timestamptz,drain_budget_expires_at timestamptz,drain_requested_by text DEFAULT '',drain_reason text DEFAULT '',lifecycle_writer_version integer NOT NULL DEFAULT 0)`)
 			require.NoError(t, err, "create node table")
 			_, err = conn.Exec(ctx, `CREATE TABLE worker_deploy_events(deploy_id text,node_id text,host text,event_type text,drain_intent text,requested_by text,reason text,metadata jsonb)`)
 			require.NoError(t, err, "create drain audit table")

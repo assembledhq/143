@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -644,6 +645,11 @@ type SessionStore interface {
 	UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus) error
 	UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error
 	CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (int, error)
+	// CountExecutingByOrg counts sessions executing a turn (running with
+	// BeginRuntime's deadlines installed), leaving excludeSessionID out of
+	// the count. The org's max_concurrent_runs quota is enforced against this
+	// count so claimed-but-queued continuations are not held by each other.
+	CountExecutingByOrg(ctx context.Context, orgID, excludeSessionID uuid.UUID) (int, error)
 	UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error
 	UpdateSnapshotInfo(ctx context.Context, orgID, sessionID uuid.UUID, agentSessionID, snapshotKey string) error
 	BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error
@@ -903,6 +909,8 @@ type Orchestrator struct {
 	sessionMessages            SessionMessageStore
 	sessionThreads             SessionThreadStore
 	codeReviewRoles            CodeReviewRoleResolver
+	packageCredentials         PackageRegistryCredentialResolver
+	packageSetupTrust          PackageSetupPullRequestTrust
 	sessionIssueLinks          SessionIssueLinkStore
 	issueSnapshots             SessionIssueSnapshotStore
 	projectTasks               ProjectTaskUpdater               // can be nil
@@ -1442,6 +1450,7 @@ type OrchestratorConfig struct {
 	HumanInputRequests         SessionHumanInputRequestStore
 	SessionMessages            SessionMessageStore
 	SessionThreads             SessionThreadStore
+	PackageCredentials         PackageRegistryCredentialResolver
 	CodeReviewRoles            CodeReviewRoleResolver // optional — nil retains full repository preparation
 	SessionIssueLinks          SessionIssueLinkStore
 	IssueSnapshots             SessionIssueSnapshotStore
@@ -1544,6 +1553,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		sessionMessages:            cfg.SessionMessages,
 		sessionThreads:             cfg.SessionThreads,
 		codeReviewRoles:            cfg.CodeReviewRoles,
+		packageCredentials:         cfg.PackageCredentials,
 		sessionIssueLinks:          cfg.SessionIssueLinks,
 		issueSnapshots:             cfg.IssueSnapshots,
 		projectTasks:               cfg.ProjectTasks,
@@ -1681,7 +1691,7 @@ func (o *Orchestrator) warmMentionIndexFromSandboxAsync(ctx context.Context, ses
 }
 
 func defaultSandboxPATH() string {
-	return "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	return DefaultSandboxPATH
 }
 
 func prependSandboxBinDir(env map[string]string, homeDir string) {
@@ -1879,7 +1889,11 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		actionSnapshot = turnState.run.CapabilitySnapshot
 		actionRunID = &turnState.run.ID
 	}
-	if actionRunID != nil && models.HasAutomationActions(actionSnapshot) {
+	managementWrite := slices.ContainsFunc(actionSnapshot, func(grant models.AgentCapabilitySnapshotItem) bool {
+		return grant.ID == models.AgentCapabilityAutomationManagement && models.AgentCapabilityAccessWrite.AtMost(grant.AccessLevel)
+	})
+	hasActions := models.HasAutomationActions(actionSnapshot)
+	if actionRunID != nil && (hasActions || managementWrite) {
 		// A warm sandbox receives a token for this job attempt, including per-run continuations.
 		delete(sandboxCfg.Env, "INTERNAL_API_TOKEN")
 		var thread uuid.UUID
@@ -1897,7 +1911,7 @@ func (o *Orchestrator) injectInternalAPIEnv(ctx context.Context, session *models
 		if perTargetTurn {
 			attempt = turnState.lockToken
 		}
-		if !perTargetTurn {
+		if !perTargetTurn && hasActions {
 			scopes = append(scopes, models.ToolScope("automation:execute-action"), models.ToolScope("automation:action-status"))
 		}
 		internalToken, err = auth.GenerateAutomationActionToken(o.internalAPISecret, models.AutomationActionActor{OrgID: session.OrgID, RepositoryID: *repoID, SessionID: session.ID, ThreadID: thread, RunID: *actionRunID, JobID: jobID, AttemptToken: attempt}, scopes, sessionOrigin, tokenTTL)
@@ -3143,8 +3157,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		}()
 	}
 
-	// 1. Concurrency check against the org's max_concurrent_runs quota.
-	maxConcurrent, concurrencyErr := o.checkConcurrency(ctx, run.OrgID, models.SessionStatus(run.Status) == models.SessionStatusRunning)
+	// 1. Concurrency check against the org's max_concurrent_runs quota. A
+	// session re-entering RunAgent for recovery already holds its slot when
+	// its previous attempt reached BeginRuntime, and is otherwise excluded
+	// from the count; see checkConcurrency.
+	maxConcurrent, concurrencyErr := o.checkConcurrency(ctx, run)
 	if concurrencyErr != nil {
 		log.Info().Err(concurrencyErr).Msg("concurrency limit reached, run stays pending")
 		return concurrencyErr
@@ -3427,7 +3444,11 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 	sandboxCfg.SessionID = run.ID.String()
 	sandboxCfg.OrgID = run.OrgID.String()
 	sandboxCfg.Purpose = "agent_run"
-	sandboxCfg.Env = o.env.ResolveForModel(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID, stringPtrValue(run.ModelOverride))
+	credentialResolution := o.env.ResolveForModelWithCredential(ctx, run.OrgID, run.AgentType, run.TriggeredByUserID, stringPtrValue(run.ModelOverride))
+	if lookupErr := o.executionCredentialLookupError(ctx, run, primaryThreadID, turnNumber, credentialResolution); lookupErr != nil {
+		return lookupErr
+	}
+	sandboxCfg.Env = credentialResolution.Env
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
@@ -3476,7 +3497,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		o.failRun(ctx, run, fmt.Sprintf("create sandbox: %s", err))
 		return fmt.Errorf("create sandbox: %w", err)
 	}
-	sandbox.Env = cloneStringMap(sandboxCfg.Env)
+	sandbox = sandboxWithCredentialResolution(sandbox, credentialResolution, sandboxCfg.Env)
 	// Record the turn hold so a concurrent StartPreview can attach to this
 	// container (same ID, same filesystem) instead of hydrating a duplicate.
 	// AcquireTurnHold uses COALESCE to publish only if no one has raced ahead;
@@ -3808,7 +3829,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 				return fmt.Errorf("render automation turn prompt: %w", err)
 			}
 			input.UserMessage = rendered
-		} else if err := prepareSandboxRepositoryForSession(ctx, o.provider, run, sandbox, sandboxCfg.WorkDir, repositoryPreparationFull, log); err != nil {
+		} else if err := o.prepareSandboxRepositoryForSession(ctx, o.provider, run, sandbox, sandboxCfg.WorkDir, repositoryPreparationFull, log); err != nil {
 			o.failRun(ctx, run, fmt.Sprintf("prepare repository: %s", err))
 			return fmt.Errorf("prepare repository: %w", err)
 		}
@@ -3879,7 +3900,7 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		return fmt.Errorf("prepare prompt: %w", err)
 	}
 	prompt.UsageHint.BillingMode = authBillingMode
-	prompt.UsageHint = o.buildTokenUsageHint(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, sandboxCfg.Env, prompt.UsageHint)
+	prompt.UsageHint = o.buildTokenUsageHint(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, sandboxCfg.Env, prompt.UsageHint, sandbox)
 
 	// 10. Execute agent with log streaming.
 	o.honorPendingCancelRequest(ctx, run.OrgID, run.ID, log)
@@ -3945,29 +3966,27 @@ func (o *Orchestrator) RunAgent(ctx context.Context, run *models.Session) (retur
 		execCtx = WithInteractiveHandleAttacher(execCtx, attacher)
 	}
 	automationTurn.markAgentStarted()
+	logAgentExecutionCredential(log, sandbox)
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	close(logCh)
 	logWg.Wait()
 	streamErr := <-logErrCh
 
 	// 10b. Retry once on token expiration for Codex agents.
-	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
+	result, err = o.retryOnTokenExpired(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, run.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, runtimeTracker, log)
+
+	// Harvest this execution before a credential fallback can replace its auth file.
+	o.harvestExecutedClaudeCodeCredentials(ctx, run, sandbox, authBillingMode, log)
 
 	// 10c. Shed the just-picked credential's in-process health-cache slot if
 	// the (possibly retried) result indicates a credential-level failure.
 	// No-ops cleanly for agent types whose auth flows do not pass through
 	// the unified resolver (e.g. Codex subscription via codexauth.Service).
-	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, log)
+	result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, run, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, false, runtimeTracker, log)
 	automationTurn.markAgentEnded()
 	err = errors.Join(err, streamErr)
-	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, run, sandbox, authBillingMode, log); harvestErr != nil {
-		log.Warn().
-			Err(harvestErr).
-			Str("session_id", run.ID.String()).
-			Msg("failed to harvest Claude Code OAuth credentials from sandbox")
-	}
 	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
-		o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log)
+		o.shedOnRunResult(ctx, run.AgentType, run.OrgID, run.TriggeredByUserID, result, err, log, sandbox)
 	}
 
 	// From this point every exit releases the initial turn hold and leaves the
@@ -4423,6 +4442,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			WorkspaceMode:     models.PullRequestRepairWorkspaceMode(opts.PRFeedback.WorkspaceMode),
 		}
 	}
+	if prRepairOpts != nil {
+		ctx = context.WithValue(ctx, packageSetupPRIdentityKey{}, packageSetupPRIdentity{prRepairOpts.PullRequestNumber, prRepairOpts.HeadSHA})
+	}
 	prHeadReconstruction := prRepairOpts != nil && prRepairOpts.WorkspaceMode == models.PullRequestRepairWorkspaceModePRHeadReconstruction
 
 	// Per-target automation turn (design doc 125): validate the attempt's
@@ -4555,6 +4577,42 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		defer func() { turnStage.End(observability.StageOutcome(ctx, returnErr)) }()
 	}
 
+	startupTiming := beginReviewStartupTiming(reviewTiming, log)
+	defer func() { startupTiming.finish(ctx, returnErr) }()
+
+	// Hold the continuation at the org's max_concurrent_runs quota. The count
+	// is of executing turns (sessions running with BeginRuntime's deadlines
+	// installed), not of running sessions: ClaimIdle/ClaimForResume mark a
+	// session running when its message is accepted, before this job runs, so
+	// a running-session count would hold sibling queued continuations against
+	// each other until the retry window expired. A session that already holds
+	// an executing slot (a thread turn on a live session, a recovery re-entry
+	// after a worker loss) is admitted without a count, and is otherwise left
+	// out of it; see checkConcurrency. Warm reuse is gated too: a reused
+	// container still runs a turn. The gate sits before the recorded-sandbox
+	// teardown, the sandbox capacity admission, and any turn hold, so a held
+	// continuation leaves nothing to unwind; the worker retries it. The
+	// resolved quota also feeds the runtime controller so its extension gate
+	// agrees with RunAgent.
+	//
+	// Code-review sessions (reviewer threads, evidence rechecks) are counted
+	// by CountExecutingByOrg, so user runs see their occupancy, but are not
+	// held here: reviews have their own physical admission
+	// (db.CodeReviewSandboxAvailable in the code review service), and holding
+	// them would dead-letter a review with concurrency_timeout after the
+	// retry window whenever an org saturates its own quota.
+	var maxConcurrent int
+	if continuationExemptFromQuota(session) {
+		maxConcurrent = o.resolveMaxConcurrent(ctx, session.OrgID)
+	} else {
+		var concurrencyErr error
+		maxConcurrent, concurrencyErr = o.checkConcurrency(ctx, session)
+		if concurrencyErr != nil {
+			log.Info().Err(concurrencyErr).Msg("concurrency limit reached, continue_session stays queued")
+			return concurrencyErr
+		}
+	}
+
 	// Determine whether we can restore from a snapshot or need a fresh start.
 	if rebuildWorkspace && session.ContainerID != nil && *session.ContainerID != "" {
 		recordedContainerID := *session.ContainerID
@@ -4571,17 +4629,6 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		session.ContainerID = nil
 		session.WorkerNodeID = nil
 	}
-	// Continuations are deliberately not held at the org's max_concurrent_runs
-	// quota. ClaimIdle/ClaimForResume mark a session running when its message
-	// is accepted, before the continue_session job is picked up, and nothing
-	// durable distinguishes that claimed-but-queued state from an executing
-	// turn (runtime deadlines persist across idle). A CountRunningByOrg gate
-	// here would therefore count sibling queued continuations and, at quota,
-	// hold every one of them until the retry window expires. The quota governs
-	// run starts (CreateManual and RunAgent); continuations are admitted by
-	// the physical sandbox capacity gate below. The resolved quota still feeds
-	// the runtime controller so its extension gate agrees with RunAgent.
-	maxConcurrent := o.resolveMaxConcurrent(ctx, session.OrgID)
 	var capacityReservation *SandboxCapacityReservation
 	if !reusedExisting && o.sandboxCapacity != nil {
 		capacityStage := observability.BeginStage(reviewTiming, log, "capacity_admission")
@@ -4610,6 +4657,9 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	runtimeTracker := newRuntimeProgressTracker(turnStartedAt)
 	runtimeController := newRuntimeController(runtimeCfg, o.sessions, o.jobs, o.cancels, log, session.OrgID, session.ID, maxConcurrent, o.isDraining, runtimeTracker)
 	runtimeController.SetStopFallback(cancel)
+	if isCodeReviewThreadTurn(session, threadID) {
+		runtimeController.SetThreadScope(*threadID, true)
+	}
 	fallbackStatus := session.Status
 	if fallbackStatus == "" {
 		fallbackStatus = models.SessionStatusIdle
@@ -4769,7 +4819,11 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	sandboxCfg.SessionID = session.ID.String()
 	sandboxCfg.OrgID = session.OrgID.String()
 	sandboxCfg.Purpose = "continue_session"
-	sandboxCfg.Env = o.env.ResolveForModel(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride))
+	credentialResolution := o.env.ResolveForModelWithCredential(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride))
+	if lookupErr := o.executionCredentialLookupError(ctx, session, threadID, messageTurnNumber, credentialResolution); lookupErr != nil {
+		return lookupErr
+	}
+	sandboxCfg.Env = credentialResolution.Env
 	if sandboxCfg.Env == nil {
 		sandboxCfg.Env = make(map[string]string)
 	}
@@ -4888,6 +4942,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if _, ok := sandboxCfg.Env["HOME"]; !ok {
 		sandboxCfg.Env["HOME"] = sandboxCfg.HomeDir
 	}
+	startupTiming.advance("review_workspace_liveness")
 	// Liveness / cross-node check on reuse. A recorded container_id only
 	// means "someone (preview, prior turn) wrote it" — it does NOT prove
 	// the container is alive AND on this node's docker daemon. Two cases:
@@ -5121,6 +5176,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			Str("head_sha", expectedHead).
 			Msg("reused code review workspace is ready")
 	}
+	startupTiming.advance("review_resume_auth")
 	var integrationSkills string
 	if session.Origin == models.SessionOriginCodeReview {
 		var skillsErr error
@@ -5236,6 +5292,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 
+	startupTiming.advance("review_workspace_acquire")
 	// Determine sandbox strategy:
 	//   - Reuse: a preview already hydrated the container; attach to it by ID
 	//     and skip both Create and Restore.
@@ -5330,7 +5387,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		log = log.With().Str("sandbox_container_id", sandbox.ID).Logger()
 		log.Info().Str("workspace_source_final", workspaceSource).Msg("code review workspace selected")
 	}
-	sandbox.Env = cloneStringMap(sandboxCfg.Env)
+	sandbox = sandboxWithCredentialResolution(sandbox, credentialResolution, sandboxCfg.Env)
 	// Re-populate sandbox.Metadata["base_commit_sha"] from the DB so that
 	// sessiondiff.Collect can compute `git diff <base> -- .` (the cumulative
 	// session diff against the immutable base) instead of falling back to a
@@ -5656,6 +5713,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		}
 	}
 
+	startupTiming.advance("review_prompt_setup")
 	// 5. Set up the workspace. Three paths:
 	//   - Reuse: the container is already live (preview hydrated it); just
 	//     re-inject Codex auth and build the resume prompt.
@@ -5669,6 +5727,23 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	attachmentMessages := taskMessages
 	materializedAttachments := o.materializeAttachmentsForMessages(ctx, session.OrgID, sandbox, messageTurnNumber, attachmentMessages, log)
 	if reusedExisting || hasSnapshot {
+		if reusedExisting && session.Origin != models.SessionOriginCodeReview {
+			cfg, err := o.readPackageSetupConfig(ctx, sandbox, sandboxCfg.WorkDir)
+			if err != nil {
+				return err
+			}
+			packageSetup, err := o.preparePackageRegistryDependencies(ctx, session, sandbox, cfg)
+			if err != nil {
+				return err
+			}
+			if automationTurn != nil && packageSetup != "" {
+				fingerprint, err := o.automationTurnDependencyFingerprint(ctx, sandbox, cfg.Dependencies, sandboxCfg.Image)
+				if err != nil {
+					return err
+				}
+				automationTurn.applyDependencyFingerprint(fingerprint + ":npm:" + packageSetup)
+			}
+		}
 		// Re-inject agent auth (Codex auth.json or Claude Code credentials.json).
 		// Cheap, and catches the case where the file was cleared or drifted
 		// while the container was idle (or where the preview created the
@@ -5708,7 +5783,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 				if refreshedRole != "" {
 					preparationLog = log.With().Str("review_role", string(refreshedRole)).Logger()
 				}
-				if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
+				if err := o.prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
 					return fmt.Errorf("prepare repository: %w", err)
 				}
 			}
@@ -5881,7 +5956,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 			if refreshedRole != "" {
 				preparationLog = log.With().Str("review_role", string(refreshedRole)).Logger()
 			}
-			if err := prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
+			if err := o.prepareSandboxRepositoryForSession(ctx, o.provider, session, sandbox, sandboxCfg.WorkDir, mode, preparationLog); err != nil {
 				return fmt.Errorf("prepare repository: %w", err)
 			}
 		}
@@ -5944,13 +6019,14 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	prompt.HumanInputAnswer = humanInputAnswer
 	prompt.UsageHint.BillingMode = authBillingMode
-	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, sandboxCfg.Env, prompt.UsageHint)
+	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, sandboxCfg.Env, prompt.UsageHint, sandbox)
 	if authState != nil && authState.source != "" {
 		if dbErr := o.sessions.SetGitIdentity(ctx, session.OrgID, session.ID, authState.source, authState.userID); dbErr != nil {
 			log.Warn().Err(dbErr).Str("source", authState.source).Msg("failed to persist git identity audit during continue_session")
 		}
 	}
 
+	startupTiming.finish(ctx, nil)
 	if err := o.ensureCodeReviewInputs(ctx, session, sandbox); err != nil {
 		if errors.Is(err, ErrSandboxWorkspaceNotReady) {
 			return err
@@ -6031,6 +6107,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}()
 
 	execCtx := WithSandboxProvider(ctx, o.provider)
+	execCtx = WithCodeReviewExecution(execCtx, session, threadID)
 	var attachers []InteractiveHandleAttacher
 	if o.cancels != nil {
 		if opts != nil && opts.ThreadID != nil && *opts.ThreadID != uuid.Nil {
@@ -6051,6 +6128,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	}
 	o.honorPendingCancelRequest(ctx, session.OrgID, session.ID, log)
 	automationTurn.markAgentStarted()
+	logAgentExecutionCredential(log, sandbox)
 	result, err := adapter.Execute(execCtx, sandbox, prompt, logCh)
 	if usageErr := o.recordCodeReviewAttemptUsage(ctx, session, codeReviewTurn, "primary", result); usageErr != nil {
 		err = errors.Join(err, fmt.Errorf("record recheck provider usage: %w", usageErr))
@@ -6065,6 +6143,7 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if fallbackErr != nil {
 			err = fallbackErr
 		} else {
+			logAgentExecutionCredential(log, sandbox)
 			fallbackResult, fallbackExecErr := adapter.Execute(execCtx, sandbox, fallbackPrompt, logCh)
 			if usageErr := o.recordCodeReviewAttemptUsage(ctx, session, codeReviewTurn, "restored_fallback", fallbackResult); usageErr != nil {
 				fallbackExecErr = errors.Join(fallbackExecErr, fmt.Errorf("record recheck fallback usage: %w", usageErr))
@@ -6092,30 +6171,34 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 
 	// 6b. Retry once on token expiration for Codex agents.
 	if codeReviewTurn == nil {
-		result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, log)
+		result, err = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, result, err, runtimeTracker, log)
 	}
+
+	// Harvest this execution before a credential fallback can replace its auth file.
+	o.harvestExecutedClaudeCodeCredentials(ctx, session, sandbox, authBillingMode, log)
 
 	// 6c. Shed the just-picked credential when the (post-retry) result shows
 	// rate-limit or auth-rejected signals. Same semantics as the entry-turn
 	// path above; see shedOnRunResult.
 	if codeReviewTurn == nil {
-		result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, log)
+		result, err, _ = o.retrySessionOnCredentialRateLimit(ctx, session, writeCtx, sandboxCfg, sandbox, adapter, execCtx, prompt, result, err, true, runtimeTracker, log)
 	}
 	automationTurn.markAgentEnded()
 	err = errors.Join(err, streamErr)
-	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, session, sandbox, authBillingMode, log); harvestErr != nil {
-		log.Warn().
-			Err(harvestErr).
-			Str("session_id", session.ID.String()).
-			Msg("failed to harvest Claude Code OAuth credentials from sandbox")
-	}
-	if !parseCredentialFailureSignal(result, time.Now()).RateLimited {
-		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+	// Rechecks intentionally skip generic retries, so their rate-limit result
+	// still needs to mark the credential that executed before the fenced
+	// recheck worker records its failure receipt.
+	if codeReviewTurn != nil || !parseCredentialFailureSignal(result, time.Now()).RateLimited {
+		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log, sandbox)
 	}
 
 	stopReason := StopReasonNone
 	if o.cancels != nil {
-		stopReason = o.cancels.StopReason(session.ID)
+		if isCodeReviewThreadTurn(session, threadID) {
+			stopReason = o.cancels.StopReasonScoped(session.ID, *threadID)
+		} else {
+			stopReason = o.cancels.StopReason(session.ID)
+		}
 	}
 	wasCancelled := stopReason == StopReasonUserCancel || isUserCancelContext(ctx)
 	systemStopReason := interruptedStopReason(ctx, stopReason)
@@ -6150,6 +6233,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 		if stopReason != StopReasonNone {
 			log.Info().Str("stop_reason", string(stopReason)).Msg("session stopped by runtime policy during continue")
 			deregisterSessionCancel()
+			handled, persistErr := o.failPolicyStoppedCodeReviewThreadTurn(ctx, session, threadID, stopReason, activityExecution, log)
+			if persistErr != nil {
+				return errors.Join(err, persistErr)
+			}
+			if handled {
+				return fmt.Errorf("%w (%s): %w", ErrCodeReviewThreadFailed, stopReason, err)
+			}
 			o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, activityExecution, log)
 			return nil
 		}
@@ -6208,6 +6298,13 @@ func (o *Orchestrator) ContinueSession(ctx context.Context, session *models.Sess
 	if stopReason != StopReasonNone {
 		log.Info().Str("stop_reason", string(stopReason)).Msg("agent exited after runtime policy stop during continue")
 		deregisterSessionCancel()
+		handled, persistErr := o.failPolicyStoppedCodeReviewThreadTurn(ctx, session, threadID, stopReason, activityExecution, log)
+		if persistErr != nil {
+			return persistErr
+		}
+		if handled {
+			return fmt.Errorf("%w (%s)", ErrCodeReviewThreadFailed, stopReason)
+		}
 		o.handlePolicyStoppedSession(ctx, session, sandbox, result, messageTurnNumber, stopReason, activityExecution, log)
 		return nil
 	}
@@ -7250,19 +7347,42 @@ func (o *Orchestrator) resolveMaxConcurrent(ctx context.Context, orgID uuid.UUID
 	return o.maxConcurrent
 }
 
+// continuationExemptFromQuota reports whether a continuation on session skips
+// the org's max_concurrent_runs hold. Code-review sessions are exempt: their
+// turns are admitted by the code review service's own sandbox capacity gate,
+// and they stay counted by CountExecutingByOrg so ordinary runs still see the
+// slots reviews occupy.
+func continuationExemptFromQuota(session *models.Session) bool {
+	return session != nil && session.Origin == models.SessionOriginCodeReview
+}
+
+// sessionHoldsExecutingSlot reports whether the session row already carries
+// the executing-turn marker (running with BeginRuntime's deadlines installed;
+// see SessionStore.CountExecutingByOrg). Such a session occupies one of the
+// org's quota slots already, so a further turn on it (a thread turn, or a
+// recovery re-entry after a worker loss) adds nothing to the count.
+func sessionHoldsExecutingSlot(session *models.Session) bool {
+	return session != nil && models.SessionStatus(session.Status) == models.SessionStatusRunning && session.RuntimeHardDeadlineAt != nil
+}
+
 // checkConcurrency verifies the org hasn't exceeded its concurrent run limit
-// and returns the limit that was applied, so callers hand the same value to
-// the runtime controller instead of re-reading org settings.
-// excludeCurrentRunning should be true when re-entering RunAgent for a session
-// that is already marked running, so recovery does not deadlock on its own slot.
-func (o *Orchestrator) checkConcurrency(ctx context.Context, orgID uuid.UUID, excludeCurrentRunning bool) (int, error) {
-	maxConcurrent := o.resolveMaxConcurrent(ctx, orgID)
-	count, err := o.sessions.CountRunningByOrg(ctx, orgID)
-	if err != nil {
-		return maxConcurrent, fmt.Errorf("count running runs: %w", err)
+// for a turn on session and returns the limit that was applied, so callers
+// hand the same value to the runtime controller instead of re-reading org
+// settings. The limit is compared against executing turns
+// (SessionStore.CountExecutingByOrg), not running sessions, so a
+// claimed-but-queued continuation never holds a slot. A session that already
+// holds an executing slot is admitted without counting: it is the same slot,
+// and counting siblings would let two sessions recovering after a worker
+// loss hold each other at quota. Otherwise the session is left out of the
+// count so a stale read of its own row cannot hold it either.
+func (o *Orchestrator) checkConcurrency(ctx context.Context, session *models.Session) (int, error) {
+	maxConcurrent := o.resolveMaxConcurrent(ctx, session.OrgID)
+	if sessionHoldsExecutingSlot(session) {
+		return maxConcurrent, nil
 	}
-	if excludeCurrentRunning && count > 0 {
-		count--
+	count, err := o.sessions.CountExecutingByOrg(ctx, session.OrgID, session.ID)
+	if err != nil {
+		return maxConcurrent, fmt.Errorf("count executing runs: %w", err)
 	}
 	if count >= maxConcurrent {
 		return maxConcurrent, fmt.Errorf("%w: %d/%d runs active", ErrConcurrencyLimit, count, maxConcurrent)
@@ -7986,6 +8106,9 @@ func (o *Orchestrator) failTimedOutSession(ctx context.Context, run *models.Sess
 // It returns the resolved billing mode so downstream usage normalization can
 // distinguish direct provider-reported USD from derived subscription credits.
 func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
+	if lookupErr := o.executionCredentialLookupError(ctx, run, threadID, run.CurrentTurn+1, sandbox.credentialResolution); lookupErr != nil {
+		return TokenBillingModeUnknown, lookupErr
+	}
 	// For Codex, OPENAI_API_KEY is only populated when AgentEnv resolved an
 	// OpenAI API-key credential. Subscription-backed Codex auth uses auth.json
 	// instead and does not inject OPENAI_API_KEY. That makes the env var itself
@@ -7994,7 +8117,13 @@ func (o *Orchestrator) ensureCodexAuth(ctx context.Context, run *models.Session,
 		return TokenBillingModeAPIKey, nil
 	}
 
-	injected, err := o.env.InjectCodexAuthForUser(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
+	var injected bool
+	var err error
+	if sandbox.credentialResolution != nil && o.env.codingCredentials != nil {
+		injected, err = o.env.InjectCodexAuthForCredential(ctx, run.OrgID, sandbox, sandbox.credentialResolution.Credential)
+	} else {
+		injected, err = o.env.InjectCodexAuthForUser(ctx, run.OrgID, run.TriggeredByUserID, sandbox)
+	}
 	if err != nil {
 		if errors.Is(err, ErrCodexAuthInvalid) {
 			if failErr := o.failRunWithCategoryForThread(ctx, run, threadID,
@@ -8041,11 +8170,12 @@ func (o *Orchestrator) buildTokenUsageHint(
 	userID *uuid.UUID,
 	env map[string]string,
 	fallback TokenUsageHint,
+	sandboxes ...*Sandbox,
 ) TokenUsageHint {
 	hint := fallback
 	hint.AgentType = agentType
 	hint.EffectiveModel = o.effectiveAgentModel(ctx, orgID, agentType, env, fallback.EffectiveModel)
-	hint.BillingMode = o.billingModeForAgent(ctx, agentType, orgID, userID, env, fallback.BillingMode)
+	hint.BillingMode = o.billingModeForAgent(ctx, agentType, orgID, userID, env, fallback.BillingMode, sandboxes...)
 	return hint
 }
 
@@ -8088,9 +8218,23 @@ func (o *Orchestrator) billingModeForAgent(
 	userID *uuid.UUID,
 	env map[string]string,
 	fallback TokenBillingMode,
+	sandboxes ...*Sandbox,
 ) TokenBillingMode {
 	if fallback != "" && fallback != TokenBillingModeUnknown {
 		return fallback
+	}
+	if len(sandboxes) > 0 && sandboxes[0] != nil && sandboxes[0].credentialResolution != nil {
+		selection := sandboxes[0].credentialResolution.Credential
+		if selection != nil {
+			cfg, compatible := compatibleCodingProviderConfig(selection.Credential.Provider, selection.Credential.Config)
+			if compatible && codingProviderConfigIsAPIKey(cfg) {
+				return TokenBillingModeAPIKey
+			}
+			switch selection.Credential.Provider {
+			case models.ProviderOpenAISubscription, models.ProviderAnthropicSubscription:
+				return TokenBillingModeSubscription
+			}
+		}
 	}
 	switch agentType {
 	case models.AgentTypeCodex:
@@ -8099,7 +8243,7 @@ func (o *Orchestrator) billingModeForAgent(
 		}
 		return TokenBillingModeSubscription
 	case models.AgentTypeClaudeCode:
-		if o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, orgID, userID, models.ProviderAnthropic) {
+		if o.unifiedCodingCredentialIsAPIKeyForSandbox(ctx, orgID, userID, models.ProviderAnthropic, firstSandbox(sandboxes)) {
 			return TokenBillingModeAPIKey
 		}
 		if o.claudeCodeAuth != nil {
@@ -8375,7 +8519,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 // the tokens are issued. If Anthropic ever changes this format, update this
 // marshal block and the AnthropicSubscription struct together.
 func (o *Orchestrator) injectClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox) (bool, string, error) {
-	if o.claudeCodeAuth == nil {
+	if o.claudeCodeAuth == nil || (sandbox.credentialResolution != nil && o.env != nil && o.env.codingCredentials != nil) {
 		return false, "", nil
 	}
 
@@ -8458,6 +8602,17 @@ func (o *Orchestrator) writeClaudeCodeAuth(ctx context.Context, orgID uuid.UUID,
 	return true, nil
 }
 
+// harvestExecutedClaudeCodeCredentials runs before the next attempt can alter
+// auth files, and only after this credential's CLI has actually executed.
+func (o *Orchestrator) harvestExecutedClaudeCodeCredentials(ctx context.Context, session *models.Session, sandbox *Sandbox, billingMode TokenBillingMode, log zerolog.Logger) {
+	if _, harvestErr := o.harvestClaudeCodeCredentials(ctx, session, sandbox, billingMode, log); harvestErr != nil {
+		log.Warn().
+			Err(harvestErr).
+			Str("session_id", session.ID.String()).
+			Msg("failed to harvest Claude Code OAuth credentials from sandbox")
+	}
+}
+
 func (o *Orchestrator) harvestClaudeCodeCredentials(ctx context.Context, session *models.Session, sandbox *Sandbox, billingMode TokenBillingMode, log zerolog.Logger) (bool, error) {
 	if o == nil || session == nil || sandbox == nil {
 		return false, nil
@@ -8473,19 +8628,35 @@ func (o *Orchestrator) harvestClaudeCodeCredentials(ctx context.Context, session
 		return false, nil
 	}
 
-	rec, ok := o.env.lookupRecentPickRecord(session.OrgID, session.TriggeredByUserID, models.ProviderAnthropic)
-	if !ok || rec.credID == uuid.Nil {
+	var credentialID uuid.UUID
+	var credential *models.DecryptedCodingCredential
+	if sandbox.credentialResolution != nil && o.env.codingCredentials != nil {
+		selection := sandbox.credentialResolution.Credential
+		if selection == nil {
+			return false, nil
+		}
+		credentialID = selection.Credential.ID
+		credential = &selection.Credential
+	} else {
+		rec, found := o.env.lookupRecentPickRecord(session.OrgID, session.TriggeredByUserID, models.ProviderAnthropic)
+		if !found {
+			return false, nil
+		}
+		credentialID = rec.credID
+		credential = rec.credential
+	}
+	if credentialID == uuid.Nil {
 		return false, nil
 	}
 
 	scope := models.Scope{OrgID: session.OrgID}
 	var existing *models.AnthropicSubscription
-	if rec.credential != nil {
-		if rec.credential.Provider != models.ProviderAnthropicSubscription {
+	if credential != nil {
+		if credential.Provider != models.ProviderAnthropicSubscription {
 			return false, nil
 		}
-		scope = rec.credential.Scope()
-		if cfg, ok := rec.credential.Config.(models.AnthropicSubscriptionConfig); ok {
+		scope = credential.Scope()
+		if cfg, ok := credential.Config.(models.AnthropicSubscriptionConfig); ok {
 			if cfg.IsSetupToken() {
 				return false, nil
 			}
@@ -8516,7 +8687,7 @@ func (o *Orchestrator) harvestClaudeCodeCredentials(ctx context.Context, session
 	if existing != nil && !anthropicSubscriptionChanged(*existing, sub) {
 		return false, nil
 	}
-	stored, err := store.StoreTokenByID(ctx, scope, rec.credID, sub)
+	stored, err := store.StoreTokenByID(ctx, scope, credentialID, sub)
 	if err != nil {
 		return false, fmt.Errorf("store harvested claude credentials: %w", err)
 	}
@@ -8529,7 +8700,7 @@ func (o *Orchestrator) harvestClaudeCodeCredentials(ctx context.Context, session
 		scopeKind = "personal"
 	}
 	log.Info().
-		Str("cred_id", rec.credID.String()).
+		Str("cred_id", credentialID.String()).
 		Str("scope", scopeKind).
 		Msg("harvested refreshed Claude Code OAuth token from sandbox")
 	return true, nil
@@ -8616,6 +8787,13 @@ func anthropicSubscriptionChanged(existing, next models.AnthropicSubscription) b
 
 func (o *Orchestrator) injectUnifiedClaudeCodeAuth(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, sandbox *Sandbox, env map[string]string) (bool, string, error) {
 	if o.env == nil || o.env.codingCredentials == nil {
+		return false, "", nil
+	}
+
+	if sandbox.credentialResolution != nil {
+		if selection := sandbox.credentialResolution.Credential; selection != nil {
+			return o.injectPickedUnifiedClaudeCodeAuth(ctx, orgID, sandbox, env, selection.Credential)
+		}
 		return false, "", nil
 	}
 
@@ -8706,9 +8884,12 @@ func (o *Orchestrator) injectPickedUnifiedClaudeCodeAuth(ctx context.Context, or
 // over the legacy ANTHROPIC_API_KEY fallback. The run only fails when neither
 // path is configured.
 func (o *Orchestrator) ensureClaudeCodeAuth(ctx context.Context, run *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
+	if lookupErr := o.executionCredentialLookupError(ctx, run, threadID, run.CurrentTurn+1, sandbox.credentialResolution); lookupErr != nil {
+		return TokenBillingModeUnknown, lookupErr
+	}
 	claudeCodeVersion := o.detectClaudeCodeVersion(ctx, sandbox)
 	model := env[models.ModelEnvVarForAgentType(models.AgentTypeClaudeCode)]
-	if env["ANTHROPIC_API_KEY"] != "" && o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic) {
+	if env["ANTHROPIC_API_KEY"] != "" && o.unifiedCodingCredentialIsAPIKeyForSandbox(ctx, run.OrgID, run.TriggeredByUserID, models.ProviderAnthropic, sandbox) {
 		// prepareClaudeCodeAPIKeyFallback also removes any stale
 		// ~/.claude/.credentials.json left behind by a previous
 		// subscription-billed turn on a reused container — the CLI prefers
@@ -9486,6 +9667,25 @@ func truncateForLog(s string, max int) string {
 	return s[:cut] + "…"
 }
 
+func (o *Orchestrator) failPolicyStoppedCodeReviewThreadTurn(ctx context.Context, session *models.Session, threadID *uuid.UUID, reason StopReason, activityExecution *activityPhaseExecution, log zerolog.Logger) (bool, error) {
+	if !isCodeReviewThreadTurn(session, threadID) {
+		return false, nil
+	}
+	// A reviewer has no independent resumable checkpoint. Snapshotting here
+	// would replace the shared parent's checkpoint while sibling reviewers may
+	// still be using the workspace. Leave parent lifecycle and fallback to the
+	// review controller, just as for provider and deadline failures.
+	errMsg, explanation, nextSteps := gracefulStopFailure(reason, false, false)
+	result := &models.SessionResult{
+		Error:               strPtr(errMsg),
+		FailureExplanation:  strPtr(explanation),
+		FailureCategory:     strPtr(FailureCategoryTimeout),
+		FailureNextSteps:    append([]string(nil), nextSteps...),
+		FailureRetryAdvised: true,
+	}
+	return o.failCodeReviewThreadTurn(ctx, session, threadID, result, errMsg, activityExecution, log)
+}
+
 func (o *Orchestrator) handlePolicyStoppedSession(ctx context.Context, session *models.Session, sandbox *Sandbox, result *AgentResult, turnNumber int, reason StopReason, activityExecution *activityPhaseExecution, log zerolog.Logger) {
 	checkpointCtx, checkpointCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer checkpointCancel()
@@ -9962,6 +10162,7 @@ func (o *Orchestrator) retryOnTokenExpired(
 	prompt *AgentPrompt,
 	result *AgentResult,
 	err error,
+	runtimeTracker *runtimeProgressTracker,
 	log zerolog.Logger,
 ) (*AgentResult, error) {
 	if agentType != models.AgentTypeCodex || result == nil || !isTokenExpiredError(result.Error) {
@@ -9970,7 +10171,13 @@ func (o *Orchestrator) retryOnTokenExpired(
 
 	log.Warn().Msg("codex CLI hit token_expired, refreshing token and retrying")
 
-	reinjected, reinjectErr := o.env.InjectCodexAuthForUser(ctx, orgID, userID, sandbox)
+	var reinjected bool
+	var reinjectErr error
+	if sandbox.credentialResolution != nil && o.env.codingCredentials != nil {
+		reinjected, reinjectErr = o.env.RefreshCodexAuthForCredential(ctx, orgID, sandbox, sandbox.credentialResolution.Credential)
+	} else {
+		reinjected, reinjectErr = o.env.InjectCodexAuthForUser(ctx, orgID, userID, sandbox)
+	}
 	if reinjectErr != nil {
 		log.Warn().Err(reinjectErr).Msg("failed to re-inject codex auth for retry")
 		return result, err
@@ -9985,9 +10192,10 @@ func (o *Orchestrator) retryOnTokenExpired(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		retryLogErrCh <- o.streamLogs(ctx, sessionID, orgID, agentType, writeCtx, retryLogCh, nil)
+		retryLogErrCh <- o.streamLogs(ctx, sessionID, orgID, agentType, writeCtx, retryLogCh, runtimeTracker)
 	}()
 
+	logAgentExecutionCredential(log, sandbox)
 	result, err = adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
 	close(retryLogCh)
 	retryLogWg.Wait()
@@ -10009,6 +10217,7 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	result *AgentResult,
 	err error,
 	createBlockedMessage bool,
+	runtimeTracker *runtimeProgressTracker,
 	log zerolog.Logger,
 ) (*AgentResult, error, bool) {
 	signal := parseCredentialFailureSignal(result, time.Now())
@@ -10016,9 +10225,16 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 		return result, err, false
 	}
 
-	o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log)
+	o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, result, err, log, sandbox)
 
-	refreshedEnv := o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)
+	resolution := o.resolveSessionCredentials(ctx, session, sandboxCfg)
+	if resolution.credentialLookupErr != nil {
+		// A already executed and its input may be durably acknowledged. Settle
+		// that result normally rather than replaying the turn on a lookup retry.
+		log.Warn().Err(resolution.credentialLookupErr).Msg("fallback credential lookup failed after agent execution; preserving executed result")
+		return result, err, false
+	}
+	refreshedEnv := resolution.Env
 	if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
 		logCredentialRateLimitBlocked(log, session, authErr)
 		if createBlockedMessage {
@@ -10027,11 +10243,17 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 		return result, authErr, false
 	}
 
-	sandbox.Env = cloneStringMap(refreshedEnv)
-	if authErr := o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, sandbox, refreshedEnv); authErr != nil {
+	// Prepare the next attempt on its own value. Failed preparation can leave
+	// the shared filesystem partially changed, so never harvest it; retain A's
+	// binding with A's returned result until B is actually ready to execute.
+	retrySandbox := sandboxWithCredentialResolution(sandbox, resolution, refreshedEnv)
+	authBillingMode, authErr := o.prepareAgentAuthForRetry(ctx, session, writeCtx.ThreadID, retrySandbox, refreshedEnv)
+	if authErr != nil {
 		return result, authErr, false
 	}
-	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, refreshedEnv, prompt.UsageHint)
+	*sandbox = *retrySandbox
+	prompt.UsageHint.BillingMode = authBillingMode
+	prompt.UsageHint = o.buildTokenUsageHint(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, refreshedEnv, prompt.UsageHint, sandbox)
 
 	log.Info().
 		Str("session_id", session.ID.String()).
@@ -10044,17 +10266,28 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	retryLogWg.Add(1)
 	go func() {
 		defer retryLogWg.Done()
-		retryLogErrCh <- o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, retryLogCh, nil)
+		retryLogErrCh <- o.streamLogs(ctx, session.ID, session.OrgID, session.AgentType, writeCtx, retryLogCh, runtimeTracker)
 	}()
+	logAgentExecutionCredential(log, sandbox)
 	retryResult, retryErr := adapter.Execute(execCtx, sandbox, prompt, retryLogCh)
 	close(retryLogCh)
 	retryLogWg.Wait()
 	retryErr = errors.Join(retryErr, <-retryLogErrCh)
 
-	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, retryResult, retryErr, log)
+	retryResult, retryErr = o.retryOnTokenExpired(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, session.ID, writeCtx, sandbox, adapter, execCtx, prompt, retryResult, retryErr, runtimeTracker, log)
+	o.harvestExecutedClaudeCodeCredentials(ctx, session, sandbox, authBillingMode, log)
 	if parseCredentialFailureSignal(retryResult, time.Now()).RateLimited {
-		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, retryResult, retryErr, log)
-		refreshedEnv = o.resolveSessionCredentialEnv(ctx, session, sandboxCfg)
+		o.shedOnRunResult(ctx, session.AgentType, session.OrgID, session.TriggeredByUserID, retryResult, retryErr, log, sandbox)
+		// Probe availability only. This candidate never executes, so keep the
+		// sandbox bound to the fallback credential whose result is returned.
+		probe := o.resolveSessionCredentials(ctx, session, sandboxCfg)
+		if probe.credentialLookupErr != nil {
+			// This probe cannot change an attempt that already ran. Preserve B's
+			// result and error, and do not publish a misleading auth-block message.
+			log.Warn().Err(probe.credentialLookupErr).Msg("credential availability probe failed after fallback execution; preserving executed result")
+			return retryResult, retryErr, true
+		}
+		refreshedEnv = probe.Env
 		if authErr := o.env.CheckAuth(session.AgentType, refreshedEnv); authErr != nil {
 			logCredentialRateLimitBlocked(log, session, authErr)
 			if createBlockedMessage {
@@ -10066,8 +10299,9 @@ func (o *Orchestrator) retrySessionOnCredentialRateLimit(
 	return retryResult, retryErr, true
 }
 
-func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) map[string]string {
-	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, o.env.ResolveForModel(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride)), session.AgentType)
+func (o *Orchestrator) resolveSessionCredentials(ctx context.Context, session *models.Session, sandboxCfg SandboxConfig) *resolvedAgentEnv {
+	resolution := o.env.ResolveForModelWithCredential(ctx, session.OrgID, session.AgentType, session.TriggeredByUserID, stringPtrValue(session.ModelOverride))
+	refreshedEnv := refreshAgentCredentialEnv(sandboxCfg.Env, resolution.Env, session.AgentType)
 	if refreshedEnv == nil {
 		refreshedEnv = make(map[string]string)
 	}
@@ -10078,7 +10312,111 @@ func (o *Orchestrator) resolveSessionCredentialEnv(ctx context.Context, session 
 	if _, ok := refreshedEnv["HOME"]; !ok {
 		refreshedEnv["HOME"] = sandboxCfg.HomeDir
 	}
-	return refreshedEnv
+	resolution.Env = refreshedEnv
+	return resolution
+}
+
+// executionCredentialLookupFailure keeps a transient lookup failure separate
+// from a definitive absent credential and from the agent's execution result.
+type executionCredentialLookupFailure struct {
+	cause error
+}
+
+func (e *executionCredentialLookupFailure) Error() string {
+	return fmt.Sprintf("resolve execution credential: %s", e.cause)
+}
+
+func (e *executionCredentialLookupFailure) Unwrap() error { return e.cause }
+
+type credentialLookupDeadLetterStore interface {
+	FailCredentialLookupForDeadLetter(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int, string) (bool, error)
+}
+
+func (o *Orchestrator) executionCredentialLookupError(ctx context.Context, session *models.Session, threadID *uuid.UUID, expectedTurn int, resolution *resolvedAgentEnv) error {
+	if resolution == nil || resolution.credentialLookupErr == nil {
+		return nil
+	}
+	err := &executionCredentialLookupFailure{cause: resolution.credentialLookupErr}
+	explanation := "Coding credentials could not be loaded because of a temporary infrastructure error. Retry the session."
+	nextSteps := []string{"Retry the session when the credential service is available"}
+	if isCodeReviewTurnContext(ctx) {
+		// Recheck failure receipts remain owned by their lease-fenced worker.
+		return err
+	}
+	if isCodeReviewThreadTurn(session, threadID) {
+		store, supported := o.sessionThreads.(credentialLookupDeadLetterStore)
+		jobID, hasJob := jobctx.JobIDFromContext(ctx)
+		if !supported || !hasJob || jobID == uuid.Nil || expectedTurn < 1 {
+			return err
+		}
+		// Snapshot the exact unstarted job/turn. The store atomically checks
+		// exhaustion, assessment ownership, and absence of a replacement runtime
+		// before marking this thread; a later or unrelated failure cannot do so.
+		sessionCopy, threadCopy := *session, *threadID
+		jobctx.RegisterDeadLetterHook(ctx, func(hookCtx context.Context, terminalErr error) {
+			if !errors.Is(terminalErr, err) {
+				return
+			}
+			writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(hookCtx), 10*time.Second)
+			defer cancelWrite()
+			failed, persistErr := store.FailCredentialLookupForDeadLetter(writeCtx, sessionCopy.OrgID, sessionCopy.ID, threadCopy, jobID, expectedTurn, explanation)
+			if persistErr != nil {
+				o.logger.Error().Err(persistErr).
+					Str("session_id", sessionCopy.ID.String()).Str("thread_id", threadCopy.String()).
+					Msg("failed to persist exhausted review credential lookup")
+			} else if failed {
+				o.logger.Warn().Err(terminalErr).
+					Str("session_id", sessionCopy.ID.String()).Str("thread_id", threadCopy.String()).
+					Msg("recorded exhausted review credential lookup for controller reconciliation")
+			}
+		})
+		return err
+	}
+	if session.Origin != models.SessionOriginCodeReview {
+		o.registerSandboxInfraFailure(ctx, session, err.Error(), FailureCategoryTooling, explanation, nextSteps, "coding credential resolution")
+	}
+	return err
+}
+
+// sandboxWithCredentialResolution keeps execution-only credentials off the
+// provider's shared sandbox handle, including handles returned during reuse.
+func sandboxWithCredentialResolution(sandbox *Sandbox, resolution *resolvedAgentEnv, env map[string]string) *Sandbox {
+	owned := *sandbox
+	owned.credentialResolution = resolution
+	owned.Env = cloneStringMap(env)
+	owned.Metadata = cloneStringMap(sandbox.Metadata)
+	return &owned
+}
+
+func logAgentExecutionCredential(log zerolog.Logger, sandbox *Sandbox) {
+	if sandbox == nil || sandbox.credentialResolution == nil || sandbox.credentialResolution.Credential == nil {
+		return
+	}
+	selection := sandbox.credentialResolution.Credential
+	log.Info().
+		Str("credential_id", selection.Credential.ID.String()).
+		Str("credential_provider", string(selection.Credential.Provider)).
+		Str("credential_scope", string(selection.Binding.CredentialScope)).
+		Msg("agent execution credential selected")
+}
+
+func firstSandbox(sandboxes []*Sandbox) *Sandbox {
+	if len(sandboxes) == 0 {
+		return nil
+	}
+	return sandboxes[0]
+}
+
+func (o *Orchestrator) unifiedCodingCredentialIsAPIKeyForSandbox(ctx context.Context, orgID uuid.UUID, userID *uuid.UUID, provider models.ProviderName, sandbox *Sandbox) bool {
+	if sandbox != nil && sandbox.credentialResolution != nil {
+		selection := sandbox.credentialResolution.Credential
+		if selection == nil {
+			return false
+		}
+		cfg, compatible := compatibleCodingProviderConfig(selection.Credential.Provider, selection.Credential.Config)
+		return compatible && codingProviderConfigIsAPIKey(cfg)
+	}
+	return o.env != nil && o.env.unifiedCodingCredentialIsAPIKey(ctx, orgID, userID, provider)
 }
 
 func applyDirectModelOverrideEnv(agentType models.AgentType, modelOverride *string, env map[string]string) {
@@ -10157,19 +10495,17 @@ func clearAgentCredentialEnv(env map[string]string, agentType models.AgentType) 
 	}
 }
 
-func (o *Orchestrator) prepareAgentAuthForRetry(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) error {
+func (o *Orchestrator) prepareAgentAuthForRetry(ctx context.Context, session *models.Session, threadID *uuid.UUID, sandbox *Sandbox, env map[string]string) (TokenBillingMode, error) {
 	switch session.AgentType {
 	case models.AgentTypeCodex:
 		if env["OPENAI_API_KEY"] != "" {
-			return o.removeCodexAuthFile(ctx, sandbox)
+			return TokenBillingModeAPIKey, o.removeCodexAuthFile(ctx, sandbox)
 		}
-		_, err := o.ensureCodexAuth(ctx, session, threadID, sandbox, env)
-		return err
+		return o.ensureCodexAuth(ctx, session, threadID, sandbox, env)
 	case models.AgentTypeClaudeCode:
-		_, err := o.ensureClaudeCodeAuth(ctx, session, threadID, sandbox, env)
-		return err
+		return o.ensureClaudeCodeAuth(ctx, session, threadID, sandbox, env)
 	default:
-		return nil
+		return TokenBillingModeUnknown, nil
 	}
 }
 
@@ -10219,7 +10555,7 @@ func (o *Orchestrator) createContinueAuthFailureMessage(ctx context.Context, ses
 // rows are recorded under the OpenAI request provider too, so subscription
 // usage-limit output sheds the picked subscription row and lets the retry pick
 // the next Codex/OpenAI credential.
-func (o *Orchestrator) shedOnRunResult(ctx context.Context, agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger) {
+func (o *Orchestrator) shedOnRunResult(ctx context.Context, agentType models.AgentType, orgID uuid.UUID, userID *uuid.UUID, result *AgentResult, runErr error, log zerolog.Logger, sandboxes ...*Sandbox) {
 	if o.env == nil || result == nil {
 		return
 	}
@@ -10228,6 +10564,26 @@ func (o *Orchestrator) shedOnRunResult(ctx context.Context, agentType models.Age
 		return
 	}
 	signal := parseCredentialFailureSignal(result, time.Now())
+	sandbox := firstSandbox(sandboxes)
+	if sandbox != nil && sandbox.credentialResolution != nil {
+		selection := sandbox.credentialResolution.Credential
+		if selection == nil {
+			return
+		}
+		boundLog := log.With().
+			Str("cred_id", selection.Credential.ID.String()).
+			Str("credential_provider", string(selection.Credential.Provider)).
+			Str("credential_scope", string(selection.Binding.CredentialScope)).Logger()
+		switch {
+		case signal.AuthRejected:
+			boundLog.Warn().Msg("shedding credential after auth-rejected signal in run result")
+			o.env.ShedAuthRejectedForCredential(ctx, selection)
+		case signal.RateLimited:
+			boundLog.Warn().Time("rate_limited_until", signal.RateLimitedUntil).Msg("shedding credential after rate-limit signal in run result")
+			o.env.ShedRateLimitedForCredential(ctx, selection, signal)
+		}
+		return
+	}
 	switch {
 	case signal.AuthRejected:
 		log.Warn().

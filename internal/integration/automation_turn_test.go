@@ -331,10 +331,17 @@ func TestAutomationTurn_AttemptFenceHelpers(t *testing.T) {
 	require.NotEqual(t, models.SessionStatusIdle, h.session(t).Status, "the session is untouched after the reclaim")
 	_, err = h.pool.Exec(ctx, `UPDATE jobs SET status = 'running', lock_token = $2 WHERE id = $1`, h.jobID, h.lockToken)
 	require.NoError(t, err, "restore the lease")
+	// The attempt reached BeginRuntime before the drain: its deadlines are
+	// the executing-turn marker the org quota counts.
+	_, err = h.pool.Exec(ctx, `UPDATE sessions SET runtime_soft_deadline_at = now(), runtime_hard_deadline_at = now() WHERE id = $1`, sessionID)
+	require.NoError(t, err, "install the executing-turn marker")
 	updated, err = h.store.EndInterruptedAttempt(ctx, h.orgID, h.run.ID, sessionID, h.lockToken, models.SessionStatusIdle)
 	require.NoError(t, err, "interrupted end")
 	require.True(t, updated, "the lease holder ends the interrupted attempt")
-	require.Equal(t, models.SessionStatusIdle, h.session(t).Status, "the session is restored in the same fenced statement")
+	restored := h.session(t)
+	require.Equal(t, models.SessionStatusIdle, restored.Status, "the session is restored in the same fenced statement")
+	require.Nil(t, restored.RuntimeHardDeadlineAt, "the interrupted attempt no longer counts as executing")
+	require.Nil(t, restored.RuntimeSoftDeadlineAt, "the soft deadline is cleared with the hard one")
 	_, err = h.results.GetByRun(ctx, h.orgID, h.run.ID)
 	require.Error(t, err, "the drain path writes no marker")
 

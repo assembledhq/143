@@ -255,6 +255,16 @@ export const api = {
         `/api/v1/repositories/${id}/branches${query ? `?query=${encodeURIComponent(query)}` : ''}`,
       ),
     detectPreview: (owner: string, repo: string) => get<import('./preview-types').PreviewDetectionResult>(`/api/v1/repos/${owner}/${repo}/preview/detect`),
+    packageRegistryCredentials: {
+      list: (repositoryId: string) =>
+        get<import('./types').ListResponse<import('./types').PackageRegistryCredentialSummary>>(`/api/v1/repositories/${repositoryId}/package-registry-credentials`),
+      create: (repositoryId: string, body: import('./types').PackageRegistryCredentialCreateRequest) =>
+        post<import('./types').SingleResponse<import('./types').PackageRegistryCredentialSummary>>(`/api/v1/repositories/${repositoryId}/package-registry-credentials`, body),
+      rotate: (repositoryId: string, credentialId: string, body: import('./types').PackageRegistryCredentialRotateRequest) =>
+        request<import('./types').SingleResponse<import('./types').PackageRegistryCredentialSummary>>(`/api/v1/repositories/${repositoryId}/package-registry-credentials/${credentialId}`, { method: 'PUT', body: JSON.stringify(body) }),
+      delete: (repositoryId: string, credentialId: string, expectedRevision: string) =>
+        del<void>(`/api/v1/repositories/${repositoryId}/package-registry-credentials/${credentialId}?expected_revision=${encodeURIComponent(expectedRevision)}`),
+    },
     previewSecretBundles: {
       list: (id: string) =>
         get<import('./types').ListResponse<import('./types').PreviewSecretBundleSummary>>(`/api/v1/repositories/${id}/preview-secret-bundles`),
@@ -423,7 +433,7 @@ export const api = {
     deleteGitHubTrigger: (repositoryId: string) =>
       del<void>(`/api/v1/code-review-github-trigger?repository_id=${encodeURIComponent(repositoryId)}`),
     pendingSchedules: (cursor?: string, limit = 25) => get<import('./types').ListResponse<import('./types').CodeReviewScheduledTarget>>(`/api/v1/code-review-targets?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`),
-    requestReview: (prID: string, body: { request_id: string; mode: 'review_now' | 'recheck' | 'force_fresh'; reason?: string }) =>
+    requestReview: (prID: string, body: { request_id: string; mode: 'review_now' | 'recheck' | 'force_fresh'; reason?: string; override_size_limits?: boolean; override_review_session_id?: string; use_review_history?: boolean }) =>
       post<import('./types').SingleResponse<import('./types').CodeReviewRequestResponse>>(`/api/v1/pull-requests/${prID}/code-review/requests`, body),
     reviewNow: (prID: string, requestID: string) => api.codeReviews.requestReview(prID, { request_id: requestID, mode: 'review_now' }),
     pauseSchedule: (prID: string, paused: boolean) => request<import('./types').SingleResponse<import('./types').CodeReviewSchedule>>(`/api/v1/pull-requests/${prID}/code-review`, { method: 'PATCH', body: JSON.stringify({ automatic_paused: paused }) }),

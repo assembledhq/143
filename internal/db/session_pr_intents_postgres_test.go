@@ -50,7 +50,7 @@ func newSessionPRIntentPostgres(t *testing.T) *pgxpool.Pool {
 		CREATE TABLE session_changesets (id uuid PRIMARY KEY, org_id uuid NOT NULL, session_id uuid NOT NULL, is_primary boolean NOT NULL, UNIQUE(id, org_id, session_id));
 		CREATE TABLE session_publications (id uuid PRIMARY KEY, org_id uuid NOT NULL, session_id uuid NOT NULL, changeset_id uuid NOT NULL);`)
 	require.NoError(t, err, "create the real migration's scoped parent tables")
-	for _, migration := range []string{"000314_session_pr_review_intent.up.sql", "000315_session_pr_intent_content.up.sql"} {
+	for _, migration := range []string{"000314_session_pr_review_intent.up.sql", "000316_session_pr_intent_content.up.sql"} {
 		up, err := os.ReadFile(filepath.Join("..", "..", "migrations", migration))
 		require.NoError(t, err, "read publication intent migration")
 		_, err = pool.Exec(ctx, "BEGIN; "+string(up)+"; COMMIT;")
@@ -162,7 +162,7 @@ func TestSessionPRIntentPostgres(t *testing.T) {
 		}},
 		{"content down migration keeps reviewer staging", func(t *testing.T, pool *pgxpool.Pool, f sessionPRIntentPostgresFixture) {
 			ctx := context.Background()
-			down, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000315_session_pr_intent_content.down.sql"))
+			down, err := os.ReadFile(filepath.Join("..", "..", "migrations", "000316_session_pr_intent_content.down.sql"))
 			require.NoError(t, err, "read content down migration")
 			_, err = pool.Exec(ctx, "BEGIN; "+string(down)+"; COMMIT;")
 			require.NoError(t, err, "content rollback should apply cleanly")

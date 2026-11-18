@@ -226,6 +226,23 @@ func (s *PullRequestStore) SetCodeReviewStatusCommentID(ctx context.Context, org
 	return nil
 }
 
+// ClearCodeReviewStatusCommentID forgets the temporary progress comment after
+// the formal review is confirmed and its progress comment is removed.
+func (s *PullRequestStore) ClearCodeReviewStatusCommentID(ctx context.Context, orgID, id uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE pull_requests
+		SET code_review_status_comment_id = NULL
+		WHERE org_id = @org_id
+		  AND id = @id`, pgx.NamedArgs{
+		"org_id": orgID,
+		"id":     id,
+	})
+	if err != nil {
+		return fmt.Errorf("clear code review status comment id: %w", err)
+	}
+	return nil
+}
+
 func (s *PullRequestStore) GetBySessionID(ctx context.Context, orgID, sessionID uuid.UUID) (models.PullRequest, error) {
 	return s.GetPrimaryBySessionID(ctx, orgID, sessionID)
 }
@@ -286,6 +303,29 @@ func (s *PullRequestStore) UpdateStatus(ctx context.Context, orgID, id uuid.UUID
 		"status": status,
 	})
 	return err
+}
+
+// ReopenIfUnchanged repairs a stale closed mirror using provider lifecycle
+// ordering. A local close or merge committed during the provider read wins,
+// including events whose provider timestamps have the same second precision.
+func (s *PullRequestStore) ReopenIfUnchanged(ctx context.Context, orgID, id uuid.UUID, expectedUpdatedAt, observedAt time.Time) (bool, error) {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin pull request reopen: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	insights := NewCodeReviewInsightStore(tx)
+	accepted, err := insights.recordPullRequestLifecycleIfUnchanged(ctx, orgID, id, false, nil, false, observedAt, &expectedUpdatedAt)
+	if err != nil || !accepted {
+		return false, err
+	}
+	if err := insights.projectPullRequestDecisions(ctx, orgID, id); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit pull request reopen: %w", err)
+	}
+	return true, nil
 }
 
 // UpdateMergedStatus records the provider's authoritative merge time rather

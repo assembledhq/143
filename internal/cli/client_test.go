@@ -51,7 +51,7 @@ func TestClientDoParsesRetryAfter(t *testing.T) {
 		w.Header().Set("Retry-After", "7")
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	client := NewClient(Config{ServerURL: server.URL})
 	err := client.Do(context.Background(), http.MethodGet, "/status", nil, nil)

@@ -202,16 +202,27 @@ func (s *Service) ApplyApprovedGrant(ctx context.Context, in ApprovedGrantInput)
 	if s.approvedGrants == nil {
 		return nil, fmt.Errorf("approved capability grant store is not configured")
 	}
+	item, err := s.BuildApprovedGrant(in)
+	if err != nil {
+		return nil, err
+	}
+	return s.approvedGrants.AppendApprovedSessionGrant(ctx, in.OrgID, in.SessionID, item)
+}
+
+// BuildApprovedGrant validates and constructs the existing user-approved grant
+// without reading or writing a policy, request or session. Transaction-owning
+// callers can persist the returned item as part of their own atomic unit.
+func (s *Service) BuildApprovedGrant(in ApprovedGrantInput) (models.AgentCapabilitySnapshotItem, error) {
 	if err := s.ValidateGrant(models.AgentCapabilityPolicyGrantInput{
 		CapabilityID: in.Capability,
 		AccessLevel:  in.AccessLevel,
 		Enabled:      true,
 		Config:       json.RawMessage(`{}`),
 	}); err != nil {
-		return nil, err
+		return models.AgentCapabilitySnapshotItem{}, err
 	}
 	def := s.catalog[in.Capability]
-	return s.approvedGrants.AppendApprovedSessionGrant(ctx, in.OrgID, in.SessionID, models.AgentCapabilitySnapshotItem{
+	return models.AgentCapabilitySnapshotItem{
 		ID:                  in.Capability,
 		DisplayName:         def.DisplayName,
 		AccessLevel:         in.AccessLevel,
@@ -221,7 +232,7 @@ func (s *Service) ApplyApprovedGrant(ctx context.Context, in ApprovedGrantInput)
 		Source:              models.AgentCapabilityGrantSourceUserApproved,
 		GrantedAt:           time.Now().UTC(),
 		HumanInputRequestID: &in.HumanInputRequestID,
-	})
+	}, nil
 }
 
 func (s *Service) ResolveForSession(ctx context.Context, in ResolveInput) ([]models.AgentCapabilitySnapshotItem, error) {

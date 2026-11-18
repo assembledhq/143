@@ -265,7 +265,12 @@ func (s *CodeReviewRecheckStore) Dispatch(ctx context.Context, in models.CodeRev
 	if !ownerReady {
 		return models.CodeReviewRecheckDispatch{}, false, ErrCodeReviewRecheckFence
 	}
-	if _, err = tx.Exec(ctx, `UPDATE sessions SET code_review_owner_pr_id=$3,status='running',started_at=now(),completed_at=NULL WHERE org_id=$1 AND id=$2 AND (code_review_owner_pr_id IS NULL OR code_review_owner_pr_id=$3)`, in.OrgID, in.SessionID, in.PullRequestID); err != nil {
+	// The claim marks the session running before its job reaches BeginRuntime,
+	// so the runtime deadlines (the executing-turn marker CountExecutingByOrg
+	// reads) are cleared like ClaimIdle does: the recheck settlement paths
+	// below return the session to idle without touching them, and a stale
+	// pair would make a queued recheck count against the org quota.
+	if _, err = tx.Exec(ctx, `UPDATE sessions SET code_review_owner_pr_id=$3,status='running',started_at=now(),completed_at=NULL,runtime_soft_deadline_at=NULL,runtime_hard_deadline_at=NULL WHERE org_id=$1 AND id=$2 AND (code_review_owner_pr_id IS NULL OR code_review_owner_pr_id=$3)`, in.OrgID, in.SessionID, in.PullRequestID); err != nil {
 		return models.CodeReviewRecheckDispatch{}, false, err
 	}
 	var currentTurn int
@@ -464,9 +469,9 @@ func (s *CodeReviewRecheckStore) Complete(ctx context.Context, c models.CodeRevi
 	if c.OrgID == uuid.Nil || c.AssessmentID == uuid.Nil || c.JobID == uuid.Nil || c.LockToken == uuid.Nil || c.SessionID == uuid.Nil || c.ThreadID == uuid.Nil || c.ExpectedTurn < 1 || c.SessionTurn < 1 || c.Result == nil || len(c.Summary) > 256*1024 || (len(c.TokenUsage) > 0 && !json.Valid(c.TokenUsage)) {
 		return 0, fmt.Errorf("invalid code review recheck completion")
 	}
-	// A code review turn is read-only. Reusing the ordinary session writer for
-	// a changed worktree would open its own diff transaction and invalidate the
-	// one-transaction receipt guarantee.
+	// A code review turn remains read-only even though its persistence now
+	// composes within this transaction. A nonempty workspace diff is rejected
+	// rather than silently discarding it from the completed receipt.
 	if c.Result.Diff != nil && *c.Result.Diff != "" {
 		return 0, fmt.Errorf("code review recheck changed workspace")
 	}
@@ -528,10 +533,13 @@ func (s *CodeReviewRecheckStore) Complete(ctx context.Context, c models.CodeRevi
 	}
 	rootResult := *c.Result
 	rootResult.TokenUsage = rootUsage
-	if err = NewSessionStore(tx).UpdateTurnComplete(ctx, c.OrgID, c.SessionID, c.SessionTurn, &rootResult, c.ParentAgentSessionID, c.SnapshotKey); err != nil {
+	// These temporary stores intentionally have no publishers. Preserve the
+	// existing receipt-only behavior by discarding passive effect data instead
+	// of publishing or reloading through a transaction that is not yet committed.
+	if _, err = NewSessionStore(tx).UpdateTurnCompleteInTx(ctx, c.OrgID, tx, c.SessionID, c.SessionTurn, &rootResult, c.ParentAgentSessionID, c.SnapshotKey); err != nil {
 		return 0, err
 	}
-	if err = NewSessionThreadStore(tx).UpdateTurnComplete(ctx, c.OrgID, c.ThreadID, c.ExpectedTurn, c.Result, c.ProviderSessionID); err != nil {
+	if _, err = NewSessionThreadStore(tx).UpdateTurnCompleteInTx(ctx, c.OrgID, tx, c.ThreadID, c.ExpectedTurn, c.Result, c.ProviderSessionID); err != nil {
 		return 0, err
 	}
 	tag, err := tx.Exec(ctx, `UPDATE code_review_recheck_dispatches SET status='completed',result_message_id=$5,provider_session_id=NULLIF($6,''),snapshot_key=NULLIF($7,''),native_context=$8,completed_at=now(),updated_at=now() WHERE org_id=$1 AND assessment_id=$2 AND job_id=$3 AND attempt_lock_token=$4 AND status='running'`, c.OrgID, c.AssessmentID, c.JobID, c.LockToken, msg.ID, c.ProviderSessionID, c.SnapshotKey, c.NativeContext)
@@ -753,9 +761,23 @@ func (s *CodeReviewRecheckStore) ReconcileDrainedTerminalTurn(ctx context.Contex
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	reconciled, err := s.ReconcileDrainedTerminalTurnInTx(ctx, orgID, tx, assessmentID)
+	if err != nil || !reconciled {
+		return reconciled, err
+	}
+	return true, tx.Commit(ctx)
+}
+
+// ReconcileDrainedTerminalTurnInTx stages the same exact-turn reconciliation in
+// the caller's transaction. It never begins, settles or publishes; the caller
+// owns rollback of any staged thread changes after an error.
+func (s *CodeReviewRecheckStore) ReconcileDrainedTerminalTurnInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, assessmentID uuid.UUID) (bool, error) {
+	if nilLifecycleDependency(tx) {
+		return false, errors.New("reconcile drained terminal turn in tx: nil transaction")
+	}
 	var sessionID, threadID, pullRequestID uuid.UUID
 	var expectedTurn int
-	err = tx.QueryRow(ctx, `SELECT session_id,thread_id,pull_request_id,expected_turn FROM code_review_recheck_dispatches WHERE org_id=$1 AND assessment_id=$2 AND status IN ('failed','cancelled') FOR UPDATE`, orgID, assessmentID).Scan(&sessionID, &threadID, &pullRequestID, &expectedTurn)
+	err := tx.QueryRow(ctx, `SELECT session_id,thread_id,pull_request_id,expected_turn FROM code_review_recheck_dispatches WHERE org_id=$1 AND assessment_id=$2 AND status IN ('failed','cancelled') FOR UPDATE`, orgID, assessmentID).Scan(&sessionID, &threadID, &pullRequestID, &expectedTurn)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -792,5 +814,5 @@ func (s *CodeReviewRecheckStore) ReconcileDrainedTerminalTurn(ctx context.Contex
 	if err != nil {
 		return false, err
 	}
-	return true, tx.Commit(ctx)
+	return true, nil
 }

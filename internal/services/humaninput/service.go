@@ -36,6 +36,7 @@ type Tx interface {
 	GetSession(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error)
 	GetRequestForUpdate(ctx context.Context, orgID, sessionID, requestID uuid.UUID) (models.HumanInputRequest, error)
 	AnswerRequest(ctx context.Context, orgID, sessionID, requestID uuid.UUID, answerText *string, answerPayload json.RawMessage, answeredBy uuid.UUID) (models.HumanInputRequest, error)
+	AppendApprovedCapabilityGrant(ctx context.Context, orgID, sessionID uuid.UUID, item models.AgentCapabilitySnapshotItem) ([]models.AgentCapabilitySnapshotItem, error)
 	CancelRequest(ctx context.Context, orgID, sessionID, requestID uuid.UUID, answerText *string, answerPayload json.RawMessage, answeredBy uuid.UUID) (models.HumanInputRequest, error)
 	AnswerCompatibilityQuestion(ctx context.Context, orgID, sessionID uuid.UUID, questionText, answerText string, answeredBy uuid.UUID) error
 	SkipCompatibilityQuestion(ctx context.Context, orgID, sessionID uuid.UUID, questionText string) error
@@ -54,8 +55,10 @@ func New(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
+// CapabilityApprover validates and constructs grant data only. The answer's Tx
+// owns persistence so no approved grant can outlive a rejected answer/resume.
 type CapabilityApprover interface {
-	ApplyApprovedGrant(ctx context.Context, orgID, sessionID, requestID uuid.UUID, capability models.AgentCapabilityID, accessLevel models.AgentCapabilityAccessLevel) ([]models.AgentCapabilitySnapshotItem, error)
+	BuildApprovedGrant(ctx context.Context, orgID, sessionID, requestID uuid.UUID, capability models.AgentCapabilityID, accessLevel models.AgentCapabilityAccessLevel) (models.AgentCapabilitySnapshotItem, error)
 }
 
 func (s *Service) SetCapabilityApprover(approver CapabilityApprover) {
@@ -134,7 +137,7 @@ func (s *Service) Answer(ctx context.Context, input AnswerInput) (Result, error)
 			}
 			return err
 		}
-		if err := s.applyApprovedCapabilityGrant(txCtx, request, input); err != nil {
+		if err := s.applyApprovedCapabilityGrant(txCtx, tx, request, input); err != nil {
 			return err
 		}
 
@@ -179,7 +182,7 @@ func (s *Service) Answer(ctx context.Context, input AnswerInput) (Result, error)
 	return result, nil
 }
 
-func (s *Service) applyApprovedCapabilityGrant(ctx context.Context, request models.HumanInputRequest, input AnswerInput) error {
+func (s *Service) applyApprovedCapabilityGrant(ctx context.Context, tx Tx, request models.HumanInputRequest, input AnswerInput) error {
 	if s.capabilityApprover == nil || !humanInputAnswerApproved(input.Answer) {
 		return nil
 	}
@@ -197,7 +200,11 @@ func (s *Service) applyApprovedCapabilityGrant(ctx context.Context, request mode
 	if payload.Type != "agent_capability_request" {
 		return nil
 	}
-	_, err := s.capabilityApprover.ApplyApprovedGrant(ctx, input.OrgID, input.SessionID, input.RequestID, payload.CapabilityID, payload.AccessLevel)
+	item, err := s.capabilityApprover.BuildApprovedGrant(ctx, input.OrgID, input.SessionID, input.RequestID, payload.CapabilityID, payload.AccessLevel)
+	if err != nil {
+		return err
+	}
+	_, err = tx.AppendApprovedCapabilityGrant(ctx, input.OrgID, input.SessionID, item)
 	if errors.Is(err, db.ErrCapabilityAlreadyGranted) {
 		return nil
 	}

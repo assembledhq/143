@@ -1552,76 +1552,22 @@ func (s *SessionStore) PublishCheckpoint(ctx context.Context, orgID, sessionID u
 	return true, nil
 }
 
-// PublishCheckpointWithProvenance is the only writer of an automation-owned
-// session's snapshot key (design doc 125, "Checkpoint coherence"). In one
-// statement it installs the checkpoint on the session, exactly as
-// PublishCheckpoint does, and records on the owning generation the key it
-// applies to, the head the workspace was at, the dependency input
-// fingerprint, and whether the producing turn completed its review. A
-// failure leaves the previous key and provenance installed together.
-// Returns false when the session is not owned by provenance.GenerationID
-// or the lock fence rejects the write.
+// PublishCheckpointWithProvenance retains the legacy DBTX wrapper for an
+// automation-owned checkpoint and its generation provenance (design doc 125,
+// "Checkpoint coherence"). It shares the row statement with the explicit InTx
+// seam, recording the key, head, dependency fingerprint and review completion.
+// Statement errors retain the previous key and provenance together. A false
+// result can still update the session if its matching provenance row is absent;
+// it does not prove no writes. Transaction owners must use the InTx seam and
+// roll back the whole unit on false or error, then publish returned effects
+// only after confirmed commit.
 func (s *SessionStore) PublishCheckpointWithProvenance(ctx context.Context, orgID, sessionID uuid.UUID, lockToken uuid.UUID, agentSessionID, snapshotKey string, kind models.CheckpointKind, capability models.CheckpointCapability, sizeBytes int64, checkpointedAt time.Time, stopReason models.RuntimeStopReason, provenance models.CheckpointProvenance) (bool, error) {
-	if strings.TrimSpace(snapshotKey) == "" {
-		return false, fmt.Errorf("publish checkpoint with provenance: snapshot key is required")
-	}
-	if provenance.GenerationID == uuid.Nil {
-		return false, fmt.Errorf("publish checkpoint with provenance: generation is required")
-	}
-	args := pgx.NamedArgs{
-		"id":                     sessionID,
-		"org_id":                 orgID,
-		"generation_id":          provenance.GenerationID,
-		"agent_session_id":       agentSessionID,
-		"snapshot_key":           snapshotKey,
-		"checkpoint_kind":        string(kind),
-		"checkpoint_capability":  string(capability),
-		"checkpoint_size_bytes":  sizeBytes,
-		"checkpointed_at":        checkpointedAt.UTC(),
-		"checkpoint_error":       nil,
-		"runtime_stop_reason":    string(stopReason),
-		"checkpoint_head_sha":    nullIfEmpty(provenance.HeadSHA),
-		"dependency_fingerprint": provenance.DependencyFingerprint,
-		"review_complete":        provenance.ReviewComplete && kind == models.CheckpointKindTurnComplete,
-	}
-	query := `WITH published AS (` + publishCheckpointUpdate + `
-		  AND s.automation_owner_generation_id = @generation_id`
-	if lockToken != uuid.Nil {
-		query += publishCheckpointJobFence
-		args["lock_token"] = lockToken
-	}
-	query += `
-			RETURNING s.id, s.org_id, s.workspace_revision, s.workspace_revision_updated_at
-		), provenance AS (
-			UPDATE automation_target_sessions g
-			SET checkpoint_snapshot_key = @snapshot_key,
-			    checkpoint_head_sha = @checkpoint_head_sha,
-			    checkpoint_dependency_fingerprint = @dependency_fingerprint,
-			    checkpoint_review_complete = @review_complete,
-			    updated_at = now()
-			FROM published p
-			WHERE g.id = @generation_id AND g.org_id = p.org_id AND g.session_id = p.id
-			RETURNING g.id
-		)
-		SELECT p.workspace_revision, p.workspace_revision_updated_at
-		FROM published p
-		JOIN provenance g ON true`
-	rows, err := s.db.Query(ctx, query, args)
+	published, effects, err := s.publishCheckpointWithProvenanceRow(ctx, s.db, orgID, sessionID, lockToken, agentSessionID, snapshotKey, kind, capability, sizeBytes, checkpointedAt, stopReason, provenance)
 	if err != nil {
-		return false, fmt.Errorf("publish checkpoint with provenance: %w", err)
+		return false, err
 	}
-	row, err := pgx.CollectOneRow(rows, pgx.RowToStructByPos[struct {
-		Revision  int64
-		UpdatedAt time.Time
-	}])
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("collect published checkpoint with provenance: %w", err)
-	}
-	s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, row.Revision, row.UpdatedAt, "checkpoint")
-	return true, nil
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
+	return published, nil
 }
 
 func nullIfEmpty(v string) *string {
@@ -1675,16 +1621,20 @@ func (s *SessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID,
 }
 
 func (s *SessionStore) updateStatusRow(ctx context.Context, database DBTX, orgID, runID uuid.UUID, status models.SessionStatus) (models.Session, error) {
-	query := `UPDATE sessions SET status = @status, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+	// Every non-running status ends the turn (if one was executing), so the
+	// runtime deadlines, the executing-turn marker CountExecutingByOrg reads,
+	// are dropped alongside the status; this covers the reaper's settle paths
+	// and the orchestrator's cancel/fail transitions.
+	query := `UPDATE sessions SET status = @status, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	if status == models.SessionStatusRunning {
 		// Clear completed_at so a resumed session doesn't display as "completed"
 		// while actively running. Duration is computed from started_at, so that is
 		// also refreshed to reflect the current run.
 		query = `UPDATE sessions SET status = @status, started_at = now(), completed_at = NULL, error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, runtime_last_progress_at = NULL, runtime_last_progress_type = '', runtime_last_progress_strength = '', runtime_stop_reason = '', runtime_graceful_stop_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == models.SessionStatusCompleted || status == models.SessionStatusPRCreated || status == models.SessionStatusSkipped {
-		query = `UPDATE sessions SET status = @status, completed_at = now(), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		query = `UPDATE sessions SET status = @status, completed_at = now(), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	} else if status == models.SessionStatusFailed || status == models.SessionStatusCancelled {
-		query = `UPDATE sessions SET status = @status, completed_at = now(), last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
+		query = `UPDATE sessions SET status = @status, completed_at = now(), runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now() WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 	}
 	rows, err := database.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
 		"id":     runID,
@@ -1761,10 +1711,9 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	if result == nil {
 		result = &models.SessionResult{}
 	}
-	diffStats := computeDiffStatsForResult(result)
 	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
-		session, err := s.updateResultRow(ctx, s.db, orgID, runID, status, result, diffStats)
+		session, err := s.updateResultRow(ctx, s.db, orgID, runID, status, result, computeDiffStatsForResult(result))
 		if err != nil {
 			return err
 		}
@@ -1778,24 +1727,15 @@ func (s *SessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID,
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	session, err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats)
+	session, effects, err := s.UpdateResultInTx(ctx, orgID, tx, runID, status, result)
 	if err != nil {
 		return err
-	}
-	var updated workspaceRevisionUpdate
-	if persistDiffSnapshot {
-		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
-		if err != nil {
-			return err
-		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	s.publishStatus(ctx, &session)
-	if persistDiffSnapshot {
-		s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
-	}
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
 	return nil
 }
 
@@ -1811,38 +1751,20 @@ func (s *SessionStore) UpdateResultAndCompleteActivityPhase(
 	reason models.ActivityPhaseBoundaryReason,
 	completedAt time.Time,
 ) (models.SessionActivityPhase, models.Session, error) {
-	if result == nil {
-		result = &models.SessionResult{}
-	}
-	diffStats := computeDiffStatsForResult(result)
-	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	tx, err := s.Begin(ctx)
 	if err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	session, err := s.updateResultRow(ctx, tx, orgID, runID, status, result, diffStats)
-	if err != nil {
-		return models.SessionActivityPhase{}, models.Session{}, err
-	}
-	var updated workspaceRevisionUpdate
-	if persistDiffSnapshot {
-		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, runID, 0, result, diffStats)
-		if err != nil {
-			return models.SessionActivityPhase{}, models.Session{}, err
-		}
-	}
-	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
+	phase, session, effects, err := s.UpdateResultAndCompleteActivityPhaseInTx(ctx, orgID, tx, runID, phaseID, status, result, phaseStatus, reason, completedAt)
 	if err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
-	if persistDiffSnapshot {
-		s.publishWorkspaceGenerationChanged(ctx, orgID, runID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
-	}
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
 	return phase, session, nil
 }
 
@@ -1861,11 +1783,7 @@ func (s *SessionStore) UpdateStatusAndCompleteActivityPhase(
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	session, err := s.updateStatusRow(ctx, tx, orgID, runID, status)
-	if err != nil {
-		return models.SessionActivityPhase{}, models.Session{}, err
-	}
-	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
+	phase, session, err := s.UpdateStatusAndCompleteActivityPhaseInTx(ctx, orgID, tx, runID, phaseID, status, phaseStatus, reason, completedAt)
 	if err != nil {
 		return models.SessionActivityPhase{}, models.Session{}, err
 	}
@@ -1915,7 +1833,11 @@ func (s *SessionStore) updateResultRow(ctx context.Context, db DBTX, orgID, runI
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
-		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `
+		    diff_history = ` + diffHistoryAppendSQL("COALESCE(current_turn, 0) + 1") + `,
+		    -- A result that leaves running ends the turn: drop the
+		    -- executing-turn marker (see CountExecutingByOrg).
+		    runtime_soft_deadline_at = CASE WHEN @status = 'running' THEN runtime_soft_deadline_at ELSE NULL END,
+		    runtime_hard_deadline_at = CASE WHEN @status = 'running' THEN runtime_hard_deadline_at ELSE NULL END
 		WHERE id = @id AND org_id = @org_id AND deleted_at IS NULL`
 
 	rows, err := db.Query(ctx, query+` RETURNING `+sessionSelectColumns, pgx.NamedArgs{
@@ -2010,7 +1932,9 @@ func (s *SessionStore) ListTerminalEndedBefore(ctx context.Context, before time.
 
 // ClaimIdle atomically transitions an idle session to running and returns the
 // claimed session row. Used when a user sends a follow-up message so only one
-// continuation can be queued at a time.
+// continuation can be queued at a time. The runtime deadlines are cleared so
+// the claimed session is running without being counted as executing until
+// its continue_session job reaches BeginRuntime (see CountExecutingByOrg).
 // Sessions whose sandbox snapshot has been destroyed cannot be claimed.
 func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID) (models.Session, error) {
 	query := `
@@ -2021,6 +1945,8 @@ func (s *SessionStore) ClaimIdle(ctx context.Context, orgID, sessionID uuid.UUID
 		    failure_category = NULL,
 		    failure_next_steps = NULL,
 		    failure_retry_advised = false,
+		    runtime_soft_deadline_at = NULL,
+		    runtime_hard_deadline_at = NULL,
 		    last_activity_at = now()
 		WHERE id = @id AND org_id = @org_id AND status = 'idle'
 		  AND sandbox_state != 'destroyed' AND code_review_owner_pr_id IS NULL
@@ -2305,6 +2231,52 @@ func (s *SessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUID) (
 	return count, err
 }
 
+// CountExecutingByOrg counts the org's sessions that are executing a turn:
+// status = 'running' with the runtime deadline pair BeginRuntime installs
+// still present. Together with status that pair is the durable
+// "executing turn" marker. BeginRuntime is the only writer that installs both
+// deadlines, and every other writer that sets status = 'running' clears
+// them: ClaimIdle, ClaimForResume, ClaimForAutomationTurn, the code-review
+// recheck claim (code_review_recheck_dispatch.go), UpdateStatus(running),
+// MarkRunningWithSandboxState, and AutomationRunStore.EndInterruptedAttempt
+// when it restores a continuation's pre-turn running status. Any new writer
+// that marks a session running must do the same. The turn-end writers in
+// this store (updateTurnCompleteRow, updateResultRow, updateStatusRow) clear
+// the pair too, so an idle or terminal row normally carries no marker. Hence
+// status = 'running' AND runtime_hard_deadline_at IS NOT NULL means
+// BeginRuntime ran for the current turn. A session a user has claimed for a
+// queued continuation is therefore running with NULL deadlines and is not
+// counted: the org's max_concurrent_runs quota holds executing turns rather
+// than queued ones, and sibling queued continuations never hold each other.
+// The stop-reason columns are left alone by the turn-end writers; they
+// describe why the last turn ended and are read afterwards (session detail,
+// reaper logs).
+//
+// excludeSessionID leaves one session out of the count so a turn on a
+// session that is already executing (a thread turn, a recovery re-entry) is
+// not held by its own slot; pass uuid.Nil to count every session. Unlike
+// CountRunningByOrg this skips soft-deleted rows: their turn can no longer
+// settle through the deleted_at-guarded result writers, so counting them
+// would leak a quota slot for good.
+func (s *SessionStore) CountExecutingByOrg(ctx context.Context, orgID, excludeSessionID uuid.UUID) (int, error) {
+	var count int
+	err := s.db.QueryRow(ctx, `
+		SELECT count(*)
+		FROM sessions
+		WHERE org_id = @org_id
+		  AND id <> @exclude_session_id
+		  AND status = 'running'
+		  AND runtime_hard_deadline_at IS NOT NULL
+		  AND deleted_at IS NULL`, pgx.NamedArgs{
+		"org_id":             orgID,
+		"exclude_session_id": excludeSessionID,
+	}).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count executing sessions: %w", err)
+	}
+	return count, nil
+}
+
 func (s *SessionStore) ListByIssue(ctx context.Context, orgID, issueID uuid.UUID) ([]models.Session, error) {
 	query := `
 		SELECT ` + sessionListColumns + `
@@ -2396,10 +2368,9 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 	if result == nil {
 		result = &models.SessionResult{}
 	}
-	diffStats := computeDiffStatsForResult(result)
 	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	if !persistDiffSnapshot && !shouldPersistChangesetHead(result) {
-		return s.updateTurnCompleteRow(ctx, s.db, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats)
+		return s.updateTurnCompleteRow(ctx, s.db, orgID, sessionID, turn, result, agentSessionID, snapshotKey, computeDiffStatsForResult(result))
 	}
 
 	tx, err := s.Begin(ctx)
@@ -2408,22 +2379,14 @@ func (s *SessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
+	effects, err := s.UpdateTurnCompleteInTx(ctx, orgID, tx, sessionID, turn, result, agentSessionID, snapshotKey)
+	if err != nil {
 		return err
-	}
-	var updated workspaceRevisionUpdate
-	if persistDiffSnapshot {
-		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
-		if err != nil {
-			return err
-		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	if persistDiffSnapshot {
-		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
-	}
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
 	return nil
 }
 
@@ -2440,36 +2403,19 @@ func (s *SessionStore) UpdateTurnCompleteAndCompleteActivityPhase(
 	reason models.ActivityPhaseBoundaryReason,
 	completedAt time.Time,
 ) (models.SessionActivityPhase, error) {
-	if result == nil {
-		result = &models.SessionResult{}
-	}
-	diffStats := computeDiffStatsForResult(result)
-	persistDiffSnapshot := shouldPersistDiffSnapshot(result)
 	tx, err := s.Begin(ctx)
 	if err != nil {
 		return models.SessionActivityPhase{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := s.updateTurnCompleteRow(ctx, tx, orgID, sessionID, turn, result, agentSessionID, snapshotKey, diffStats); err != nil {
-		return models.SessionActivityPhase{}, err
-	}
-	var updated workspaceRevisionUpdate
-	if persistDiffSnapshot {
-		updated, err = s.writeDiffSnapshot(ctx, tx, orgID, sessionID, turn, result, diffStats)
-		if err != nil {
-			return models.SessionActivityPhase{}, err
-		}
-	}
-	phase, err := completeActivityPhaseInTransaction(ctx, tx, orgID, phaseID, phaseStatus, reason, completedAt)
+	phase, effects, err := s.UpdateTurnCompleteAndCompleteActivityPhaseInTx(ctx, orgID, tx, sessionID, phaseID, turn, result, agentSessionID, snapshotKey, phaseStatus, reason, completedAt)
 	if err != nil {
 		return models.SessionActivityPhase{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return models.SessionActivityPhase{}, err
 	}
-	if persistDiffSnapshot {
-		s.publishWorkspaceGenerationChanged(ctx, orgID, sessionID, updated.Revision, updated.UpdatedAt, "diff_snapshot")
-	}
+	s.PublishCommittedSessionPersistenceEffects(ctx, orgID, effects)
 	return phase, nil
 }
 
@@ -2520,7 +2466,11 @@ func (s *SessionStore) updateTurnCompleteRow(ctx context.Context, db DBTX, orgID
 		    base_commit_sha = COALESCE(@base_commit_sha, base_commit_sha),
 		    diff_collected_at = COALESCE(@diff_collected_at, diff_collected_at),
 		    diff_stats = COALESCE(@diff_stats, diff_stats),
-		    diff_history = ` + diffHistoryAppendSQL("GREATEST(current_turn + 1, @current_turn)::int") + `
+		    diff_history = ` + diffHistoryAppendSQL("GREATEST(current_turn + 1, @current_turn)::int") + `,
+		    -- The turn is over: drop the executing-turn marker (see
+		    -- CountExecutingByOrg) so the idle session holds no quota slot.
+		    runtime_soft_deadline_at = NULL,
+		    runtime_hard_deadline_at = NULL
 		WHERE id = @id AND org_id = @org_id`
 
 	query += `

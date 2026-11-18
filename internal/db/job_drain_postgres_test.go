@@ -28,7 +28,7 @@ func TestJobAdmissionHonorsDrainIntentPostgres(t *testing.T) {
 			t.Parallel()
 			pool, org, _, _ := newSchedulingPostgres(t)
 			ctx := context.Background()
-			_, err := pool.Exec(ctx, `CREATE TABLE nodes(id text PRIMARY KEY,mode text,host text,status text,drain_intent text,metadata jsonb,started_at timestamptz DEFAULT now(),last_heartbeat_at timestamptz DEFAULT now(),drain_requested_at timestamptz,drain_budget_expires_at timestamptz,drain_requested_by text DEFAULT '',drain_reason text DEFAULT ''); ALTER TABLE jobs ADD COLUMN target_node_id text, ADD COLUMN retry_window_started_at timestamptz`)
+			_, err := pool.Exec(ctx, `CREATE TABLE nodes(id text PRIMARY KEY,mode text,host text,status text,drain_intent text,metadata jsonb,started_at timestamptz DEFAULT now(),last_heartbeat_at timestamptz DEFAULT now(),drain_requested_at timestamptz,drain_budget_expires_at timestamptz,drain_requested_by text DEFAULT '',drain_reason text DEFAULT '',lifecycle_writer_version integer NOT NULL DEFAULT 0); ALTER TABLE jobs ADD COLUMN target_node_id text, ADD COLUMN retry_window_started_at timestamptz`)
 			require.NoError(t, err, "create admission and routing dependencies")
 			_, err = pool.Exec(ctx, `INSERT INTO nodes(id,mode,host,status,drain_intent,metadata) VALUES ('claimer','worker','host',$1,$2,'{"max_active_sandboxes":10,"live_sandbox_count":0,"reserved_sandbox_count":0}'),('target','worker','host','active',$3,'{}')`, tt.status, tt.intent, tt.targetIntent)
 			require.NoError(t, err, "seed independently recorded status and drain intent")

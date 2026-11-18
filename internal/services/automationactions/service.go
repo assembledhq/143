@@ -29,6 +29,7 @@ type Store interface {
 	ResolveStatus(context.Context, uuid.UUID, models.AutomationActionActor) (models.AutomationActionScope, error)
 	Expire(context.Context, uuid.UUID, models.AutomationActionScope, string) error
 	List(context.Context, uuid.UUID, models.AutomationActionScope, string) ([]models.AutomationAction, error)
+	ResolveCommentTarget(context.Context, uuid.UUID, models.AutomationActionScope, models.AutomationActionRequest) (models.AutomationActionCommentTarget, error)
 	Reserve(context.Context, uuid.UUID, models.AutomationActionActor, models.AutomationActionRequest, string, models.AutomationActionConfig, json.RawMessage) (models.AutomationAction, error)
 	Claim(context.Context, uuid.UUID, models.AutomationActionActor, uuid.UUID) (models.AutomationAction, error)
 	Finish(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, models.AutomationActionStatus, string, string, string) error
@@ -41,8 +42,9 @@ type PullRequest struct {
 	Author string `json:"author"`
 }
 type Payload struct {
-	Request models.AutomationActionRequest `json:"request"`
-	PR      PullRequest                    `json:"pr"`
+	Request       models.AutomationActionRequest        `json:"request"`
+	PR            PullRequest                           `json:"pr"`
+	CommentTarget *models.AutomationActionCommentTarget `json:"comment_target,omitempty"`
 }
 type Receipt struct{ ID, URL string }
 
@@ -60,6 +62,7 @@ type Provider interface {
 	Inspect(context.Context, models.AutomationActionScope) (PullRequest, error)
 	Preflight(context.Context, models.AutomationActionScope, models.AutomationActionRequest) error
 	Send(context.Context, models.AutomationActionScope, models.AutomationAction, Payload) (Receipt, error)
+	ReconcileGitHubReview(context.Context, models.AutomationActionScope, models.AutomationAction) (Receipt, error)
 }
 type Service struct {
 	store    Store
@@ -143,7 +146,10 @@ func (s *Service) Execute(ctx context.Context, actor models.AutomationActionActo
 				return result, db.ErrAutomationActionConflict
 			}
 		}
-		if action.Status == models.AutomationActionSucceeded || action.Status == models.AutomationActionSending || action.EffectiveStatus(time.Now()) == models.AutomationActionUnknown {
+		if action.Status == models.AutomationActionUnknown && request == nil && action.Kind == models.AutomationActionGitHubReview {
+			return result, s.reconcileGitHubReview(ctx, scope, action)
+		}
+		if action.Status == models.AutomationActionSucceeded || action.Status == models.AutomationActionSending || action.Status == models.AutomationActionUnknown {
 			return result, nil
 		}
 	} else {
@@ -157,7 +163,15 @@ func (s *Service) Execute(ctx context.Context, actor models.AutomationActionActo
 			return result, err
 		}
 
-		raw, marshalErr := json.Marshal(Payload{Request: *request})
+		payload := Payload{Request: *request}
+		if request.Kind == models.AutomationActionCommentUpdate {
+			target, targetErr := s.store.ResolveCommentTarget(ctx, actor.OrgID, scope, *request)
+			if targetErr != nil {
+				return result, targetErr
+			}
+			payload.CommentTarget = &target
+		}
+		raw, marshalErr := json.Marshal(payload)
 		if marshalErr != nil {
 			return result, marshalErr
 		}
@@ -237,6 +251,28 @@ func (s *Service) Execute(ctx context.Context, actor models.AutomationActionActo
 	}
 	return result, nil
 }
+
+func (s *Service) reconcileGitHubReview(ctx context.Context, scope models.AutomationActionScope, action models.AutomationAction) error {
+	if !scope.Config.Allows(models.AutomationActionGitHubReview) || !strings.EqualFold(scope.Config.Repository, scope.RepositoryName) ||
+		action.PRNumber <= 0 || (scope.PRNumber != 0 && scope.PRNumber != action.PRNumber) || action.SendToken == nil {
+		return db.ErrAutomationActionUnauthorized
+	}
+	scope.PRNumber = action.PRNumber
+	readCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	receipt, err := s.provider.ReconcileGitHubReview(readCtx, scope, action)
+	cancel()
+	if err != nil || receipt.ID == "" {
+		return err
+	}
+	finishCtx, finishCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer finishCancel()
+	err = s.store.Finish(finishCtx, scope.Actor.OrgID, action.ID, *action.SendToken, models.AutomationActionSucceeded, receipt.ID, receipt.URL, "")
+	if errors.Is(err, db.ErrAutomationActionBusy) {
+		return nil
+	}
+	return err
+}
+
 func actionBudget(ctx context.Context) error {
 	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < 6*time.Second {
 		return ErrBudgetExhausted

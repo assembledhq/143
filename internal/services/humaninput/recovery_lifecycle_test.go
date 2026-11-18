@@ -99,6 +99,15 @@ func (tx *recoveryTx) AnswerRequest(ctx context.Context, orgID, sessionID, reque
 	return tx.fakeTx.AnswerRequest(ctx, orgID, sessionID, requestID, text, payload, userID)
 }
 
+func (tx *recoveryTx) AppendApprovedCapabilityGrant(ctx context.Context, orgID, sessionID uuid.UUID, item models.AgentCapabilitySnapshotItem) ([]models.AgentCapabilitySnapshotItem, error) {
+	tx.checkIdentity(orgID, sessionID)
+	require.Equal(tx.owner.t, &tx.owner.request.ID, item.HumanInputRequestID, "transactional grant must bind the exact locked and answered request")
+	if err := tx.owner.step("grant"); err != nil {
+		return nil, err
+	}
+	return tx.fakeTx.AppendApprovedCapabilityGrant(ctx, orgID, sessionID, item)
+}
+
 func (tx *recoveryTx) CancelRequest(ctx context.Context, orgID, sessionID, requestID uuid.UUID, text *string, payload json.RawMessage, userID uuid.UUID) (models.HumanInputRequest, error) {
 	tx.checkIdentity(orgID, sessionID)
 	if err := tx.owner.step("cancel"); err != nil {
@@ -325,15 +334,14 @@ type recoveryCapabilityApprover struct {
 	t        *testing.T
 	identity []uuid.UUID
 	calls    int
-	err      error
 }
 
-func (a *recoveryCapabilityApprover) ApplyApprovedGrant(_ context.Context, orgID, sessionID, requestID uuid.UUID, capability models.AgentCapabilityID, access models.AgentCapabilityAccessLevel) ([]models.AgentCapabilitySnapshotItem, error) {
+func (a *recoveryCapabilityApprover) BuildApprovedGrant(_ context.Context, orgID, sessionID, requestID uuid.UUID, capability models.AgentCapabilityID, access models.AgentCapabilityAccessLevel) (models.AgentCapabilitySnapshotItem, error) {
 	a.calls++
 	require.Equal(a.t, a.identity, []uuid.UUID{orgID, sessionID, requestID}, "approval must retain the original tenant and input request identity")
 	require.Equal(a.t, models.AgentCapabilityRepoContext, capability, "approval should use the capability requested by the provider")
 	require.Equal(a.t, models.AgentCapabilityAccessRead, access, "approval should not elevate the requested access level")
-	return nil, a.err
+	return models.AgentCapabilitySnapshotItem{ID: capability, AccessLevel: access, HumanInputRequestID: &requestID}, nil
 }
 
 func TestHumanInputCapabilityApprovalRecovery(t *testing.T) {
@@ -370,7 +378,8 @@ func TestHumanInputCapabilityApprovalRecovery(t *testing.T) {
 			if tt.selected != "" {
 				input.SelectedChoiceIDs = []string{tt.selected}
 			}
-			approver := &recoveryCapabilityApprover{t: t, identity: []uuid.UUID{repo.session.OrgID, repo.session.ID, repo.request.ID}, err: tt.grantErr}
+			approver := &recoveryCapabilityApprover{t: t, identity: []uuid.UUID{repo.session.OrgID, repo.session.ID, repo.request.ID}}
+			repo.grantErr = tt.grantErr
 			svc := New(repo)
 			svc.SetCapabilityApprover(approver)
 			result, err := svc.Answer(context.Background(), AnswerInput{OrgID: repo.session.OrgID, SessionID: repo.session.ID, RequestID: repo.request.ID, UserID: uuid.New(), Answer: input})

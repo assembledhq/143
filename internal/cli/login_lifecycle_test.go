@@ -85,7 +85,7 @@ func TestCLILoginLifecycle(t *testing.T) {
 				}
 				http.NotFound(w, r)
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 			seed := Config{Version: 1, ServerURL: server.URL, Token: "old-credential", OrgID: "org-old", PendingJoinToken: "pending-join"}
 			require.NoError(t, SaveConfig(seed), "seed prior credential and pending org invitation")
 			printed := make(chan string, 1)

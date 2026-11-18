@@ -191,6 +191,10 @@ type sharedInputsBudgetProvider struct {
 	expire bool
 }
 
+func (*sharedInputsBudgetProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, os.ErrNotExist
+}
+
 func (*sharedInputsBudgetProvider) Exec(context.Context, *Sandbox, string, io.Writer, io.Writer) (int, error) {
 	return 0, nil
 }
@@ -324,6 +328,10 @@ type sharedInputsFlightProvider struct {
 	cleanupRelease chan struct{}
 	cleanupFailure bool
 	started        atomic.Int64
+}
+
+func (*sharedInputsFlightProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, os.ErrNotExist
 }
 
 func (p *sharedInputsFlightProvider) ExecWithStdin(ctx context.Context, _ *Sandbox, _ string, _ io.Reader, _, _ io.Writer) (int, error) {
@@ -512,6 +520,10 @@ func TestSharedReviewInputsExpiredBudgetVerifiesExistingBundleOnly(t *testing.T)
 
 type managedReviewInputsWithoutStdin struct{ SandboxProvider }
 
+func (managedReviewInputsWithoutStdin) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, os.ErrNotExist
+}
+
 func (managedReviewInputsWithoutStdin) ExecForReviewPreparation(context.Context, *Sandbox, string, io.Writer, io.Writer) (int, error) {
 	return 0, errors.New("unsupported provider must never execute a shared preparation command")
 }
@@ -611,6 +623,10 @@ type markerReadinessFailureProvider struct {
 	exit            int
 	executions      atomic.Int64
 	cancel          context.CancelFunc
+}
+
+func (*markerReadinessFailureProvider) ReadFile(context.Context, *Sandbox, string) ([]byte, error) {
+	return nil, os.ErrNotExist
 }
 
 func (p *markerReadinessFailureProvider) ValidateReviewPreparationEnvironment(context.Context, *Sandbox) error {

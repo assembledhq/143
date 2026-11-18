@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -13,6 +14,44 @@ import (
 )
 
 func ptrStr(s string) *string { return &s }
+
+func TestPullRequestStoreClearCodeReviewStatusCommentID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		affected      int64
+		dbError       error
+		expectedError string
+	}{
+		{name: "clears only the tenant pull request", affected: 1},
+		{name: "already cleared or missing row is harmless"},
+		{name: "propagates database failure", dbError: errors.New("database unavailable"), expectedError: "clear code review status comment id: database unavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "database mock should initialize")
+			t.Cleanup(mock.Close)
+			orgID, pullRequestID := uuid.New(), uuid.New()
+			expectation := mock.ExpectExec("(?s)UPDATE pull_requests.*code_review_status_comment_id = NULL.*org_id = @org_id.*id = @id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": pullRequestID})
+			if tt.dbError != nil {
+				expectation.WillReturnError(tt.dbError)
+			} else {
+				expectation.WillReturnResult(pgxmock.NewResult("UPDATE", tt.affected))
+			}
+			err = NewPullRequestStore(mock).ClearCodeReviewStatusCommentID(context.Background(), orgID, pullRequestID)
+			if tt.expectedError != "" {
+				require.EqualError(t, err, tt.expectedError, "database failures should keep finalization retryable")
+			} else {
+				require.NoError(t, err, "progress comment identity should clear idempotently")
+			}
+			require.NoError(t, mock.ExpectationsWereMet(), "progress cleanup must filter by both tenant and pull request")
+		})
+	}
+}
 
 func TestPullRequestStoreAssociateGitHubPullRequestScopesAndAdopts(t *testing.T) {
 	t.Parallel()

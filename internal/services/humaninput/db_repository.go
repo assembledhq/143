@@ -92,6 +92,12 @@ func (t *dbTx) AnswerRequest(ctx context.Context, orgID, sessionID, requestID uu
 	return t.requests.AnswerPending(ctx, orgID, sessionID, requestID, answerText, answerPayload, answeredBy)
 }
 
+// AppendApprovedCapabilityGrant uses the exact answer transaction, including its
+// existing request-before-parent lock order; it adds no lifecycle authority.
+func (t *dbTx) AppendApprovedCapabilityGrant(ctx context.Context, orgID, sessionID uuid.UUID, item models.AgentCapabilitySnapshotItem) ([]models.AgentCapabilitySnapshotItem, error) {
+	return db.NewAgentCapabilityPolicyStore(nil).AppendApprovedSessionGrantInTx(ctx, orgID, t.tx, sessionID, item)
+}
+
 func (t *dbTx) CancelRequest(ctx context.Context, orgID, sessionID, requestID uuid.UUID, answerText *string, answerPayload json.RawMessage, answeredBy uuid.UUID) (models.HumanInputRequest, error) {
 	return t.requests.CancelPending(ctx, orgID, sessionID, requestID, answerText, answerPayload, answeredBy)
 }

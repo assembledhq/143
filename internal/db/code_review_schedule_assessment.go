@@ -13,67 +13,93 @@ import (
 // terminal state. It also settles every request joined to that assessment.
 // Repeating the call is safe; a newer pending request keeps its wake and state.
 func (s *CodeReviewScheduleStore) SettleAssessment(ctx context.Context, orgID, assessmentID uuid.UUID) error {
-	var repositoryID, pullRequestID uuid.UUID
-	err := s.db.QueryRow(ctx, `SELECT repository_id,pull_request_id FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2`, orgID, assessmentID).Scan(&repositoryID, &pullRequestID)
+	repositoryID, pullRequestID, err := codeReviewAssessmentScheduleIdentity(ctx, s.db, orgID, assessmentID)
 	if err != nil {
 		return err
 	}
 	return s.WithLockedPR(ctx, orgID, repositoryID, pullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
-		var status models.CodeReviewAssessmentStatus
-		var headSHA, baseSHA, baseRef string
-		var sessionID uuid.UUID
-		var scope models.CodeReviewScope
-		err := tx.QueryRow(ctx, `SELECT status,head_sha,base_sha,base_ref,session_id,review_scope FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2 AND repository_id=$3 AND pull_request_id=$4`, orgID, assessmentID, repositoryID, pullRequestID).Scan(&status, &headSHA, &baseSHA, &baseRef, &sessionID, &scope)
-		if err != nil {
-			return err
-		}
-		requestStatus := ""
-		switch status {
-		case models.CodeReviewAssessmentCompleted:
-			requestStatus = "satisfied"
-		case models.CodeReviewAssessmentFailed, models.CodeReviewAssessmentCancelled, models.CodeReviewAssessmentSuperseded:
-			requestStatus = "failed"
-		default:
-			return nil
-		}
-		if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET status=$3
+		return settleAssessmentLockedPR(ctx, tx, orgID, assessmentID, repositoryID, pullRequestID, state)
+	})
+}
+
+// SettleAssessmentInTx composes assessment/request/scheduler settlement in the
+// supplied transaction. It never begins, settles, retries or publishes; callers
+// must roll back their complete unit on error. This is not lifecycle authority.
+func (s *CodeReviewScheduleStore) SettleAssessmentInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, assessmentID uuid.UUID) error {
+	if nilLifecycleDependency(tx) {
+		return errors.New("settle code review assessment in tx: nil transaction")
+	}
+	repositoryID, pullRequestID, err := codeReviewAssessmentScheduleIdentity(ctx, tx, orgID, assessmentID)
+	if err != nil {
+		return err
+	}
+	_, err = s.withLockedPRInTx(ctx, tx, orgID, repositoryID, pullRequestID, func(tx pgx.Tx, state *models.CodeReviewPRState) error {
+		return settleAssessmentLockedPR(ctx, tx, orgID, assessmentID, repositoryID, pullRequestID, state)
+	})
+	return err
+}
+
+func codeReviewAssessmentScheduleIdentity(ctx context.Context, conn DBTX, orgID, assessmentID uuid.UUID) (uuid.UUID, uuid.UUID, error) {
+	var repositoryID, pullRequestID uuid.UUID
+	err := conn.QueryRow(ctx, `SELECT repository_id,pull_request_id FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2`, orgID, assessmentID).Scan(&repositoryID, &pullRequestID)
+	return repositoryID, pullRequestID, err
+}
+
+func settleAssessmentLockedPR(ctx context.Context, tx pgx.Tx, orgID, assessmentID, repositoryID, pullRequestID uuid.UUID, state *models.CodeReviewPRState) error {
+	var status models.CodeReviewAssessmentStatus
+	var headSHA, baseSHA, baseRef string
+	var sessionID uuid.UUID
+	var scope models.CodeReviewScope
+	err := tx.QueryRow(ctx, `SELECT status,head_sha,base_sha,base_ref,session_id,review_scope FROM code_review_revision_assessments WHERE org_id=$1 AND id=$2 AND repository_id=$3 AND pull_request_id=$4`, orgID, assessmentID, repositoryID, pullRequestID).Scan(&status, &headSHA, &baseSHA, &baseRef, &sessionID, &scope)
+	if err != nil {
+		return err
+	}
+	requestStatus := ""
+	switch status {
+	case models.CodeReviewAssessmentCompleted:
+		requestStatus = "satisfied"
+	case models.CodeReviewAssessmentFailed, models.CodeReviewAssessmentCancelled, models.CodeReviewAssessmentSuperseded:
+		requestStatus = "failed"
+	default:
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `UPDATE code_review_requests SET status=$3
  WHERE org_id=$1 AND status IN ('pending','joined')
  AND (assessment_id=$2 OR ($3='satisfied' AND $6='full' AND assessment_id IS NULL AND status='joined' AND session_id=$4 AND pull_request_id=$5))`, orgID, assessmentID, requestStatus, sessionID, pullRequestID, scope); err != nil {
-			return err
-		}
-		ownsAssessment := state.ActiveAssessmentID != nil && *state.ActiveAssessmentID == assessmentID
-		ownsLegacySession := state.ActiveAssessmentID == nil && scope == models.CodeReviewScopeFull && state.ActiveSessionID != nil && *state.ActiveSessionID == sessionID
-		if !ownsAssessment && !ownsLegacySession {
-			return nil
-		}
-		state.ActiveAssessmentID = nil
-		state.ActiveSessionID = nil
-		if status == models.CodeReviewAssessmentCompleted {
-			state.CurrentAssessmentID = &assessmentID
-		} else if state.CurrentAssessmentID != nil && *state.CurrentAssessmentID == assessmentID {
-			var completedID uuid.UUID
-			err := tx.QueryRow(ctx, `SELECT id FROM code_review_revision_assessments WHERE org_id=$1 AND pull_request_id=$2 AND status='completed' AND superseded_by_assessment_id IS NULL ORDER BY generation DESC LIMIT 1`, orgID, pullRequestID).Scan(&completedID)
-			if errors.Is(err, pgx.ErrNoRows) {
-				state.CurrentAssessmentID = nil
-			} else if err != nil {
-				return err
-			} else {
-				state.CurrentAssessmentID = &completedID
-			}
-		}
-		if state.PendingInput != nil {
-			// The queued intent and wake were already committed under the PR lock.
-			return nil
-		}
-		state.State = models.CodeReviewScheduleIdle
-		if status == models.CodeReviewAssessmentCompleted && headSHA == state.HeadSHA && baseSHA == state.BaseSHA && baseRef == state.BaseRef {
-			state.State = models.CodeReviewScheduleCovered
-		}
-		state.WaitReason = models.CodeReviewWaitNone
-		state.RetryAt = nil
-		state.EligibleAt = nil
+		return err
+	}
+	ownsAssessment := state.ActiveAssessmentID != nil && *state.ActiveAssessmentID == assessmentID
+	ownsLegacySession := state.ActiveAssessmentID == nil && scope == models.CodeReviewScopeFull && state.ActiveSessionID != nil && *state.ActiveSessionID == sessionID
+	if !ownsAssessment && !ownsLegacySession {
 		return nil
-	})
+	}
+	state.ActiveAssessmentID = nil
+	state.ActiveSessionID = nil
+	if status == models.CodeReviewAssessmentCompleted {
+		state.CurrentAssessmentID = &assessmentID
+	} else if state.CurrentAssessmentID != nil && *state.CurrentAssessmentID == assessmentID {
+		var completedID uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT id FROM code_review_revision_assessments WHERE org_id=$1 AND pull_request_id=$2 AND status='completed' AND superseded_by_assessment_id IS NULL ORDER BY generation DESC LIMIT 1`, orgID, pullRequestID).Scan(&completedID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			state.CurrentAssessmentID = nil
+		} else if err != nil {
+			return err
+		} else {
+			state.CurrentAssessmentID = &completedID
+		}
+	}
+	if state.PendingInput != nil {
+		// The queued intent and wake were already committed under the PR lock.
+		return nil
+	}
+	state.State = models.CodeReviewScheduleIdle
+	if status == models.CodeReviewAssessmentCompleted && headSHA == state.HeadSHA && baseSHA == state.BaseSHA && baseRef == state.BaseRef {
+		state.State = models.CodeReviewScheduleCovered
+	}
+	state.WaitReason = models.CodeReviewWaitNone
+	state.RetryAt = nil
+	state.EligibleAt = nil
+	return nil
 }
 
 // SettleCompletedFullReviewJoins preserves the original session of requests

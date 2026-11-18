@@ -20,10 +20,16 @@ func NewSessionExecutorStore(db DBTX) *SessionExecutorStore {
 	return &SessionExecutorStore{db: db}
 }
 
+// Zero denotes unknown/pre-floor compatibility. CreateStarting runs in the
+// dispatcher; only the running/heartbeat writes are executor-side observations.
+// Raising this value requires separating allocation from self-advertisement.
+const sessionExecutorLifecycleWriterVersion = 0
+
 const sessionExecutorColumns = `id, org_id, session_id, thread_id, job_id, job_type,
 	host_node_id, owner_id, lock_token, status, container_id, image, build_sha, heartbeat_at,
 	lease_expires_at, runtime_deadline_at, drain_intent, drain_requested_at,
-	drain_deadline_at, started_at, completed_at, exit_code, last_error, created_at, updated_at`
+	drain_deadline_at, started_at, completed_at, exit_code, last_error, created_at, updated_at,
+	lifecycle_writer_version`
 
 func (s *SessionExecutorStore) ClearPreHandoffReservation(ctx context.Context, orgID, sessionID, jobID uuid.UUID) (int64, error) {
 	tag, err := s.db.Exec(ctx, `
@@ -68,26 +74,27 @@ func (s *SessionExecutorStore) CreateStarting(ctx context.Context, orgID uuid.UU
 	err := s.db.QueryRow(ctx, `
 		INSERT INTO session_executors (
 			org_id, session_id, thread_id, job_id, job_type, host_node_id,
-			owner_id, lock_token, status, image, build_sha, heartbeat_at,
+			owner_id, lock_token, status, image, build_sha, lifecycle_writer_version, heartbeat_at,
 			lease_expires_at, runtime_deadline_at
 		)
 		VALUES (
 			@org_id, @session_id, @thread_id, @job_id, @job_type, @host_node_id,
-			@owner_id, @lock_token, 'starting', @image, @build_sha, now(),
+			@owner_id, @lock_token, 'starting', @image, @build_sha, @lifecycle_writer_version, now(),
 			now() + interval '60 seconds', @runtime_deadline_at
 		)
 		RETURNING id`, pgx.NamedArgs{
-		"org_id":              orgID,
-		"session_id":          params.SessionID,
-		"thread_id":           params.ThreadID,
-		"job_id":              params.JobID,
-		"job_type":            params.JobType,
-		"host_node_id":        params.HostNodeID,
-		"owner_id":            params.OwnerID,
-		"lock_token":          params.LockToken,
-		"image":               params.Image,
-		"build_sha":           params.BuildSHA,
-		"runtime_deadline_at": params.RuntimeDeadlineAt,
+		"org_id":                   orgID,
+		"session_id":               params.SessionID,
+		"thread_id":                params.ThreadID,
+		"job_id":                   params.JobID,
+		"job_type":                 params.JobType,
+		"host_node_id":             params.HostNodeID,
+		"owner_id":                 params.OwnerID,
+		"lock_token":               params.LockToken,
+		"image":                    params.Image,
+		"build_sha":                params.BuildSHA,
+		"lifecycle_writer_version": sessionExecutorLifecycleWriterVersion,
+		"runtime_deadline_at":      params.RuntimeDeadlineAt,
 	}).Scan(&id)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("create session executor: %w", err)
@@ -102,6 +109,7 @@ func (s *SessionExecutorStore) HeartbeatWithLease(ctx context.Context, orgID, ex
 		UPDATE session_executors se
 		SET heartbeat_at = now(),
 			lease_expires_at = now() + ($4 * interval '1 second'),
+			lifecycle_writer_version = $5,
 			updated_at = now()
 		WHERE se.org_id = $1
 		  AND se.id = $2
@@ -114,7 +122,7 @@ func (s *SessionExecutorStore) HeartbeatWithLease(ctx context.Context, orgID, ex
 				WHERE st.org_id = se.org_id
 				  AND st.id = se.thread_id
 				  AND (st.cancel_requested_at IS NOT NULL OR st.status = 'cancelled')
-			)`, orgID, executorID, lockToken, int(leaseDuration.Seconds())).Scan(&drainIntent, &threadCancelRequested)
+			)`, orgID, executorID, lockToken, int(leaseDuration.Seconds()), sessionExecutorLifecycleWriterVersion).Scan(&drainIntent, &threadCancelRequested)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, models.DrainIntentNone, false, nil
 	}
@@ -182,6 +190,7 @@ func scanSessionExecutorRow(row pgx.Row) (models.SessionExecutor, error) {
 		&lastError,
 		&executor.CreatedAt,
 		&executor.UpdatedAt,
+		&executor.LifecycleWriterVersion,
 	); err != nil {
 		return models.SessionExecutor{}, err
 	}
@@ -231,11 +240,12 @@ func (s *SessionExecutorStore) MarkRunningWithLease(ctx context.Context, orgID, 
 		SET status = 'running',
 			heartbeat_at = now(),
 			lease_expires_at = now() + ($4 * interval '1 second'),
+			lifecycle_writer_version = $5,
 			updated_at = now()
 		WHERE org_id = $1
 		  AND id = $2
 		  AND lock_token = $3
-		  AND status IN ('starting', 'running')`, orgID, executorID, lockToken, int(leaseDuration.Seconds()))
+		  AND status IN ('starting', 'running')`, orgID, executorID, lockToken, int(leaseDuration.Seconds()), sessionExecutorLifecycleWriterVersion)
 	if err != nil {
 		return false, fmt.Errorf("mark session executor running: %w", err)
 	}

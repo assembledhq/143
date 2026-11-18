@@ -190,7 +190,7 @@ func TestSessionHandler_EndSession_DoesNotReadPublicationSnapshot(t *testing.T) 
 				now,
 			),
 		)
-	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
+	mock.ExpectQuery("UPDATE sessions SET status = @status, completed_at = now\\(\\), error = NULL, failure_explanation = NULL, failure_category = NULL, failure_next_steps = NULL, failure_retry_advised = false, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now\\(\\) WHERE id = @id AND org_id = @org_id .+ RETURNING").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(
 			addSessionRow(pgxmock.NewRows(sessionColumns),

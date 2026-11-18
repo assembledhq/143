@@ -906,6 +906,17 @@ func TestBuildCodeReviewDisputeReply(t *testing.T) {
 				ghservice.PRFeedbackHiddenMarker("code-review-dispute:"+disputeID.String()),
 		},
 		{
+			name: "retired reassessment stays distinct from a failure or a resolved objection",
+			dispute: models.CodeReviewDispute{
+				ID: disputeID, SessionID: sessionID,
+				ReassessmentStatus: models.CodeReviewDisputeReassessmentSuperseded,
+				StatusDetail:       stringPtrForDisputeTest("private diagnostic must not become a GitHub reply"),
+			},
+			expected: "The reassessment was superseded because the review target changed. The objection remains recorded. " +
+				"[View the dispute](https://app.example.com/code-reviews?evidence=" + sessionID.String() + ")\n\n" +
+				ghservice.PRFeedbackHiddenMarker("code-review-dispute:"+disputeID.String()),
+		},
+		{
 			name: "adjudication replaces interim status",
 			dispute: models.CodeReviewDispute{
 				ID: disputeID, SessionID: sessionID, AdjudicationStatus: &upheld,

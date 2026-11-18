@@ -23,6 +23,9 @@ type AssessmentInputCaptureRequest struct {
 	Fresh                                                       bool
 	OrgID, RepositoryID, PullRequestID, SessionID, AssessmentID uuid.UUID
 	RequestContext                                              *ReviewRequestContext
+	// CapturedContract supplies the immutable repository guidance after work
+	// starts. The remaining contract inputs are still captured live.
+	CapturedContract *ReviewContractInput
 }
 
 type AssessmentInputCaptureResult struct {
@@ -51,7 +54,12 @@ type assessmentVisualCapturer interface {
 type assessmentFileLister interface {
 	ListPullRequestFiles(context.Context, PullRequestFilesRequest) ([]PullRequestFile, error)
 }
+type RepositoryGuidanceCapturer interface {
+	CaptureCodeReviewRepositoryGuidance(context.Context, uuid.UUID, uuid.UUID) (models.CodeReviewRepositoryGuidance, error)
+}
+
 type assessmentSnapshotter interface {
+	RepositoryGuidanceCapturer
 	scheduleSnapshotter
 	SyncCodeReviewPullRequestState(context.Context, uuid.UUID, uuid.UUID) (ghservice.CodeReviewPullRequestSnapshot, error)
 	DiscoverCodeReviewTextEvidence(context.Context, uuid.UUID, uuid.UUID, int) (ghservice.CodeReviewTextDiscovery, error)
@@ -135,6 +143,21 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	}
 	if len(org.Settings) > 0 && !json.Valid(org.Settings) || len(repo.Settings) > 0 && !json.Valid(repo.Settings) {
 		return result, fmt.Errorf("%w: organization or repository settings contain invalid JSON", ErrAssessmentReuseUnavailable)
+	}
+	var guidance *models.CodeReviewRepositoryGuidance
+	if in.CapturedContract != nil {
+		guidance = in.CapturedContract.RepositoryGuidance
+	} else {
+		live, err := s.snapshots.CaptureCodeReviewRepositoryGuidance(ctx, in.OrgID, in.RepositoryID)
+		if err != nil {
+			return result, fmt.Errorf("capture repository review guidance: %w", err)
+		}
+		guidance = &live
+	}
+	if guidance != nil {
+		if err := guidance.Validate(); err != nil {
+			return result, err
+		}
 	}
 	reader, err := s.snapshots.PrepareCodeReviewPullRequestSnapshot(ctx, in.OrgID, in.RepositoryID)
 	if err != nil {
@@ -278,8 +301,10 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 		textItems = append(textItems, newReviewTextEvidence("check_status", identity, sourceURL, check.Provider, content, "status"))
 	}
 	text := ""
+	useReviewHistory := false
 	if in.RequestContext != nil {
 		text = in.RequestContext.Body
+		useReviewHistory = in.RequestContext.UseReviewHistory
 	}
 	config := resolved.Config
 	activeAuthorTeams := make([]string, 0, len(config.RiskPolicy.EligibleAuthorTeams))
@@ -303,7 +328,7 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 	sort.Strings(activeAuthorTeams)
 	input := ReviewInputCapture{
 		Code: ReviewCodeInput{OrgID: in.OrgID, RepositoryID: in.RepositoryID, PullRequestID: in.PullRequestID, HeadSHA: snapshot.HeadSHA, BaseSHA: snapshot.BaseSHA, BaseRef: snapshot.BaseRef, Files: codeFiles, FilesComplete: true},
-		Contract: ReviewContractInput{PolicyID: resolved.Policy.ID, PolicyVersion: int64(resolved.Policy.Version), PolicyDigest: digestJSON(config), RosterDigest: digestJSON(config.AgentRoster), ModelConfigurationDigest: digestJSON(struct {
+		Contract: ReviewContractInput{RepositoryGuidance: guidance, PolicyID: resolved.Policy.ID, PolicyVersion: int64(resolved.Policy.Version), PolicyDigest: digestJSON(config), RosterDigest: digestJSON(config.AgentRoster), ModelConfigurationDigest: digestJSON(struct {
 			Roster     models.CodeReviewAgentRoster
 			Org        json.RawMessage
 			Repository json.RawMessage
@@ -312,7 +337,7 @@ func (s *AssessmentInputCaptureService) CaptureAssessmentInputs(ctx context.Cont
 			Repository                   json.RawMessage
 			ExternalContextDigest        string
 		}{snapshot.HeadSHA, snapshot.BaseSHA, config.ReviewInstructions, config.AutomatedApprovalPolicy, repo.Settings, externalDigest}), ExternalInputsComplete: true},
-		Title: snapshot.Title, Description: snapshot.Body, Visual: visualInput, TextEvidence: ReviewTextInput{Items: textItems, UnclassifiedDigest: digestJSON(unclassified), Complete: true, SourceProvenanceComplete: true, FullDiscussionCaptured: true, ParseAmbiguous: parseAmbiguous}, Request: ReviewRequestInput{SubstantiveText: text},
+		Title: snapshot.Title, Description: snapshot.Body, Visual: visualInput, TextEvidence: ReviewTextInput{Items: textItems, UnclassifiedDigest: digestJSON(unclassified), Complete: true, SourceProvenanceComplete: true, FullDiscussionCaptured: true, ParseAmbiguous: parseAmbiguous}, Request: ReviewRequestInput{SubstantiveText: text, UseReviewHistory: useReviewHistory},
 		Gates: ReviewGateInput{EligibilityDigest: digestJSON(struct {
 			MergeGuard        string
 			HasConflicts      bool

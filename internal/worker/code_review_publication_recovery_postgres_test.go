@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +16,8 @@ import (
 	"github.com/assembledhq/143/internal/models"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	ghservice "github.com/assembledhq/143/internal/services/github"
+	testpostgres "github.com/assembledhq/143/internal/testutil/postgres"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -54,9 +52,8 @@ func (p *inlineRecoveryPublisher) SubmitReview(_ context.Context, request codere
 	return codereviewsvc.SubmitReviewResult{ID: 77, URL: "https://example.invalid/review/77", Body: request.Body, Comments: comments}, nil
 }
 
-//nolint:paralleltest // Concurrent full migration chains exhaust the shared PostgreSQL lock budget.
 func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing.T) {
-	// Each case applies the full migration chain to its own schema, serially.
+	t.Parallel()
 	if os.Getenv("TEST_DATABASE_URL") == "" {
 		t.Skip("set TEST_DATABASE_URL for PostgreSQL recovery proof")
 	}
@@ -80,6 +77,7 @@ func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			pool := fullRecoveryPostgresPool(t, ctx)
 			org, integration, repo, pr, policy, session, metadata, assessment, findingID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -204,23 +202,24 @@ func TestStagedFullPublicationRecoveryPreservesInlineCommentsPostgres(t *testing
 	}
 }
 
-//nolint:paralleltest // Concurrent full migration chains exhaust the shared PostgreSQL lock budget.
 func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *testing.T) {
-	// Full migration chains exceed the disposable server's lock budget when
-	// several schemas are migrated concurrently.
+	t.Parallel()
 	if os.Getenv("TEST_DATABASE_URL") == "" {
 		t.Skip("set TEST_DATABASE_URL for PostgreSQL recovery proof")
 	}
 	tests := []struct {
-		name          string
-		wrongIdentity bool
-		wantErr       bool
+		name            string
+		overrideApplied bool
+		wrongIdentity   bool
+		wantErr         bool
 	}{
 		{name: "confirmed receipt recovers failed metadata after PR head moves"},
-		{name: "controller identity mismatch fails closed", wrongIdentity: true, wantErr: true},
+		{name: "confirmed receipt preserves an applied override after PR head moves", overrideApplied: true},
+		{name: "controller identity mismatch fails closed", overrideApplied: true, wrongIdentity: true, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := context.Background()
 			pool := fullRecoveryPostgresPool(t, ctx)
 			org, integration, repo, pr, policy, session, metadata, assessment := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
@@ -245,6 +244,12 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 			receipt, err := fullAssessmentPublicationReceipt(assessment, inputDigest, "old-head", &reviewID, &reviewURL, nil, nil)
 			require.NoError(t, err, "build immutable confirmed publication receipt")
 			outcome := json.RawMessage(`{"coverage_complete":false,"description_assessments":[]}`)
+			if tt.overrideApplied {
+				outcome, err = fullAssessmentOutcome(nil, models.CodeReviewDecisionEvaluation{
+					OverriddenSizeLimits: []models.CodeReviewRiskReason{{Code: models.CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 17, Limit: 10}},
+				}, false)
+				require.NoError(t, err, "encode the applied override with the staged review outcome")
+			}
 			body := "Published review for old-head"
 			_, err = pool.Exec(ctx, `INSERT INTO code_review_revision_assessments(id,org_id,repository_id,repository_full_name,pull_request_id,metadata_id,session_id,policy_id,generation,base_sha,base_ref,head_sha,input_version,code_digest,contract_digest,intent_digest,visual_digest,request_digest,gate_digest,input_digest,input_manifest,review_scope,route_reason,coverage_complete,status,result_origin,decision,acceptable,risk_reason_details,structured_outcome,rendered_body,publication_key,publication_state,publication_receipt,github_review_id,github_review_url,submitted_commit_sha) VALUES($1,$2,$3,$4,$5,$6,$7,$8,1,'base','main','old-head',2,'code','contract','intent','visual','request','gate',$9,'{}','full','initial_full',false,'publishing','executed','blocked',false,'[]',$10,$11,$12,'confirmed',$13,$14,$15,'old-head')`, assessment, org, repo, repoName, pr, metadata, session, policy, inputDigest, outcome, body, key, receipt, reviewID, reviewURL)
 			require.NoError(t, err, "seed staged full assessment with confirmed receipt")
@@ -273,7 +278,8 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 			var status, decision, finalBody, failureReason string
 			var additions, deletions int
 			var storedReviewID *int64
-			err = pool.QueryRow(ctx, `SELECT status,COALESCE(decision,''),COALESCE(final_review_body,''),COALESCE(failure_reason,''),additions,deletions,github_review_id FROM code_review_session_metadata WHERE org_id=$1 AND session_id=$2`, org, session).Scan(&status, &decision, &finalBody, &failureReason, &additions, &deletions, &storedReviewID)
+			var overrideApplied bool
+			err = pool.QueryRow(ctx, `SELECT status,COALESCE(decision,''),COALESCE(final_review_body,''),COALESCE(failure_reason,''),additions,deletions,github_review_id,size_limit_override_applied FROM code_review_session_metadata WHERE org_id=$1 AND session_id=$2`, org, session).Scan(&status, &decision, &finalBody, &failureReason, &additions, &deletions, &storedReviewID, &overrideApplied)
 			require.NoError(t, err, "load legacy metadata after recovery")
 			got, err := stores.CodeReviewAssessments.GetByID(ctx, org, assessment)
 			require.NoError(t, err, "load assessment after recovery")
@@ -283,6 +289,7 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 			require.NoError(t, err, "load settled scheduler state")
 			if tt.wantErr {
 				require.Equal(t, "failed", status, "identity mismatch must leave terminal metadata unchanged")
+				require.False(t, overrideApplied, "identity mismatch must not record an applied override")
 				require.Equal(t, models.CodeReviewAssessmentPublishing, got.Status, "identity mismatch must retain staged assessment")
 				require.Equal(t, &assessment, activeID, "identity mismatch must not settle scheduler")
 				return
@@ -294,6 +301,7 @@ func TestConfirmedFullPublicationRecoversBeforeTerminalAndHeadChecksPostgres(t *
 			require.Equal(t, 17, additions, "stored additions should not be replaced by current PR changes")
 			require.Equal(t, 4, deletions, "stored deletions should not be replaced by current PR changes")
 			require.Equal(t, &reviewID, storedReviewID, "confirmed GitHub receipt should remain on legacy metadata")
+			require.Equal(t, tt.overrideApplied, overrideApplied, "recovery should record the staged override even after the head moves")
 			require.Equal(t, models.CodeReviewAssessmentCompleted, got.Status, "assessment should complete from staged outcome")
 			require.Equal(t, models.CodeReviewPublicationConfirmed, got.PublicationState, "assessment receipt should remain confirmed")
 			require.JSONEq(t, string(receipt), string(got.PublicationReceipt), "publication receipt must not be rewritten")
@@ -312,99 +320,5 @@ func fullRecoveryPostgresPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 
 func fullRecoveryPostgresPoolWithMaxConns(t *testing.T, ctx context.Context, maxConns int32) *pgxpool.Pool {
 	t.Helper()
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	admin, err := pgx.Connect(ctx, dsn)
-	require.NoError(t, err, "connect disposable PostgreSQL")
-	ensureFullReviewPostgresExtensions(t, ctx, admin)
-	schema := "full_recovery_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	_, err = admin.Exec(ctx, `CREATE SCHEMA `+schema)
-	require.NoError(t, err, "create isolated recovery schema")
-	t.Cleanup(func() {
-		withFullReviewFixtureDDL(t, ctx, admin, func() {
-			_, cleanupErr := admin.Exec(ctx, `DROP SCHEMA `+schema+` CASCADE`)
-			require.NoError(t, cleanupErr, "drop only this isolated recovery schema")
-		})
-		require.NoError(t, admin.Close(ctx), "close PostgreSQL admin connection")
-	})
-	cfg, err := pgxpool.ParseConfig(dsn)
-	require.NoError(t, err, "parse PostgreSQL URL")
-	cfg.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
-	if maxConns > 0 {
-		cfg.MaxConns = maxConns
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	require.NoError(t, err, "create isolated recovery pool")
-	t.Cleanup(pool.Close)
-	migrations, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.up.sql"))
-	require.NoError(t, err, "list migration chain")
-	sort.Strings(migrations)
-	withFullReviewFixtureDDL(t, ctx, admin, func() {
-		for _, path := range migrations {
-			up, readErr := os.ReadFile(path)
-			require.NoError(t, readErr, "read migration")
-			// The dedicated admin connection only holds the shared DDL lock.
-			// Actual migrations use pool autocommit connections so concurrent
-			// indexes retain their required transaction boundary.
-			_, applyErr := pool.Exec(ctx, string(up))
-			require.NoError(t, applyErr, "apply migration "+filepath.Base(path))
-		}
-	})
-	return pool
-}
-
-// pgcrypto belongs to the database, not an individual fixture schema. Creating
-// it under an isolated search_path races other migrations, and dropping that
-// schema can delete the extension while another fixture still needs it.
-// Serialize only this shared external resource across processes; keep actual
-// migration chains, schemas and tenant test cases otherwise isolated.
-func ensureFullReviewPostgresExtensions(t *testing.T, ctx context.Context, conn *pgx.Conn) {
-	t.Helper()
-	tx, err := conn.Begin(ctx)
-	require.NoError(t, err, "begin shared extension fixture setup")
-	defer func() { _ = tx.Rollback(ctx) }()
-	_, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('143-worker-test-pgcrypto-setup',0))`)
-	require.NoError(t, err, "serialize database-global extension fixture setup")
-	_, err = tx.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public`)
-	require.NoError(t, err, "install shared test extension outside tenant schemas")
-	var namespace string
-	err = tx.QueryRow(ctx, `SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='pgcrypto'`).Scan(&namespace)
-	require.NoError(t, err, "read shared extension schema")
-	if namespace != "public" {
-		_, err = tx.Exec(ctx, `ALTER EXTENSION pgcrypto SET SCHEMA public`)
-		require.NoError(t, err, "normalize existing test extension before isolated schema cleanup")
-	}
-	require.NoError(t, tx.Commit(ctx), "commit extension fixture setup and release advisory lock")
-}
-
-// Full-chain schema setup and cascading teardown share the disposable server's
-// lock budget. Hold a session lock on the dedicated admin connection, with short
-// autocommit try-lock polls so waiters retain no old MVCC snapshots. A blocking
-// advisory-lock SELECT can make CREATE INDEX CONCURRENTLY wait on its snapshot
-// while that SELECT waits on the DDL guard. Test data and tenant cases remain
-// parallel, migrations remain autocommit, and this lock also fences processes.
-func withFullReviewFixtureDDL(t *testing.T, ctx context.Context, conn *pgx.Conn, operation func()) {
-	t.Helper()
-	const lockSQL = `SELECT pg_try_advisory_lock(hashtextextended('143-worker-test-full-schema-ddl',0))`
-	for {
-		var acquired bool
-		require.NoError(t, conn.QueryRow(ctx, lockSQL).Scan(&acquired), "try shared full-schema DDL fixture guard without retaining a wait snapshot")
-		if acquired {
-			break
-		}
-		timer := time.NewTimer(10 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			require.NoError(t, ctx.Err(), "fixture DDL guard wait must respect cancellation")
-		case <-timer.C:
-		}
-	}
-	defer func() {
-		unlockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		var released bool
-		require.NoError(t, conn.QueryRow(unlockCtx, `SELECT pg_advisory_unlock(hashtextextended('143-worker-test-full-schema-ddl',0))`).Scan(&released), "always release dedicated connection's DDL guard after operation")
-		require.True(t, released, "fixture DDL operation must release the exact acquired session lock")
-	}()
-	operation()
+	return testpostgres.NewPool(t, ctx, "../../migrations", maxConns)
 }

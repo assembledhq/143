@@ -526,6 +526,8 @@ scp "${SCP_OPTS[@]}" "$PROJECT_DIR/$COMPOSE_FILE" root@"$HOST":/opt/143/
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; then
   # Vector collector is included from the main compose file
   scp "${SCP_OPTS[@]}" "$PROJECT_DIR/docker-compose.vector.yml" root@"$HOST":/opt/143/
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "mkdir -p /opt/143/deploy/scripts"
+  scp "${SCP_OPTS[@]}" "$SCRIPT_DIR/check-vector-sink.sh" root@"$HOST":/opt/143/deploy/scripts/
 fi
 if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ]; then
   # DNS probe is included by both compose files; stage it so the include
@@ -690,6 +692,25 @@ ssh "${SSH_OPTS[@]}" root@"$HOST" << START
   set -euo pipefail
   su - deploy -c 'cd /opt/143 && docker compose -f $COMPOSE_FILE_REMOTE up -d'
 START
+
+# Validate the effective collector route before declaring provisioning successful.
+if [ "$ROLE" = "app" ] || [ "$ROLE" = "worker" ] || [ "$ROLE" = "logging" ]; then
+  ssh "${SSH_OPTS[@]}" root@"$HOST" "bash -s -- $COMPOSE_FILE_REMOTE" << 'VECTOR_SINK'
+    set -euo pipefail
+    cd /opt/143
+    vector_id="$(docker compose -f "$1" ps -q vector)"
+    # Fresh logging stacks may need a moment to bind the sink listener.
+    for attempt in 1 2 3; do
+      if bash deploy/scripts/check-vector-sink.sh "$vector_id" < /dev/null; then
+        break
+      fi
+      if [ "$attempt" -eq 3 ]; then
+        exit 1
+      fi
+      sleep 2
+    done
+VECTOR_SINK
+fi
 
 # For db nodes: install automated backups (pg_dump every 6h + weekly restore
 # test) and the offsite sync config. The wrapper is idempotent, so this is a

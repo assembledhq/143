@@ -21,11 +21,13 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/logging"
 	"github.com/assembledhq/143/internal/metrics"
+	"github.com/assembledhq/143/internal/models"
 	"github.com/assembledhq/143/internal/services/agent"
 	"github.com/assembledhq/143/internal/services/agent/providers"
 	"github.com/assembledhq/143/internal/services/claudecodeauth"
 	codereviewsvc "github.com/assembledhq/143/internal/services/codereview"
 	"github.com/assembledhq/143/internal/services/codexauth"
+	"github.com/assembledhq/143/internal/services/lifecyclewriter"
 	"github.com/assembledhq/143/internal/services/sandbox"
 	"github.com/assembledhq/143/internal/services/storage"
 	threadservice "github.com/assembledhq/143/internal/services/thread"
@@ -72,6 +74,7 @@ func runSessionExecutorMain() {
 	pool, err := db.NewPoolWithOptions(ctx, cfg.DatabaseURL, db.PoolOptions{
 		MaxConns:        cfg.DatabaseMaxConns,
 		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
+		ApplicationName: db.LifecycleConnectionApplicationName(models.LifecycleWriterRoleSessionExecutor, version.BuildSHA),
 	})
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to connect to database")
@@ -82,6 +85,12 @@ func runSessionExecutorMain() {
 		logger.Fatal().Err(err).Msg("coding-credentials migration gate failed; session executor refusing to start")
 	}
 	logger.Info().Msg("session executor migration gates passed")
+	// Passive observations have their own lifetime: signal cancellation starts
+	// runtime cleanup, not proof that this process has stopped writing. Defer
+	// ordering keeps observations alive through shutdown, then joins before the
+	// ordinary pool closes. Abrupt exits leave observations to expire.
+	stopWriterObserver := lifecyclewriter.StartSessionExecutor(db.NewLifecycleWriterInstanceStore(pool), version.BuildSHA, logger)
+	defer stopWriterObserver()
 
 	logger.Info().Msg("session executor building runtime")
 	runtime, shutdown, err := buildSessionExecutorRuntime(ctx, cfg, pool, logger)
@@ -247,7 +256,7 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 
 	cancelRegistry := agent.NewCancelRegistry(logger)
 	threadCancelRegistry := agent.NewThreadCancelRegistry(logger)
-	services := buildServices(
+	services, err := buildServices(
 		cfg,
 		pool,
 		logger,
@@ -281,6 +290,9 @@ func buildSessionExecutorRuntime(ctx context.Context, cfg *config.Config, pool *
 		sessionStreams,
 		fileReader,
 	)
+	if err != nil {
+		return nil, shutdown, fmt.Errorf("construct session executor services: %w", err)
+	}
 	if services == nil {
 		return nil, shutdown, fmt.Errorf("worker services unavailable")
 	}

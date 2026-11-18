@@ -86,13 +86,21 @@ func NextRunTime(from time.Time, interval int, unit string) time.Time {
 }
 
 // NextRunTimeAt computes the next run at a specific HH:MM wall-clock time in
-// the given IANA timezone. The returned time is always >= NextRunTime(from,
-// interval, unit) and is expressed in UTC. Timezone is required so that a
-// "daily at 9 AM" schedule fires at 9 AM local even as DST shifts the UTC
-// offset — doing the arithmetic in the target location is what makes that
-// invariant hold. An empty timezone is treated as UTC for backwards
-// compatibility with pre-migration-93 interval rows.
+// the given IANA timezone, expressed in UTC. The result is the interval-th
+// occurrence of runAt strictly after from, so "every day at 04:00" fires at
+// the next 04:00 after from, and a schedule that just fired at 04:00 fires
+// again exactly one interval later. The scheduler advances from the fire time
+// (always a little after next_run_at) and the API advances from "now" on
+// create, update, and resume; requiring a full interval to elapse before the
+// first HH:MM made both skip an occurrence (daily ran every other day).
+// Timezone is required so that a "daily at 9 AM" schedule fires at 9 AM local
+// even as DST shifts the UTC offset — doing the arithmetic in the target
+// location is what makes that invariant hold. An empty timezone is treated as
+// UTC for backwards compatibility with pre-migration-93 interval rows.
 func NextRunTimeAt(from time.Time, interval int, unit string, runAt string, timezone string) (time.Time, error) {
+	if interval < 1 {
+		return time.Time{}, fmt.Errorf("interval must be at least 1, got %d", interval)
+	}
 	if timezone == "" {
 		timezone = "UTC"
 	}
@@ -105,18 +113,29 @@ func NextRunTimeAt(from time.Time, interval int, unit string, runAt string, time
 		return time.Time{}, fmt.Errorf("parse runAt %q: %w", runAt, err)
 	}
 
-	minNext := NextRunTime(from, interval, unit).In(loc)
+	// Advance by all but the last step of the interval, then roll forward to
+	// the first runAt occurrence strictly after that point. Weeks are seven
+	// daily steps so a weekly schedule lands on the same weekday.
+	var floor time.Time
+	switch ScheduleUnit(unit) {
+	case ScheduleUnitHours:
+		floor = from.Add(time.Duration(interval-1) * time.Hour).In(loc)
+	case ScheduleUnitWeeks:
+		floor = from.AddDate(0, 0, interval*7-1).In(loc)
+	default: // days
+		floor = from.AddDate(0, 0, interval-1).In(loc)
+	}
 
 	switch ScheduleUnit(unit) {
 	case ScheduleUnitHours:
-		candidate := time.Date(minNext.Year(), minNext.Month(), minNext.Day(), minNext.Hour(), parsed.Minute(), 0, 0, loc)
-		if candidate.Before(minNext) {
+		candidate := time.Date(floor.Year(), floor.Month(), floor.Day(), floor.Hour(), parsed.Minute(), 0, 0, loc)
+		if !candidate.After(floor) {
 			candidate = candidate.Add(time.Hour)
 		}
 		return candidate.UTC(), nil
 	default:
-		candidate := time.Date(minNext.Year(), minNext.Month(), minNext.Day(), parsed.Hour(), parsed.Minute(), 0, 0, loc)
-		if candidate.Before(minNext) {
+		candidate := time.Date(floor.Year(), floor.Month(), floor.Day(), parsed.Hour(), parsed.Minute(), 0, 0, loc)
+		if !candidate.After(floor) {
 			candidate = candidate.AddDate(0, 0, 1)
 		}
 		return candidate.UTC(), nil

@@ -618,6 +618,7 @@ func TestGetValidToken_ValidToken(t *testing.T) {
 	}
 	if cfg == nil {
 		t.Fatal("expected non-nil config")
+		return
 	}
 	if cfg.AccessToken != "cha_valid_token" {
 		t.Errorf("unexpected access token: %s", cfg.AccessToken)

@@ -591,9 +591,18 @@ sys.exit(child.wait())
 				pid, err = strconv.Atoi(string(data))
 				return err == nil
 			}, time.Until(deadline), time.Millisecond, "observer must expose a real child PID within the original fixed preparation allowance")
-			process, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").CombinedOutput()
-			require.NoError(t, err, "test-owned fsck process identity must be inspected without command arguments or environment: %s", process)
-			require.Equal(t, "git", filepath.Base(strings.TrimSpace(string(process))), "observed child must be the real Git executable rather than its controller")
+			// The marker is written just before the shell execs Git, so the
+			// name is read from the process table (fork-free, see
+			// nativeProcessState) until the exec has happened.
+			var observed nativeProcessState
+			require.Eventually(t, func() bool {
+				state, stateErr := observeNativeProcess(pid)
+				if stateErr != nil {
+					return false
+				}
+				observed = state
+				return state.Comm == "git"
+			}, 2*time.Second, time.Millisecond, "observed child must be the real Git executable rather than its controller (last observed %+v)", observed)
 			require.NoError(t, syscall.Kill(pid, syscall.SIGSTOP), "the identified real Git process must still exist when the test pauses it")
 			if tt.cancel {
 				cancel()

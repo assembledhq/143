@@ -200,7 +200,7 @@ func TestSessionHandler_CreateManual_LinearLinkerNilWithFlags(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -288,7 +288,7 @@ func TestSessionHandler_CreateManual_LinearLinkerSuccess(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 
 	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	// SetLinearIdentifierHint side-table upsert.
 	mock.ExpectExec("INSERT INTO session_linear_context").
@@ -362,7 +362,7 @@ func TestSessionHandler_CreateManual_LinearReferenceIDIsSentToLinker(t *testing.
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
@@ -409,7 +409,7 @@ func TestSessionHandler_CreateManual_ChecksConcurrencyBeforeLinearLinking(t *tes
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
 
 	handler := newSessionHandler(t, mock)
@@ -451,7 +451,7 @@ func TestSessionHandler_CreateManual_LinearIssueOnlySkipsLLMTitleGeneration(t *t
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectExec("INSERT INTO session_linear_context").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -515,7 +515,7 @@ func TestSessionHandler_CreateManual_LinearLinkerError(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 
 	// UpdateResult on the failure path: the handler issues an UPDATE
@@ -658,7 +658,7 @@ func TestSessionHandler_CreateManual_AllowsLinearOverridesByDefault(t *testing.T
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"id", "created_at"}).AddRow(messageID, now))
 	mock.ExpectQuery("SELECT count").
-		WithArgs(pgxmock.AnyArg()).
+		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
 	mock.ExpectQuery("INSERT INTO jobs").
 		WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),

@@ -1090,7 +1090,8 @@ Workers run agent sandboxes — the most resource-intensive part. Each worker
 admits at most `WORKER_MAX_ACTIVE_SANDBOXES` live sandboxes (derived from
 `WORKER_PROCESS_COUNT` when unset; `deploy/scripts/worker_buckets.sh` sets both
 per machine SKU). The org-wide `max_concurrent_runs` quota is a separate org
-setting enforced at session admission, not a worker env var.
+setting enforced whenever a turn starts (new runs and continuations alike),
+not a worker env var.
 
 ```
 ┌───────────────┐     ┌───────────────┐

@@ -6,7 +6,7 @@ Every automation can opt into durable external actions, whether it runs on a sch
 is started manually, responds to an event, or continues an existing target session.
 Organization admins enable the `automation_actions` capability on an automation (not session defaults) and select individual operations and
 their destinations. Supported primitives are GitHub PR labels, team review requests,
-PR comments, Notion pages in a configured data source, and Slack channel messages.
+PR comment creation and updates, advisory PR reviews with inline comments, Notion pages in a configured data source, and Slack channel messages.
 There is no design-review verdict, required bundle, fixed ordering, or dependency on
 all three providers. Provider credentials remain on the server.
 
@@ -35,6 +35,44 @@ reconciliation and is never automatically resent. A late receipt with the origin
 send token may settle it. The API executes one bounded send per request; no worker
 or background retry service is added. Insufficient request time leaves the step
 pending and returns `BUDGET_EXHAUSTED` before starting a send.
+
+## GitHub PR comment updates
+
+`github_issue_comment_update` is a separate grant with the same repository
+configuration and live PR/head checks as comment creation. The request carries
+`pr_number`, the current full `head_sha`, replacement `text`, and
+`source_action_id`, the UUID of the original succeeded `github_issue_comment`
+receipt. The receipt must belong to the same organization, automation, repository,
+PR, and scope. Agents may recover the UUID from the prior comment's raw body
+using the server marker `<!-- 143-automation-action:UUID -->`. Authorization
+comes from the scoped receipt and live ownership and expected-body checks.
+
+The server resolves the GitHub comment from the creation receipt and patches
+that comment in place. It keeps the creation marker and adds a server marker
+for the current revision. A missing or invalid source blocks the update, with
+no fallback to comment creation. Each intentional revision uses a distinct step
+key and references the same creation receipt. Retry the same revision using its
+frozen keys and content. An unknown update stays in `needs_attention` until
+reconciled.
+
+## GitHub advisory reviews
+
+`github_pull_request_review` is an independent repository-scoped grant on the
+existing execute-action route. It accepts one to five inline comments with a
+relative file path, a right-side diff line, and a body at the supplied PR head.
+Optional summary text and each comment body are limited to 4 KiB. The server
+adds the verified PR author mention, submits a single GitHub `COMMENT` review,
+and persists the GitHub review ID and permalink in the action receipt.
+Generated summary text and inline bodies reserve mentions for the server.
+
+Migration 398 extends the `automation_actions.kind` constraint and retains the
+existing tenant, target, and action-key scope. The server adds an action marker
+to the summary and inline bodies for provider reconciliation and suppresses
+feedback from that review for the automation that published it. Explicitly
+resuming an unknown review looks for its marker on a review by the configured
+GitHub App at the original PR head. A match restores the receipt. An absent
+match or interrupted lookup leaves the send unknown. The rollback refuses to
+remove the kind while a current grant or review action exists.
 
 ## Authority
 

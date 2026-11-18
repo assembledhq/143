@@ -13,20 +13,33 @@ const (
 	retentionBatchSize    int64 = 10000
 	retentionSweepBatches       = 10
 	retentionSweepBudget        = 30 * time.Second
+
+	lifecycleWriterRetentionBatchSize    int64 = 1000
+	lifecycleWriterRetentionSweepBatches       = 10
+	lifecycleWriterRetentionSweepBudget        = 5 * time.Second
 )
 
 // Each callback executes one autocommit batch through the production pool.
 // The SQL claims rows with SKIP LOCKED, so concurrent org maintenance jobs
 // advance separate global batches without a pooled session advisory lock.
 func sweepExpiredCompletedJobs(ctx context.Context, retentionDays int, deleteBatch func(context.Context, int) (int64, error), logger zerolog.Logger) (int64, error) {
-	return sweepExpiredRecordsWithBudget(ctx, retentionDays, deleteBatch, logger, "job", retentionSweepBatches, retentionSweepBudget, time.Now)
+	return sweepExpiredRecordsWithBudget(ctx, retentionDays, deleteBatch, logger, "job", retentionBatchSize, retentionSweepBatches, retentionSweepBudget, time.Now)
 }
 
 func sweepExpiredWebhookDeliveries(ctx context.Context, retentionDays int, deleteBatch func(context.Context, int) (int64, error), logger zerolog.Logger) (int64, error) {
-	return sweepExpiredRecordsWithBudget(ctx, retentionDays, deleteBatch, logger, "webhook delivery", retentionSweepBatches, retentionSweepBudget, time.Now)
+	return sweepExpiredRecordsWithBudget(ctx, retentionDays, deleteBatch, logger, "webhook delivery", retentionBatchSize, retentionSweepBatches, retentionSweepBudget, time.Now)
 }
 
-func sweepExpiredRecordsWithBudget(ctx context.Context, retentionDays int, deleteBatch func(context.Context, int) (int64, error), logger zerolog.Logger, kind string, maxBatches int, budget time.Duration, now func() time.Time) (int64, error) {
+// The store fixes seven-day expiry eligibility and the 1,000-row SQL bound.
+// This existing maintenance job only supplies a bounded number of those calls;
+// it does not create a scheduler, execution lease, or minimum deletion rate.
+func sweepExpiredLifecycleWriters(ctx context.Context, deleteBatch func(context.Context) (int64, error), logger zerolog.Logger) (int64, error) {
+	return sweepExpiredRecordsWithBudget(ctx, 7, func(batchCtx context.Context, _ int) (int64, error) {
+		return deleteBatch(batchCtx)
+	}, logger, "passive lifecycle writer", lifecycleWriterRetentionBatchSize, lifecycleWriterRetentionSweepBatches, lifecycleWriterRetentionSweepBudget, time.Now)
+}
+
+func sweepExpiredRecordsWithBudget(ctx context.Context, retentionDays int, deleteBatch func(context.Context, int) (int64, error), logger zerolog.Logger, kind string, batchSize int64, maxBatches int, budget time.Duration, now func() time.Time) (int64, error) {
 	started := now()
 	budgetCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -56,7 +69,7 @@ func sweepExpiredRecordsWithBudget(ctx context.Context, retentionDays int, delet
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		if deleted < retentionBatchSize {
+		if deleted < batchSize {
 			return total, nil
 		}
 	}

@@ -164,8 +164,10 @@ func (m *mockCodingCredentialProvider) PickRunnableMulti(ctx context.Context, or
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var candidates []models.DecryptedCodingCredential
+	sawRows := false
 	for _, provider := range providers {
 		for _, cred := range m.resolvable[provider] {
+			sawRows = true
 			if cred.Status != models.CodingCredentialStatusActive {
 				continue
 			}
@@ -196,7 +198,10 @@ func (m *mockCodingCredentialProvider) PickRunnableMulti(ctx context.Context, or
 		picked := candidates[0]
 		return &picked, nil
 	}
-	return nil, errors.New("all eligible coding credentials are currently shed")
+	if sawRows {
+		return nil, db.ErrAllCredentialsShed
+	}
+	return nil, db.ErrCodingCredentialNotFound
 }
 
 func (m *mockCodingCredentialProvider) MarkRateLimitedForScope(_ context.Context, _ models.Scope, id uuid.UUID, limit models.CodingCredentialRateLimit) error {
@@ -306,6 +311,16 @@ func (m *mockCredentialProvider) ListByProvider(ctx context.Context, orgID uuid.
 type mockSessionStore struct {
 	mu                     sync.Mutex
 	countRunning           int
+	countExecuting         int
+	countExecutingErr      error
+	executingSessionID     uuid.UUID
+	countExecutingExcludes []uuid.UUID
+	// trackExecuting switches CountExecutingByOrg from the static
+	// countExecuting/executingSessionID pair to the executing set below,
+	// which BeginRuntime fills and the turn-end writers empty, so a test can
+	// drive several turns through the marker's real lifecycle.
+	trackExecuting         bool
+	executing              map[uuid.UUID]bool
 	statusUpdates          []string
 	statusUpdateContexts   []statusUpdateContext
 	sandboxStateContexts   []sandboxStateUpdateContext
@@ -431,6 +446,7 @@ type turnUpdate struct {
 func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearExecuting(runID, status)
 	m.statusUpdates = append(m.statusUpdates, string(status))
 	m.statusUpdateContexts = append(m.statusUpdateContexts, statusUpdateContext{
 		status: status,
@@ -442,6 +458,7 @@ func (m *mockSessionStore) UpdateStatus(ctx context.Context, orgID, runID uuid.U
 func (m *mockSessionStore) UpdateResult(ctx context.Context, orgID, runID uuid.UUID, status models.SessionStatus, result *models.SessionResult) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearExecuting(runID, status)
 	if m.eventHook != nil {
 		m.eventHook("session_result:" + string(status))
 	}
@@ -455,9 +472,60 @@ func (m *mockSessionStore) CountRunningByOrg(ctx context.Context, orgID uuid.UUI
 	return m.countRunning, m.countRunningErr
 }
 
+// CountExecutingByOrg mirrors the store's exclusion semantics: countExecuting
+// is the org's executing-turn count, and when excludeSessionID names
+// executingSessionID (the one session the test treats as executing) that
+// session is left out, as the real query leaves out the caller's own row.
+func (m *mockSessionStore) CountExecutingByOrg(ctx context.Context, orgID, excludeSessionID uuid.UUID) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.countExecutingExcludes = append(m.countExecutingExcludes, excludeSessionID)
+	if m.trackExecuting {
+		count := len(m.executing)
+		if m.executing[excludeSessionID] {
+			count--
+		}
+		return count, m.countExecutingErr
+	}
+	count := m.countExecuting
+	if excludeSessionID != uuid.Nil && excludeSessionID == m.executingSessionID && count > 0 {
+		count--
+	}
+	return count, m.countExecutingErr
+}
+
+// markExecuting and clearExecuting maintain the tracked executing set the
+// way the store's writers maintain the runtime deadline marker. Callers hold
+// m.mu.
+func (m *mockSessionStore) markExecuting(sessionID uuid.UUID) {
+	if !m.trackExecuting {
+		return
+	}
+	if m.executing == nil {
+		m.executing = map[uuid.UUID]bool{}
+	}
+	m.executing[sessionID] = true
+}
+
+func (m *mockSessionStore) clearExecuting(sessionID uuid.UUID, status models.SessionStatus) {
+	if !m.trackExecuting || status == models.SessionStatusRunning {
+		return
+	}
+	delete(m.executing, sessionID)
+}
+
+func (m *mockSessionStore) getCountExecutingExcludes() []uuid.UUID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]uuid.UUID, len(m.countExecutingExcludes))
+	copy(out, m.countExecutingExcludes)
+	return out
+}
+
 func (m *mockSessionStore) UpdateTurnComplete(ctx context.Context, orgID, sessionID uuid.UUID, turn int, result *models.SessionResult, agentSessionID, snapshotKey string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.clearExecuting(sessionID, models.SessionStatusIdle)
 	m.turnUpdates = append(m.turnUpdates, turnUpdate{
 		turn:           turn,
 		result:         result,
@@ -484,6 +552,9 @@ func (m *mockSessionStore) UpdateWorkspaceSnapshot(ctx context.Context, orgID, s
 func (m *mockSessionStore) BeginRuntime(ctx context.Context, orgID, sessionID uuid.UUID, capability models.CheckpointCapability, softDeadline, hardDeadline, observedAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.beginRuntimeErr == nil {
+		m.markExecuting(sessionID)
+	}
 	m.runtimeBegins = append(m.runtimeBegins, runtimeBegin{
 		capability:   capability,
 		softDeadline: softDeadline,
@@ -1446,12 +1517,22 @@ type testDeps struct {
 // makes during failure-path bookkeeping. Methods are no-ops on the happy
 // path; tests that exercise the worker-ownership / sandbox-failure cleanup
 // blocks use updateStatusCalls to assert thread.status was reset.
+type credentialLookupDeadLetterCall struct {
+	orgID        uuid.UUID
+	sessionID    uuid.UUID
+	threadID     uuid.UUID
+	jobID        uuid.UUID
+	expectedTurn int
+	detail       string
+}
+
 type mockSessionThreadStore struct {
-	mu                sync.Mutex
-	eventHook         func(string)
-	getByIDResult     *models.SessionThread
-	updateResultErr   error
-	updateStatusCalls []struct {
+	mu                          sync.Mutex
+	eventHook                   func(string)
+	getByIDResult               *models.SessionThread
+	updateResultErr             error
+	credentialLookupDeadLetters []credentialLookupDeadLetterCall
+	updateStatusCalls           []struct {
 		threadID uuid.UUID
 		status   models.ThreadStatus
 	}
@@ -1516,6 +1597,13 @@ func (m *mockSessionThreadStore) UpdateResult(_ context.Context, _, threadID uui
 		}{threadID: threadID, status: status, result: *result})
 	}
 	return nil
+}
+
+func (m *mockSessionThreadStore) FailCredentialLookupForDeadLetter(_ context.Context, orgID, sessionID, threadID, jobID uuid.UUID, expectedTurn int, detail string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.credentialLookupDeadLetters = append(m.credentialLookupDeadLetters, credentialLookupDeadLetterCall{orgID: orgID, sessionID: sessionID, threadID: threadID, jobID: jobID, expectedTurn: expectedTurn, detail: detail})
+	return true, nil
 }
 
 func (m *mockSessionThreadStore) ClearPendingMessages(_ context.Context, _, _ uuid.UUID) error {
@@ -2497,7 +2585,10 @@ func TestRecoverSession_RestartsWithoutCountingOwnRunningSlot(t *testing.T) {
 	run.Status = models.SessionStatusRunning
 
 	d := defaultDeps()
-	d.sessions.countRunning = 1
+	// The only executing slot is this run's own (its deadlines survive the
+	// crash); recovery must not be held by it.
+	d.sessions.countExecuting = 1
+	d.sessions.executingSessionID = run.ID
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
 		return &agent.AgentResult{
 			Summary:  "Recovered by restarting cleanly",
@@ -4271,7 +4362,7 @@ func TestRunAgent_AutomaticPRPublishingGuards(t *testing.T) {
 				run.Origin = models.SessionOriginCodeReview
 				run.RevisionContext = []byte(`{"kind":"code_review","github_repo":"acme/backend","github_pr_number":42,"base_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
 				d.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, command string, stdout, _ io.Writer) (int, error) {
-					if command == "git rev-parse HEAD" {
+					if command == "git rev-parse HEAD" || (strings.Contains(command, " checkout -B ") && strings.Contains(command, "git rev-parse HEAD")) {
 						_, err := io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 						return 0, err
 					}
@@ -4317,7 +4408,7 @@ func TestRunAgent_ConcurrencyLimit(t *testing.T) {
 	run := testRun(orgID, issue.ID)
 
 	d := defaultDeps()
-	d.sessions.countRunning = 3 // At the limit.
+	d.sessions.countExecuting = 3 // At the limit.
 
 	orch := buildOrchestrator(d)
 	err := orch.RunAgent(context.Background(), run)
@@ -4454,7 +4545,7 @@ func TestRunAgent_CapturesAndPersistsBaseCommitSHA(t *testing.T) {
 			}
 			d := defaultDeps()
 			d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
-				if cmd == "git rev-parse HEAD" {
+				if cmd == "git rev-parse HEAD" || (strings.Contains(cmd, " checkout -B ") && strings.Contains(cmd, "git rev-parse HEAD")) {
 					_, err := io.WriteString(stdout, tt.expectedBase+"\n")
 					return 0, err
 				}
@@ -6366,6 +6457,9 @@ func TestRunAgent_ClaudeSubscriptionInjectsCredentialsFile(t *testing.T) {
 		return capturedSandbox, nil
 	}
 	d.provider.ExecFn = func(ctx context.Context, sb *agent.Sandbox, cmd string, stdout, stderr io.Writer) (int, error) {
+		// Auth metadata belongs to the execution's sandbox value, which is
+		// isolated from the provider's cached Create handle.
+		capturedSandbox = sb
 		if cmd == "claude --version" {
 			_, writeErr := stdout.Write([]byte("2.1.139\n"))
 			require.NoError(t, writeErr, "version mock should write stdout")
@@ -7024,6 +7118,7 @@ func TestContinueSession_ResultErrorMarksActiveThreadFailed(t *testing.T) {
 		return err
 	}
 	d.adapter.executeFn = func(ctx context.Context, sandbox *agent.Sandbox, prompt *agent.AgentPrompt, logCh chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.False(t, agent.IsCodeReviewExecution(ctx), "ordinary session threads must retain their normal adapter runtime defaults")
 		return &agent.AgentResult{
 			Summary:  `{"type":"error","error":{"name":"UnknownError"}}`,
 			Error:    `opencode CLI exited with code 1: {"type":"error","error":{"name":"UnknownError"}}`,
@@ -7099,7 +7194,8 @@ func TestContinueSession_CodeReviewResultErrorFailsOnlyReviewerThread(t *testing
 		_, err := io.ReadAll(reader)
 		return err
 	}
-	d.adapter.executeFn = func(context.Context, *agent.Sandbox, *agent.AgentPrompt, chan<- agent.LogEntry) (*agent.AgentResult, error) {
+	d.adapter.executeFn = func(ctx context.Context, _ *agent.Sandbox, _ *agent.AgentPrompt, _ chan<- agent.LogEntry) (*agent.AgentResult, error) {
+		require.True(t, agent.IsCodeReviewExecution(ctx), "initial built-in reviewers must carry trusted runtime scope through ContinueSession")
 		return &agent.AgentResult{
 			Summary:  "You've hit your weekly limit · resets Aug 9, 12pm (UTC)",
 			Error:    "claude CLI exited with code 1: You've hit your weekly limit · resets Aug 9, 12pm (UTC)",
@@ -8247,7 +8343,7 @@ func TestReviewInputsGateBeforeAgentExecution(t *testing.T) {
 			}
 			var preparationCalls atomic.Int64
 			dependencies.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, command string, stdout, stderr io.Writer) (int, error) {
-				if command == "git rev-parse HEAD" {
+				if command == "git rev-parse HEAD" || (strings.Contains(command, " checkout -B ") && strings.Contains(command, "git rev-parse HEAD")) {
 					_, err := io.WriteString(stdout, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")
 					return 0, err
 				}

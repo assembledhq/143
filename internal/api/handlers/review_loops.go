@@ -75,6 +75,7 @@ func (h *ReviewLoopHandler) Start(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case writeCodeReviewOwnedError(w, r, err):
+		case writeAutomationOwnedError(w, r, err):
 		case errors.Is(err, pgx.ErrNoRows), errors.Is(err, threadsvc.ErrSessionNotFound):
 			writeError(w, r, http.StatusNotFound, "NOT_FOUND", "session not found")
 		case errors.Is(err, reviewloopsvc.ErrInvalidPassCount):

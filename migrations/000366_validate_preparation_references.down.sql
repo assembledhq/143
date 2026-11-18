@@ -1,0 +1,2 @@
+-- Validation only. Keep validated constraints; owning schema down migrations
+-- perform locked retained-evidence preflights before removing them.

@@ -190,7 +190,9 @@ func TestComputeNextRunAt(t *testing.T) {
 	interval.IntervalRunAt = &runAt
 	got, err = interval.ComputeNextRunAt(from)
 	require.NoError(t, err)
-	require.Equal(t, time.Date(2026, 4, 17, 14, 15, 0, 0, time.UTC), got)
+	// Six hourly occurrences of :15 after 08:00 is 13:15; the old rule waited
+	// a full six hours first and landed on 14:15, skipping a slot per fire.
+	require.Equal(t, time.Date(2026, 4, 17, 13, 15, 0, 0, time.UTC), got, "run_at interval should land on the interval-th occurrence after from")
 
 	invalidRunAt := "ab:cd"
 	interval.IntervalRunAt = &invalidRunAt

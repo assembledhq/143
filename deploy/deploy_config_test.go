@@ -377,6 +377,7 @@ func TestFleetDeployDefaultsToUserFacingRuntimeRoles(t *testing.T) {
 	require.Contains(t, string(workflow), `>"$RUNNER_TEMP/deploy-fleet.log" 2>&1`, "public CI should capture private deployment output without printing it")
 	require.Contains(t, string(workflow), `FLEET_HOSTS="$fleet_hosts" GITHUB_STEP_SUMMARY= ./deploy/scripts/deploy-fleet.sh`, "private failure logs must not leak through the public Actions summary")
 	require.Contains(t, string(workflow), `WORKER_DEPLOY_DETACH: ""`, "automatic fleet deployment should wait for synchronous worker completion")
+	require.Contains(t, string(workflow), `WORKER_DEPLOY_JOBS: "2"`, "automatic routine deployment should use two worker slots after the canary")
 	require.NotContains(t, string(workflow), `status_path="/var/log/143/deploy-worker-${short_sha}.status"`, "CI must not treat a stale short-SHA detached status as completion")
 
 	makefile, err := os.ReadFile("../Makefile")
@@ -411,6 +412,7 @@ func TestDeployFleetRunsMaintenanceHostsConcurrently(t *testing.T) {
 	require.NoError(t, err, "test should read deploy-fleet.sh")
 	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
 	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+	writeFleetAdmissionFixtures(t, scriptDir)
 
 	stateDir := filepath.Join(tempDir, "state")
 	fakeDeploy := `#!/usr/bin/env bash
@@ -462,6 +464,7 @@ func TestDeployFleetSerializesDeploysToTheSameHost(t *testing.T) {
 	require.NoError(t, err, "test should read deploy-fleet.sh")
 	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
 	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+	writeFleetAdmissionFixtures(t, scriptDir)
 
 	stateDir := filepath.Join(tempDir, "state")
 	fakeDeploy := `#!/usr/bin/env bash
@@ -523,6 +526,7 @@ func TestDeployFleetBlocksWorkersWhenAppDeployFails(t *testing.T) {
 	require.NoError(t, err, "test should read deploy-fleet.sh")
 	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
 	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+	writeFleetAdmissionFixtures(t, scriptDir)
 
 	stateDir := filepath.Join(tempDir, "state")
 	fakeDeploy := `#!/usr/bin/env bash
@@ -565,6 +569,7 @@ func TestDeployFleetRequiresRequestedAppBarrier(t *testing.T) {
 	require.NoError(t, err, "test should read deploy-fleet.sh")
 	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
 	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+	writeFleetAdmissionFixtures(t, scriptDir)
 
 	stateDir := filepath.Join(tempDir, "state")
 	fakeDeploy := `#!/usr/bin/env bash
@@ -597,6 +602,7 @@ func TestDeployFleetPrintsFailedHostLogs(t *testing.T) {
 	require.NoError(t, err, "test should read deploy-fleet.sh")
 	fleetScriptPath := filepath.Join(scriptDir, "deploy-fleet.sh")
 	require.NoError(t, os.WriteFile(fleetScriptPath, fleetScript, 0o755), "test should copy deploy-fleet.sh into the temporary layout")
+	writeFleetAdmissionFixtures(t, scriptDir)
 
 	fakeDeploy := `#!/usr/bin/env bash
 set -euo pipefail
@@ -2446,13 +2452,13 @@ func TestDeployPrunesUnusedDockerResourcesAfterSuccessfulRollout(t *testing.T) {
 	require.Contains(t, deployText, "prune_unused_docker_resources()", "deploy.sh should define one prune helper so app, worker, and detached worker paths stay aligned")
 	require.Contains(t, pruneFn, `docker container prune -f --filter "until=$prune_until"`, "deploy prune should remove stopped containers after a successful rollout")
 	require.NotContains(t, pruneFn, `docker rm -f`, "deploy prune must not force-remove running executor containers")
-	require.Contains(t, pruneFn, `docker image prune -af --filter "until=$prune_until"`, "deploy prune should remove old unused SHA-tagged images after a successful rollout")
+	require.Contains(t, pruneFn, `docker image prune -af --filter "until=$prune_until"`, "dedicated app hosts should retain image cache cleanup")
 	require.Contains(t, pruneFn, `docker builder prune -af --filter "until=$prune_until"`, "deploy prune should remove unused build cache after a successful rollout")
 	require.Contains(t, deployText, `$(remote_env_assignment DEPLOY_DOCKER_PRUNE "${DEPLOY_DOCKER_PRUNE:-1}")`, "deploy should pass the prune enable/disable knob through SSH to the remote host")
 	require.Contains(t, deployText, `$(remote_env_assignment DOCKER_PRUNE_UNTIL "${DOCKER_PRUNE_UNTIL:-24h}")`, "deploy should pass the prune age window through SSH to the remote host")
 	require.Contains(t, deployText, `$(remote_env_assignment SESSION_EXECUTOR_DOCKER_NETWORK "${SESSION_EXECUTOR_DOCKER_NETWORK:-}")`, "deploy should pass the executor network override through SSH to the remote host")
-	require.Contains(t, deployText, `docker image inspect "$sandbox_image"`, "worker prune should verify the sandbox image survived image pruning")
-	require.Contains(t, deployText, `docker pull "$sandbox_image"`, "worker prune should re-pull the sandbox image when image pruning removes it")
+	require.Contains(t, deployText, `docker image inspect "$sandbox_image"`, "worker cleanup should verify the required sandbox image is still present")
+	require.Contains(t, deployText, `docker pull "$sandbox_image"`, "worker cleanup should restore a missing required sandbox image")
 	require.NotContains(t, deployText, "run_worker_deployctl_in_container", "detached worker rollovers should not embed worker-container-bound deploy control helpers")
 	require.Contains(t, deployText, `prune_unused_docker_resources "$ROLE"`, "synchronous deploy paths should prune after the rollout and health checks succeed")
 	require.Contains(t, deployText, `DEPLOY_DOCKER_PRUNE=0`, "operators should have an explicit escape hatch for incident response or rollback-cache preservation")

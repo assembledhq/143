@@ -335,6 +335,7 @@ func (o *Orchestrator) hydrateCodeReviewTrees(ctx context.Context, session *mode
 	cancelPath := reviewPreparationMarkerPath(sandbox)
 	payload := reviewWorkspacePreparationPayload{
 		WorkDir: sandbox.WorkDir, Standalone: true, CancelPath: cancelPath,
+		ProfileParent:           "review_evidence_hydration",
 		ExpectedRepoURL:         repoURL,
 		Prepare:                 reviewTreeEvidenceScript(sandbox.WorkDir, revision.BaseSHA, revision.HeadSHA, repoURL),
 		VerifyIntegrity:         reviewGitObjectIntegrityScript(sandbox.WorkDir),
@@ -431,11 +432,16 @@ func (o *Orchestrator) cloneRepositoryForReview(ctx context.Context, sandbox *Sa
 	}
 	payload := reviewWorkspacePreparationPayload{
 		WorkDir: cloneSandbox.WorkDir, Standalone: true, AuthenticateGit: true,
+		ProfileParent:    "repository_clone",
 		CloneDestination: sandbox.WorkDir, ExpectedRepoURL: repoURL,
 		Prepare: reviewCloneScript(repoURL, branch, sandbox.WorkDir), DeadlineUnix: deadline,
 		CancelPath: path.Join(cloneSandbox.WorkDir, "143-review-cancel-"+uuid.NewString()),
 	}
-	return o.execReviewPreparationPayload(ctx, &cloneSandbox, payload, reviewGitAuthentication{repoURL, token}, o.logger)
+	logger := o.logger
+	if contextual := zerolog.Ctx(ctx); contextual != zerolog.DefaultContextLogger && contextual.GetLevel() != zerolog.Disabled {
+		logger = *contextual
+	}
+	return o.execReviewPreparationPayload(ctx, &cloneSandbox, payload, reviewGitAuthentication{repoURL, token}, logger)
 }
 
 func reviewCloneScript(repoURL, branch, destination string) string {
@@ -504,7 +510,21 @@ func (o *Orchestrator) execReviewEvidence(ctx context.Context, sandbox *Sandbox,
 	return o.execReviewEvidenceInput(ctx, sandbox, command, token, nil)
 }
 
-func (o *Orchestrator) execReviewEvidenceInput(ctx context.Context, sandbox *Sandbox, command, token string, input io.Reader) error {
+func (o *Orchestrator) execReviewEvidenceInput(ctx context.Context, sandbox *Sandbox, command, token string, input io.Reader) (returnErr error) {
+	var stdout io.Writer = io.Discard
+	if input != nil {
+		if profile, ok := ctx.Value(reviewPreparationProfileKey{}).(*reviewPreparationProfile); ok {
+			stdout = profile
+			start := time.Now()
+			defer func() {
+				outcome := observability.StageOutcome(ctx, returnErr)
+				if errors.Is(returnErr, errReviewHydrationRequired) {
+					outcome = "incomplete"
+				}
+				profile.executor(start, outcome)
+			}()
+		}
+	}
 	var stderr bytes.Buffer
 	var exitCode int
 	var err error
@@ -521,10 +541,10 @@ func (o *Orchestrator) execReviewEvidenceInput(ctx context.Context, sandbox *San
 		}
 		if err == nil {
 			if trusted, ok := o.provider.(reviewPreparationTrustedStdinExecutor); ok {
-				exitCode, transportErr = trusted.ExecWithStdinForReviewPreparation(ctx, clean, command, input, io.Discard, &stderr)
+				exitCode, transportErr = trusted.ExecWithStdinForReviewPreparation(ctx, clean, command, input, stdout, &stderr)
 				err = transportErr
 			} else if provider, ok := o.provider.(reviewPreparationStdinExecutor); ok {
-				exitCode, transportErr = provider.ExecWithStdin(ctx, clean, command, input, io.Discard, &stderr)
+				exitCode, transportErr = provider.ExecWithStdin(ctx, clean, command, input, stdout, &stderr)
 				err = transportErr
 			} else {
 				err = errors.New("review provider does not support private Git authentication input")
@@ -742,9 +762,13 @@ func (o *Orchestrator) execReviewPreparationPayload(ctx context.Context, sandbox
 	if auth.RepoURL != "" {
 		payload.ExpectedRepoURL = auth.RepoURL
 	}
+	payload.Profile = payload.ProfileParent != ""
 	command, input, err := reviewPreparationCommand(payload, auth)
 	if err != nil {
 		return err
+	}
+	if payload.ProfileParent != "" {
+		ctx = context.WithValue(ctx, reviewPreparationProfileKey{}, &reviewPreparationProfile{log: log, parent: payload.ProfileParent})
 	}
 	return o.execReviewPreparationInput(ctx, sandbox, command, payload.CancelPath, auth.Token, input, log)
 }
@@ -832,6 +856,7 @@ const reviewWorkspaceCleanupQuarantinePath = "/tmp/143-review-preparation-quaran
 // killed before the lock is released on timeout or a termination signal.
 const reviewWorkspacePreparationPython = `
 import base64, fcntl, json, os, select, signal, stat, subprocess, sys, tempfile, time
+` + reviewPreparationProfilePython + `
 git_config_guard = r'''` + reviewGitAuthenticationConfigPython + `'''
 p = json.loads(sys.argv[1])
 auth = None
@@ -1186,7 +1211,7 @@ class SourceIntegrityFailure(Exception):
     pass
 
 def verify_object_integrity(script):
-    if script and not run(script, required=False, platform=True):
+    if script and not measured("pre_integrity", run, script, required=False, platform=True):
         raise SourceIntegrityFailure("pinned review source object integrity validation failed; workspace must be recreated")
 
 def verify_pinned_source():
@@ -1323,6 +1348,7 @@ try:
     check_workspace_quarantine()
     message = read_preparation_input()
     p = message.pop("payload")
+    profile_enabled = p.get("profile", False)
     auth = message.pop("authentication", None)
     del message
     if p.get("standalone", False):
@@ -1331,13 +1357,14 @@ try:
         elif p.get("authenticate_git", False) or p.get("guard_configuration", False):
             validate_git_configuration()
         verify_object_integrity(p.get("verify_integrity"))
-        run(p["prepare"], authenticate=p.get("authenticate_git", False),platform=p.get("platform_command",False))
+        operation = "authenticated_clone" if p.get("clone_destination") else ("authenticated_prepare" if p.get("authenticate_git") else "local_prepare")
+        measured(operation, run, p["prepare"], authenticate=p.get("authenticate_git", False), platform=p.get("platform_command", False))
         if p.get("clone_destination"):
             validate_git_configuration(p["clone_destination"])
         elif p.get("guard_configuration",False):
             validate_git_configuration()
         if p.get("verify_captured_integrity"):
-            run(p["verify_captured_integrity"], platform=True)
+            measured("post_integrity", run, p["verify_captured_integrity"], platform=True)
     else:
         prepare_workspace()
 except Exception as error:
@@ -1367,6 +1394,8 @@ finally:
 `
 
 type reviewWorkspacePreparationPayload struct {
+	ProfileParent           string                           `json:"-"`
+	Profile                 bool                             `json:"profile,omitempty"`
 	WorkDir                 string                           `json:"work_dir"`
 	Receipt                 json.RawMessage                  `json:"receipt"`
 	VerifyGit               string                           `json:"verify_git"`

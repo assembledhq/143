@@ -34,6 +34,31 @@ Open the review's **Evidence** panel to see captured thumbnails, source surface 
 
 A new GitHub review request for the configured 143 reviewer team starts a fresh full review after the previous review completes, even on the same commit. If an equivalent full review is already queued or running, the request joins that review. Redelivery of an existing request keeps its original identity and does not start another review. Team mentions and the UI's ordinary **Review now** action can still reuse applicable work; different review context or a deterministic early stop can require another assessment. The Code reviews page retains executed assessments as audit history.
 
+### Use earlier review history
+
+When enabled for your installation, the **Request full review** dialog offers
+**Use earlier review history (experimental)**. It is unchecked by default and
+applies only to that request. Selecting it starts a fresh full review after the
+latest review completes, even on unchanged code; an equivalent running request
+can still be joined.
+
+The code reviewers inspect the current changes independently. The orchestrator
+receives references to earlier rounds and can retrieve their reports, findings,
+and session excerpts as needed. It must compare old conclusions with the current
+code and explain repeated or reversed findings. Earlier approval decisions and
+claims that something was fixed do not establish correctness.
+
+History access is limited to earlier rounds of the same pull request. If prior
+rounds exist but the orchestrator does not successfully retrieve the latest round's
+report, the review remains incomplete rather than claiming to have used history. A first
+review with no earlier rounds can complete normally. This experiment does not
+resume an earlier model conversation or enroll future automatic reviews.
+
+The installation flag `CODE_REVIEW_HISTORY_ENABLED` defaults to `false`. Apply
+the database migrations, then deploy the API, all workers, and the sandbox image
+containing the new `143-tools` commands before enabling it. The opt-in remains
+hidden and requests are rejected while the flag is off.
+
 ### Re-check updated evidence
 
 When **Allow PR re-checks** is enabled, choose **Re-check PR evidence** from a completed review's overflow menu or follow the link in its review comment. With a complete prior review, unchanged code and an unchanged review policy, 143 reassesses screenshots, test results, logs, descriptions, discussion, and existing findings without rerunning the code reviewers. Updates to the title, generated attribution, or CI status also use this evidence path.
@@ -42,9 +67,11 @@ When **Allow PR re-checks** is enabled, choose **Re-check PR evidence** from a c
 
 An evidence recheck does not guarantee approval. 143 preserves unresolved findings, checks current approval gates, and requires evidence to resolve a blocker. Missing or invalid evidence remains blocking. If the recheck cannot complete or raises a new concern requiring human judgment, it reports that condition without automatically starting another code review.
 
-When a review starts, 143 asynchronously posts a best-effort PR conversation comment with a link to the running session. When the session finishes, that same comment is updated with the result. During a reassessment, the rolling comment keeps the previous completed verdict visible, labels the commit it assessed, and links to the new running session until the replacement result is ready; stable blockers found for the active commit appear alongside that prior verdict. Later review passes reuse the same comment, so the PR keeps one current visible 143 summary instead of accumulating one per commit. Formal GitHub reviews remain marker-only except for approval state and inline findings. To keep review noise low, 143 posts inline findings only for P0 and P1 issues. The rolling summary groups policy thresholds, review findings, and decisions that need human judgment; platform review failures appear separately from code risk, and a single blocker is identified against the assessed commit. P2 and P3 observations remain advisory: they do not affect approval or create line comments, but their details are available in a collapsed section and in the linked 143 review evidence.
+When a review starts, 143 asynchronously posts a temporary PR conversation comment with a link to the running session. The complete result appears in the formal GitHub review, including its verdict, explanation, evidence links, approval state, and inline findings. After confirming that result, 143 removes its own progress comment, leaving one final review summary. During a reassessment, the progress comment links to the previous published review rather than repeating its verdict; later passes update the same formal review. If an attempt fails before publishing a formal review, its progress comment keeps the failure visible instead.
 
-Stable size, path, fork, and explicit-username author-policy failures appear in that rolling summary before reviewer agents finish; GitHub team membership, check, branch, and head-change state waits for the terminal decision because it can change during a run. By default, 143 continues the substantive review so the result still includes code findings. Administrators can enable **Stop after stable policy blockers** under **Policy → Safeguards → Quality gates** to skip reviewer and orchestrator work on the first blocked attempt. If a developer explicitly requests another review at the same commit, 143 treats that as a request for the full substantive review instead of stopping a second time. Analytics reports early stops, avoided reviewer runs, and same-head rerequests.
+To keep review noise low, 143 posts inline findings only for P0 and P1 issues. The final summary groups policy thresholds, review findings, and decisions that need human judgment; platform review failures appear separately from code risk, and a single blocker is identified against the assessed commit. P2 and P3 observations remain advisory: they do not affect approval or create line comments, but their details are available in a collapsed section and in the linked 143 review evidence.
+
+Stable size, path, fork, and explicit-username author-policy failures appear in the temporary progress comment before reviewer agents finish; GitHub team membership, check, branch, and head-change state waits for the terminal decision because it can change during a run. By default, 143 continues the substantive review so the result still includes code findings. Administrators can enable **Stop after stable policy blockers** under **Policy → Safeguards → Quality gates** to skip reviewer and orchestrator work on the first blocked attempt. If a developer explicitly requests another review at the same commit, 143 treats that as a request for the full substantive review instead of stopping a second time. Analytics reports early stops, avoided reviewer runs, and same-head rerequests.
 
 Under **Policy → Safeguards → Paths, authors & checks**, configure an optional
 auto-approval whitelist with individual GitHub usernames and qualified GitHub
@@ -182,6 +209,10 @@ Use the report to tune policy deliberately:
 - PR-author totals show whose pull requests receive automated reviews; they do not claim who clicked or mentioned the reviewer.
 
 ## Separate guidance from safeguards
+
+**Repository guidance (`REVIEW.md`)** is read from the repository's current default branch (`master` or `main`, as configured in GitHub) when review inputs are captured. All reviewers and synthesis use that same captured copy, even if the PR targets another branch or has not been rebased. Changes to the root `REVIEW.md` take effect on the next review or recheck; changed guidance requires a full review instead of reusing an earlier result. Updating the file does not itself trigger reviews of every open PR. A review already in progress keeps the guidance it captured before reviewers started.
+
+The PR checkout remains at the reviewed head commit. Reviewers do not substitute its `REVIEW.md` for the captured default-branch guidance. If the default branch has no root `REVIEW.md`, review continues without that guidance. If the file cannot be fetched or is not a regular UTF-8 text file of at most 64 KiB, review cannot proceed with a stale fallback. Invalid files fail without repeated retries: fix the file on the default branch and request a new review. Repository guidance cannot override organization policy or platform safeguards.
 
 **Additional review instructions** are optional team guidance for priorities, domain risks, and comment style. They are appended after each agent's native `/review` command. Leave them empty to use built-in reviewer behavior.
 

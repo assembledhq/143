@@ -66,6 +66,9 @@ func (e *CodeReviewWorkspacePreparationError) Error() string {
 	if errors.Is(e.cause, ErrStalePullRequestHead) {
 		return "Review workspace preparation observed a moved pull request head. Review did not run."
 	}
+	if IsTerminalNPMSetupError(e.cause) {
+		return "Review workspace dependency setup rejected the package manifests, lockfile, or runtime requirements. Fix the npm setup inputs before retrying. Review did not run."
+	}
 	stage := "workspace readiness verification"
 	switch e.Stage {
 	case CodeReviewPreparationStageClone:

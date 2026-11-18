@@ -54,13 +54,18 @@ func captureFreshFullAssessment(ctx context.Context, services *Services, job run
 	if services == nil || services.CodeReviewInputCapture == nil {
 		return codereviewsvc.AssessmentInputCaptureResult{}, fmt.Errorf("assessment freshness capture unavailable")
 	}
-	fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, AssessmentID: assessment.ID, RequestContext: job.RequestContext, Fresh: true})
+	var baseline codereviewsvc.ReviewInputManifest
+	if json.Unmarshal(assessment.InputManifest, &baseline) != nil || baseline.InputDigest != assessment.InputDigest {
+		return codereviewsvc.AssessmentInputCaptureResult{}, errFullAssessmentInputsChanged
+	}
+	fresh, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{
+		OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, AssessmentID: assessment.ID,
+		RequestContext: job.RequestContext, Fresh: true, CapturedContract: &baseline.Contract,
+	})
 	if err != nil {
 		return fresh, classifyGitHubJobError(err, job.SessionID.String())
 	}
-	var baseline codereviewsvc.ReviewInputManifest
-	if json.Unmarshal(assessment.InputManifest, &baseline) != nil || baseline.InputDigest != assessment.InputDigest ||
-		!fullAssessmentNonVisualAnalysisUnchanged(baseline, fresh.Manifest) || fresh.Manifest.Code.HeadSHA != assessment.HeadSHA || fresh.Manifest.Code.BaseSHA != assessment.BaseSHA || fresh.Manifest.Code.BaseRef != assessment.BaseRef || fresh.Policy.ID != assessment.PolicyID {
+	if !fullAssessmentNonVisualAnalysisUnchanged(baseline, fresh.Manifest) || fresh.Manifest.Code.HeadSHA != assessment.HeadSHA || fresh.Manifest.Code.BaseSHA != assessment.BaseSHA || fresh.Manifest.Code.BaseRef != assessment.BaseRef || fresh.Policy.ID != assessment.PolicyID {
 		return fresh, errFullAssessmentInputsChanged
 	}
 	if baseline.VisualDigest == "" || baseline.VisualDigest != fresh.Manifest.VisualDigest {
@@ -450,13 +455,21 @@ func fullAssessmentCoverage(policy models.CodeReviewPolicyConfig, results []mode
 	return safeSelectedOrchestrator && completedReviewers >= policy.AgentRoster.EffectiveReviewerCount() && completedReviewers >= policy.AgentRoster.RequireReviewerQuorum
 }
 
-func fullAssessmentOutcome(results []models.CodeReviewAgentResult, reasons []models.CodeReviewRiskReason, coverage bool) (json.RawMessage, error) {
+type fullAssessmentStructuredOutcome struct {
+	DescriptionAssessments   []codeReviewDescriptionAssessment `json:"description_assessments"`
+	RiskReasons              []models.CodeReviewRiskReason     `json:"risk_reasons"`
+	CoverageComplete         bool                              `json:"coverage_complete"`
+	SizeLimitOverrideApplied bool                              `json:"size_limit_override_applied,omitempty"`
+}
+
+func fullAssessmentOutcome(results []models.CodeReviewAgentResult, decision models.CodeReviewDecisionEvaluation, coverage bool) (json.RawMessage, error) {
 	synthesis := codeReviewOrchestratorSynthesisFromResults(results)
-	return json.Marshal(struct {
-		DescriptionAssessments []codeReviewDescriptionAssessment `json:"description_assessments"`
-		RiskReasons            []models.CodeReviewRiskReason     `json:"risk_reasons"`
-		CoverageComplete       bool                              `json:"coverage_complete"`
-	}{append([]codeReviewDescriptionAssessment{}, synthesis.DescriptionAssessments...), reasons, coverage})
+	return json.Marshal(fullAssessmentStructuredOutcome{
+		DescriptionAssessments:   append([]codeReviewDescriptionAssessment{}, synthesis.DescriptionAssessments...),
+		RiskReasons:              decision.RiskReasonDetails,
+		CoverageComplete:         coverage,
+		SizeLimitOverrideApplied: len(decision.OverriddenSizeLimits) > 0,
+	})
 }
 
 func failFullAssessmentForSession(ctx context.Context, stores *Stores, job runCodeReviewPayload, detail string) error {
@@ -583,7 +596,7 @@ func reconcileCompletedFullAssessment(ctx context.Context, stores *Stores, metad
 	if err := store.Complete(ctx, assessment.OrgID, assessment.ID, assessment.Generation, assessment.InputDigest, models.CodeReviewAssessmentCompletion{ResultOrigin: *assessment.ResultOrigin, CoverageComplete: assessment.CoverageComplete, Decision: *assessment.Decision, Acceptable: *assessment.Acceptable, RiskReasonDetails: assessment.RiskReasonDetails, StructuredOutcome: assessment.StructuredOutcome, RenderedBody: *assessment.RenderedBody}); err != nil {
 		return err
 	}
-	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessment(ctx, assessment.OrgID, assessment.ID); err != nil {
+	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(ctx, assessment.OrgID, tx, assessment.ID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -606,6 +619,12 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 	}
 	if assessment.ResultOrigin == nil || assessment.Decision == nil || assessment.Acceptable == nil || assessment.RenderedBody == nil || len(assessment.StructuredOutcome) == 0 {
 		return db.ErrCodeReviewAssessmentState
+	}
+	var outcome struct {
+		SizeLimitOverrideApplied bool `json:"size_limit_override_applied"`
+	}
+	if err := json.Unmarshal(assessment.StructuredOutcome, &outcome); err != nil {
+		return fmt.Errorf("decode staged full assessment outcome: %w", err)
 	}
 	logger := *zerolog.Ctx(ctx)
 	var pr models.PullRequest
@@ -681,7 +700,16 @@ func resumeStagedFullAssessment(ctx context.Context, stores *Stores, services *S
 			return fmt.Errorf("decode staged risk reasons: %w", err)
 		}
 	}
-	legacy := db.CompleteCodeReviewParams{SessionID: job.SessionID, Decision: *assessment.Decision, Acceptable: *assessment.Acceptable, GitHubReviewID: submission.GitHubReviewID, GitHubReviewURL: submission.GitHubReviewURL, FinalReviewBody: finalBody, RiskReasonDetails: reasons}
+	legacy := db.CompleteCodeReviewParams{
+		SessionID:                job.SessionID,
+		Decision:                 *assessment.Decision,
+		Acceptable:               *assessment.Acceptable,
+		GitHubReviewID:           submission.GitHubReviewID,
+		GitHubReviewURL:          submission.GitHubReviewURL,
+		FinalReviewBody:          finalBody,
+		RiskReasonDetails:        reasons,
+		SizeLimitOverrideApplied: outcome.SizeLimitOverrideApplied,
+	}
 	if filesAvailable {
 		additions, deletions := codeReviewLineChanges(changedFiles)
 		legacy.Additions, legacy.Deletions = &additions, &deletions
@@ -708,6 +736,17 @@ func prepareFullAssessment(ctx context.Context, stores *Stores, services *Servic
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, err
+	}
+	// Once non-reusable reviewers have started, a later successful capture
+	// cannot retroactively describe their inputs (including REVIEW.md).
+	if services.CodeReviewRepositoryGuidance != nil {
+		results, err := stores.CodeReviews.ListAgentResults(ctx, job.OrgID, job.SessionID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(results) > 0 {
+			return nil, nil, nil
+		}
 	}
 	captured, err := services.CodeReviewInputCapture.CaptureAssessmentInputs(ctx, codereviewsvc.AssessmentInputCaptureRequest{OrgID: job.OrgID, RepositoryID: job.RepositoryID, PullRequestID: job.PullRequestID, SessionID: job.SessionID, AssessmentID: assessmentID, RequestContext: job.RequestContext})
 	if err != nil {
@@ -819,7 +858,7 @@ func completeFullAssessment(ctx context.Context, txStarter db.TxStarter, assessm
 			}
 		}
 	}
-	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessment(ctx, assessment.OrgID, assessment.ID); err != nil {
+	if err := db.NewCodeReviewScheduleStore(tx).SettleAssessmentInTx(ctx, assessment.OrgID, tx, assessment.ID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

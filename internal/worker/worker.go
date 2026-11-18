@@ -68,6 +68,9 @@ type RetryableError struct {
 	// Use this when a pinned retry hits local capacity and no better worker is
 	// currently advertised, so the scheduler can claim any future free worker.
 	ClearTargetNodeID bool
+	// Only controller readiness waits participate in the workspace publication
+	// handshake; generic no-attempt retries retain their existing semantics.
+	codeReviewWorkspaceWait *codeReviewWorkspaceControllerWait
 }
 
 type GitHubRetryPolicy string
@@ -152,6 +155,10 @@ type targetRetryLeaseStore interface {
 	RetryWithoutConsumingAttemptWithLeaseAndTarget(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time, targetNodeID *string) (bool, error)
 }
 
+type codeReviewWorkspaceRetryLeaseStore interface {
+	RetryControllerWithLease(ctx context.Context, orgID uuid.UUID, p db.RetryCodeReviewWorkspaceControllerParams) (time.Time, bool, error)
+}
+
 type retryWindowResetLeaseStore interface {
 	RetryWithoutConsumingAttemptWithLeaseAndResetWindow(ctx context.Context, jobID, lockToken uuid.UUID, errMsg string, runAt time.Time) (bool, error)
 }
@@ -164,15 +171,16 @@ const maxRetryableDuration = 8 * time.Minute
 var defaultMaxLongRunningJobDuration = time.Duration(models.MaxAbsoluteRuntimeCeilingSeconds)*time.Second + 2*time.Minute
 
 type Worker struct {
-	jobs          jobLeaseStore
-	leaseRenewer  JobLeaseRenewer
-	logger        zerolog.Logger
-	nodeID        string
-	handlers      map[string]JobHandler
-	pollInterval  time.Duration
-	leaseDuration time.Duration
-	renewInterval time.Duration
-	renewTimeout  time.Duration
+	workspaceRetries codeReviewWorkspaceRetryLeaseStore
+	jobs             jobLeaseStore
+	leaseRenewer     JobLeaseRenewer
+	logger           zerolog.Logger
+	nodeID           string
+	handlers         map[string]JobHandler
+	pollInterval     time.Duration
+	leaseDuration    time.Duration
+	renewInterval    time.Duration
+	renewTimeout     time.Duration
 	// maxLongRunningJobDuration is a worker-level lease-renewal watchdog for
 	// session jobs. Handler-owned contexts should normally stop first; this
 	// outer guard prevents a wedged handler from renewing a job forever.
@@ -196,6 +204,9 @@ func New(pool db.DBTX, logger zerolog.Logger, nodeID string, opts ...Option) *Wo
 		renewTimeout:              defaultRenewTimeout,
 		maxLongRunningJobDuration: defaultMaxLongRunningJobDuration,
 		wakeCh:                    make(chan struct{}, 1),
+	}
+	if txStarter, ok := pool.(db.TxStarter); ok {
+		w.workspaceRetries = db.NewCodeReviewWorkspaceStore(txStarter)
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -365,7 +376,29 @@ func (w *Worker) poll(ctx context.Context) {
 			return
 		}
 		w.logger.Info().Err(err).Str("job_id", job.ID.String()).Msg("job deferred (retryable)")
-		runAt, scheduled := w.retryJobWithDelayAt(ctx, now, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID, retryable.ResetRetryWindow)
+		var runAt time.Time
+		var scheduled bool
+		if retryable.codeReviewWorkspaceWait != nil && w.workspaceRetries != nil && job.JobType == models.JobTypeRunCodeReview && !retryable.ConsumeAttempt && retryable.TargetNodeID == nil && !retryable.ClearTargetNodeID && !retryable.ResetRetryWindow {
+			wait := retryable.codeReviewWorkspaceWait
+			var scheduleErr error
+			runAt, scheduled, scheduleErr = w.workspaceRetries.RetryControllerWithLease(ctx, job.OrgID, db.RetryCodeReviewWorkspaceControllerParams{
+				OrgID: wait.OrgID, ReviewID: wait.ReviewID, SessionID: wait.SessionID,
+				JobID: job.ID, JobLockToken: *job.LockToken, ExpectedHead: wait.ExpectedHead,
+				RunAt: now.Add(codeReviewWorkspaceWait).UTC(), ErrorMessage: err.Error(),
+			})
+			if scheduleErr != nil {
+				w.logger.Warn().Err(scheduleErr).Str("job_id", job.ID.String()).Msg("failed to schedule workspace controller retry")
+			} else if !scheduled {
+				w.logger.Warn().Str("job_id", job.ID.String()).Msg("lost ownership before scheduling workspace controller retry")
+			} else if !runAt.After(time.Now()) {
+				// Publication may have notified while this controller was still
+				// running. Poll the ordinary queue after its pending commit too.
+				w.Wake()
+			}
+		} else {
+			// Older callers and stores retain the ordinary polling recovery path.
+			runAt, scheduled = w.retryJobWithDelayAt(ctx, now, job.ID, *job.LockToken, err.Error(), job.Attempts, !retryable.ConsumeAttempt, retryable.RetryAfter, retryable.TargetNodeID, retryable.ClearTargetNodeID, retryable.ResetRetryWindow)
+		}
 		if scheduled {
 			w.runRetryScheduledHooks(handlerCtx, err, runAt)
 		}

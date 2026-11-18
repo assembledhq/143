@@ -20,6 +20,14 @@ type testStore struct {
 	actions                         []models.AutomationAction
 	resolveErr, claimErr, finishErr error
 	claims                          int
+	commentTarget                   models.AutomationActionCommentTarget
+	commentTargetErr                error
+	commentResolutions              int
+}
+
+func (s *testStore) ResolveCommentTarget(context.Context, uuid.UUID, models.AutomationActionScope, models.AutomationActionRequest) (models.AutomationActionCommentTarget, error) {
+	s.commentResolutions++
+	return s.commentTarget, s.commentTargetErr
 }
 
 func (s *testStore) Resolve(context.Context, uuid.UUID, models.AutomationActionActor) (models.AutomationActionScope, error) {
@@ -45,7 +53,7 @@ func (s *testStore) Reserve(_ context.Context, _ uuid.UUID, a models.AutomationA
 	if err != nil {
 		return models.AutomationAction{}, err
 	}
-	out := models.AutomationAction{ID: uuid.New(), OperationKey: r.OperationKey, ActionKey: r.ActionKey, Kind: r.Kind, HeadSHA: r.HeadSHA, RequestDigest: digest, Destination: dest, Payload: p, Status: models.AutomationActionPending, CreatedRunID: a.RunID}
+	out := models.AutomationAction{ID: uuid.New(), OperationKey: r.OperationKey, ActionKey: r.ActionKey, Kind: r.Kind, PRNumber: r.PRNumber, HeadSHA: r.HeadSHA, RequestDigest: digest, Destination: dest, Payload: p, Status: models.AutomationActionPending, CreatedRunID: a.RunID}
 	s.actions = append(s.actions, out)
 	return out, nil
 }
@@ -90,6 +98,8 @@ type testProvider struct {
 	closed                            bool
 	inspectErr, preflightErr, sendErr error
 	sent                              Payload
+	reconciliations                   int
+	recoveredReview                   Receipt
 }
 
 func (p *testProvider) Inspect(context.Context, models.AutomationActionScope) (PullRequest, error) {
@@ -104,6 +114,10 @@ func (p *testProvider) Send(_ context.Context, _ models.AutomationActionScope, _
 	p.sends++
 	p.sent = payload
 	return Receipt{ID: "receipt"}, p.sendErr
+}
+func (p *testProvider) ReconcileGitHubReview(_ context.Context, _ models.AutomationActionScope, _ models.AutomationAction) (Receipt, error) {
+	p.reconciliations++
+	return p.recoveredReview, nil
 }
 func actionFixture() (*testStore, *testProvider, models.AutomationActionRequest) {
 	return &testStore{scope: models.AutomationActionScope{RepositoryName: "owner/repo", Config: models.AutomationActionConfig{Actions: models.AutomationActionKinds(), Repository: "owner/repo", SlackChannelID: "C0123456789"}}}, &testProvider{head: strings.Repeat("a", 40)}, models.AutomationActionRequest{AutomationActionKey: models.AutomationActionKey{OperationKey: "daily:2026-09-22", ActionKey: "notify"}, Kind: models.AutomationActionSlack, Text: "Daily summary"}
@@ -152,6 +166,71 @@ func TestIndependentActionReplayAndResume(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubReviewActionReplay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		sendError error
+		status    models.AutomationActionStatus
+	}{
+		{name: "reuse delivered review", status: models.AutomationActionSucceeded},
+		{name: "fence uncertain review", sendError: context.DeadlineExceeded, status: models.AutomationActionUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store, provider, request := actionFixture()
+			store.scope.PRNumber, store.scope.HeadSHA = 42, provider.head
+			request.Kind, request.PRNumber, request.HeadSHA = models.AutomationActionGitHubReview, 42, provider.head
+			request.Comments = []models.AutomationActionReviewComment{{Path: "ui/Card.tsx", Line: 12, Body: "Use the shared Card."}}
+			provider.sendErr = tt.sendError
+			service := New(store, provider, zerolog.Nop())
+			actor := models.AutomationActionActor{OrgID: uuid.New(), RunID: uuid.New()}
+			_, err := service.Execute(t.Context(), actor, request.AutomationActionKey, &request)
+			require.NoError(t, err, "persist the review attempt outcome")
+
+			actor.RunID = uuid.New()
+			result, err := service.Execute(t.Context(), actor, request.AutomationActionKey, nil)
+			require.NoError(t, err, "inspect the same frozen review in a later run")
+			require.Equal(t, tt.status, result.Actions[0].Status, "preserve the first send outcome")
+			require.Equal(t, 1, provider.sends, "never submit a second review for a delivered or uncertain action")
+			require.Equal(t, request, provider.sent.Request, "preserve the original inline anchors and bodies")
+
+			request.Comments = []models.AutomationActionReviewComment{{Path: "ui/Card.tsx", Line: 13, Body: "Use the shared Card."}}
+			_, err = service.Execute(t.Context(), actor, request.AutomationActionKey, &request)
+			require.ErrorIs(t, err, db.ErrAutomationActionConflict, "reject a changed inline anchor under the same key")
+			require.Equal(t, 1, provider.sends, "changed content must not trigger a provider request")
+		})
+	}
+}
+
+func TestGitHubReviewReconciliationAfterHeadMoves(t *testing.T) {
+	t.Parallel()
+	store, provider, request := actionFixture()
+	store.scope.PRNumber, store.scope.HeadSHA = 42, provider.head
+	request.Kind, request.PRNumber, request.HeadSHA = models.AutomationActionGitHubReview, 42, provider.head
+	request.Comments = []models.AutomationActionReviewComment{{Path: "ui/Card.tsx", Line: 12, Body: "Use the shared Card."}}
+	provider.sendErr = context.DeadlineExceeded
+	service := New(store, provider, zerolog.Nop())
+	actor := models.AutomationActionActor{OrgID: uuid.New(), RunID: uuid.New()}
+	result, err := service.Execute(t.Context(), actor, request.AutomationActionKey, &request)
+	require.NoError(t, err, "record the uncertain outcome")
+	require.Equal(t, models.AutomationActionNeedsAttention, result.Status, "do not infer delivery from a timeout")
+
+	store.scope.HeadSHA = strings.Repeat("b", 40)
+	actor.RunID = uuid.New()
+	provider.recoveredReview = Receipt{ID: "314", URL: "https://github.com/owner/repo/pull/42#pullrequestreview-314"}
+	result, err = service.Execute(t.Context(), actor, request.AutomationActionKey, nil)
+	require.NoError(t, err, "recover a verified receipt on the same PR after a push")
+	require.Equal(t, models.AutomationActionDelivered, result.Status, "record the recovered review as delivered")
+	require.True(t, result.Reused, "report a receipt without a new send")
+	require.Equal(t, &provider.recoveredReview.ID, result.Actions[0].ProviderObjectID, "retain the verified provider review ID")
+	require.Equal(t, 1, provider.reconciliations, "read GitHub once to reconcile the unknown send")
+	require.Equal(t, 1, provider.sends, "never submit the review again")
+	require.Equal(t, 1, store.claims, "reuse the original send token without claiming another attempt")
+}
+
 func TestActionAdmissionAndFencing(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -214,6 +293,10 @@ func TestActionConflictAndInterruptedSend(t *testing.T) {
 	}{
 		{"changed text", func(_ *testStore, r *models.AutomationActionRequest) { r.Text = "changed" }, db.ErrAutomationActionConflict},
 		{"changed destination", func(s *testStore, _ *models.AutomationActionRequest) { s.scope.Config.SlackChannelID = "C9999999999" }, db.ErrAutomationActionConflict},
+		{"changed Slack group", func(s *testStore, _ *models.AutomationActionRequest) { s.scope.Config.SlackUserGroupID = "S0123456789" }, db.ErrAutomationActionConflict},
+		{"changed Slack author map", func(s *testStore, _ *models.AutomationActionRequest) {
+			s.scope.Config.SlackPRAuthorMapPath = "config/team.json"
+		}, db.ErrAutomationActionConflict},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -227,6 +310,10 @@ func TestActionConflictAndInterruptedSend(t *testing.T) {
 			require.ErrorIs(t, err, tt.want, "same keys cannot replace content")
 			require.Equal(t, models.AutomationActionDelivered, result.Status, "conflict preserves receipt")
 			require.Equal(t, 1, p.sends, "conflict does not create another effect")
+			result, err = svc.Execute(context.Background(), models.AutomationActionActor{}, r.AutomationActionKey, nil)
+			require.NoError(t, err, "the original successful receipt remains readable after a configuration change")
+			require.True(t, result.Reused, "a changed destination must not resend a successful action")
+			require.Equal(t, 1, p.sends, "reading the original receipt must not add another mention")
 		})
 	}
 }
@@ -337,4 +424,59 @@ func TestActionConfigOrderDoesNotChangeDigest(t *testing.T) {
 	require.NoError(t, err, "order-only edits preserve action identity")
 	require.True(t, result.Reused, "return original receipt")
 	require.Equal(t, 1, p.sends, "do not resend after a checkbox reorder")
+}
+
+func TestCommentUpdateBindingAndResume(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		lookupErr     error
+		sendErr       error
+		claimOnResume error
+		wantErr       error
+		wantStatus    models.AutomationActionStatus
+		wantSends     int
+	}{
+		{name: "success reuses receipt without rebinding", wantStatus: models.AutomationActionSucceeded, wantSends: 1},
+		{name: "definite failure resumes frozen target", sendErr: &SendFailure{Code: "DENIED", Definitive: true}, wantStatus: models.AutomationActionSucceeded, wantSends: 2},
+		{name: "unknown delivery cannot resend", sendErr: context.DeadlineExceeded, wantStatus: models.AutomationActionUnknown, wantSends: 1},
+		{name: "receipt outside scope rejected before reservation", lookupErr: db.ErrAutomationActionUnauthorized, wantErr: db.ErrAutomationActionUnauthorized},
+		{name: "changed binding rejected at claim", sendErr: &SendFailure{Code: "DENIED", Definitive: true}, claimOnResume: db.ErrAutomationActionConflict, wantErr: db.ErrAutomationActionConflict, wantStatus: models.AutomationActionFailed, wantSends: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			store, provider, request := actionFixture()
+			sourceID := uuid.New()
+			request.Kind, request.PRNumber, request.HeadSHA, request.SourceActionID = models.AutomationActionCommentUpdate, 42, provider.head, sourceID.String()
+			target := models.AutomationActionCommentTarget{SourceActionID: sourceID, CommentID: "12345", PreviousActionID: sourceID, PreviousText: "Original review"}
+			store.commentTarget, store.commentTargetErr, provider.sendErr = target, tt.lookupErr, tt.sendErr
+			svc := New(store, provider, zerolog.Nop())
+			actor := models.AutomationActionActor{OrgID: uuid.New(), RunID: uuid.New()}
+			_, err := svc.Execute(context.Background(), actor, request.AutomationActionKey, &request)
+			if tt.lookupErr != nil {
+				require.ErrorIs(t, err, tt.wantErr, "unowned comment is rejected before reservation")
+				require.Empty(t, store.actions, "an unauthorized source creates no durable action")
+				require.Equal(t, 0, provider.sends, "an unauthorized source never reaches the provider")
+				return
+			}
+			require.NoError(t, err, "first update attempt records its outcome")
+			var frozen Payload
+			require.NoError(t, json.Unmarshal(store.actions[0].Payload, &frozen), "reservation stores a readable frozen payload")
+			require.Equal(t, Payload{Request: request, CommentTarget: &target}, frozen, "reservation freezes the server-resolved comment and previous body")
+			store.commentTarget = models.AutomationActionCommentTarget{SourceActionID: uuid.New(), CommentID: "99999"}
+			store.commentTargetErr = errors.New("lookup must not run again")
+			store.claimErr, provider.sendErr = tt.claimOnResume, nil
+			result, err := svc.Execute(context.Background(), actor, request.AutomationActionKey, nil)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr, "claim rejects a target changed since reservation")
+			} else {
+				require.NoError(t, err, "resume uses the stored target and certainty rules")
+			}
+			require.Equal(t, tt.wantStatus, result.Actions[0].Status, "resume preserves the expected durable outcome")
+			require.Equal(t, tt.wantSends, provider.sends, "resume sends only after definitive failure and a valid claim")
+			require.Equal(t, 1, store.commentResolutions, "same-key resume never chooses a new comment target")
+			require.Equal(t, &target, provider.sent.CommentTarget, "provider receives the original frozen binding")
+		})
+	}
 }

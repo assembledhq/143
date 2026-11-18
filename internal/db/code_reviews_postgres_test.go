@@ -14,6 +14,55 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCodeReviewStore_CompleteReviewSizeLimitOverridePostgres(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL to verify storage of applied size limit overrides")
+	}
+	ctx := context.Background()
+	tx := newGitHubWaitPostgres(t, ctx, databaseURL)
+	orgID, otherOrgID, sessionID, prID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	const seed = `
+		INSERT INTO code_review_session_metadata (
+			id, org_id, session_id, repository_id, pull_request_id, policy_id,
+			base_sha, head_sha, from_fork, trigger_source, status, retryable_failure, stale, review_output_key, created_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, 'base', 'head', false, 'app_reviewer', 'running', false, false, 'output', now())`
+	_, err := tx.Exec(ctx, seed, uuid.New(), orgID, sessionID, uuid.New(), prID, uuid.New())
+	require.NoError(t, err, "insert an existing review before the override tracking migration")
+	for _, migration := range []string{"000263_code_review_analytics.up.sql", "000395_code_review_size_limit_override_applied.up.sql"} {
+		body, err := os.ReadFile("../../migrations/" + migration)
+		require.NoError(t, err, "read the migration used by the completion store")
+		_, err = tx.Exec(ctx, string(body))
+		require.NoError(t, err, "apply the migration to the isolated review fixture")
+	}
+	_, err = tx.Exec(ctx, seed, uuid.New(), otherOrgID, sessionID, uuid.New(), uuid.New(), uuid.New())
+	require.NoError(t, err, "insert a second tenant's review with the same synthetic session ID")
+
+	var applied bool
+	err = tx.QueryRow(ctx, `SELECT size_limit_override_applied FROM code_review_session_metadata WHERE org_id=$1 AND session_id=$2`, orgID, sessionID).Scan(&applied)
+	require.NoError(t, err, "read the existing review after migration")
+	require.False(t, applied, "existing reviews default to no applied override")
+
+	_, err = NewCodeReviewStore(tx).CompleteReview(ctx, orgID, CompleteCodeReviewParams{
+		SessionID:                sessionID,
+		Decision:                 models.CodeReviewDecisionApproved,
+		Acceptable:               true,
+		FinalReviewBody:          "Synthetic review with no override disclosure in its body.",
+		SizeLimitOverrideApplied: true,
+	})
+	require.NoError(t, err, "complete the in-scope review with an applied override")
+	var completedPR uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT pull_request_id FROM code_review_session_metadata WHERE org_id=$1 AND status='completed' AND size_limit_override_applied`, orgID).Scan(&completedPR)
+	require.NoError(t, err, "find the PR by its structured applied override")
+	require.Equal(t, prID, completedPR, "the applied override identifies the correct PR without reading its body")
+	err = tx.QueryRow(ctx, `SELECT size_limit_override_applied FROM code_review_session_metadata WHERE org_id=$1 AND session_id=$2`, otherOrgID, sessionID).Scan(&applied)
+	require.NoError(t, err, "read the other tenant's review")
+	require.False(t, applied, "completion must leave the other tenant's review at its default")
+}
+
 func TestCodeReviewStore_GetReviewAnalyticsPostgresBehavior(t *testing.T) {
 	t.Parallel()
 

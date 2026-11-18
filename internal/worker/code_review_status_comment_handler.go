@@ -123,13 +123,24 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 				previous, previousErr := lockedCodeReviews.GetLatestCompletedByPullRequest(lockCtx, job.OrgID, metadata.PullRequestID)
 				if previousErr == nil {
 					previousCompleted = &previous
+					if previous.GitHubReviewID != nil && strings.TrimSpace(stringPtrValue(previous.GitHubReviewURL)) != "" {
+						// Older publishers shortened this body or hid it entirely.
+						// Restore it before replacing the old issue-comment summary.
+						previousBody := codeReviewStatusCommentBody(previous, nil, codeReviewSessionURL(services.FrontendURL, previous.SessionID), "")
+						if err := updater.SyncReviewSummary(lockCtx, codereviewsvc.SyncReviewSummaryRequest{
+							InstallationID: repository.InstallationID,
+							Repository:     repositoryName,
+							PullNumber:     pullRequest.GitHubPRNumber,
+							ReviewID:       *previous.GitHubReviewID,
+							OutputKey:      previous.ReviewOutputKey,
+							Body:           previousBody,
+						}); err != nil {
+							return fmt.Errorf("restore previous code review summary: %w", err)
+						}
+					}
 				} else if !errors.Is(previousErr, pgx.ErrNoRows) {
 					return fmt.Errorf("load previous completed code review for status comment: %w", previousErr)
 				}
-			}
-			existingCommentID, existingErr := lockedPullRequests.GetCodeReviewStatusCommentID(lockCtx, job.OrgID, metadata.PullRequestID)
-			if existingErr != nil {
-				return fmt.Errorf("load durable code review status comment id: %w", existingErr)
 			}
 			reviewNowURL := codeReviewAvailableReviewNowURL(services, lockedLatest.SessionID)
 			detailURL := codeReviewSessionURL(services.FrontendURL, lockedLatest.SessionID)
@@ -138,6 +149,30 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 				reviewNowURL = ""
 			}
 			body := codeReviewStatusCommentBody(lockedLatest, previousCompleted, detailURL, reviewNowURL)
+			status = lockedLatest.Status
+			if codeReviewMetadataTerminal(lockedLatest.Status) && lockedLatest.GitHubReviewID != nil {
+				reviewID = *lockedLatest.GitHubReviewID
+				if err := updater.SyncReviewSummary(lockCtx, codereviewsvc.SyncReviewSummaryRequest{
+					InstallationID:        repository.InstallationID,
+					Repository:            repositoryName,
+					PullNumber:            pullRequest.GitHubPRNumber,
+					ReviewID:              reviewID,
+					OutputKey:             lockedLatest.ReviewOutputKey,
+					Body:                  body,
+					RemoveProgressComment: true,
+				}); err != nil {
+					return fmt.Errorf("finalize code review summary: %w", err)
+				}
+				if err := lockedPullRequests.ClearCodeReviewStatusCommentID(lockCtx, job.OrgID, metadata.PullRequestID); err != nil {
+					return err
+				}
+				updated = true
+				return nil
+			}
+			existingCommentID, existingErr := lockedPullRequests.GetCodeReviewStatusCommentID(lockCtx, job.OrgID, metadata.PullRequestID)
+			if existingErr != nil {
+				return fmt.Errorf("load durable code review status comment id: %w", existingErr)
+			}
 			var updateErr error
 			commentID, updateErr = updater.UpsertReviewStatusComment(lockCtx, codereviewsvc.UpsertReviewStatusCommentRequest{
 				InstallationID:    repository.InstallationID,
@@ -148,22 +183,6 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 			})
 			if updateErr == nil {
 				updateErr = lockedPullRequests.SetCodeReviewStatusCommentID(lockCtx, job.OrgID, metadata.PullRequestID, commentID)
-			}
-			status = lockedLatest.Status
-			if updateErr == nil &&
-				codeReviewMetadataTerminal(lockedLatest.Status) &&
-				lockedLatest.GitHubReviewID != nil {
-				reviewID = *lockedLatest.GitHubReviewID
-				updateErr = updater.HideReviewSummary(lockCtx, codereviewsvc.HideReviewSummaryRequest{
-					InstallationID: repository.InstallationID,
-					Repository:     repositoryName,
-					PullNumber:     pullRequest.GitHubPRNumber,
-					ReviewID:       reviewID,
-					OutputKey:      lockedLatest.ReviewOutputKey,
-				})
-				if updateErr != nil {
-					return fmt.Errorf("hide code review fallback summary: %w", updateErr)
-				}
 			}
 			updated = updateErr == nil
 			return updateErr
@@ -178,7 +197,8 @@ func newSyncCodeReviewStatusCommentHandler(stores *Stores, services *Services, l
 			Str("org_id", job.OrgID.String()).
 			Str("session_id", job.SessionID.String()).
 			Int64("github_comment_id", commentID).
-			Bool("github_review_summary_hidden", reviewID > 0).
+			Int64("github_review_id", reviewID).
+			Bool("github_review_summary_finalized", reviewID > 0).
 			Str("review_status", string(status)).
 			Msg("synchronized code review status comment")
 		return nil
@@ -203,6 +223,7 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 		}
 		if !codeReviewCommentNeedsNoAction(metadata) {
 			footer.EvidenceRecheckURL = savedFooter.EvidenceRecheckURL
+			footer.SizeLimitOverrideURL = savedFooter.SizeLimitOverrideURL
 			if footer.EvidenceRecheckURL == "" {
 				footer.ReviewNowURL = reviewNowURL
 			}
@@ -227,8 +248,10 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 			provisionalBody = ""
 		}
 		if provisionalBody != "" {
-			provisionalBody, _ = models.SplitCodeReviewCommentFooter(provisionalBody, sessionURL)
+			var savedFooter models.CodeReviewCommentFooter
+			provisionalBody, savedFooter = models.SplitCodeReviewCommentFooter(provisionalBody, sessionURL)
 			paragraphs = append(paragraphs, provisionalBody)
+			footer.SizeLimitOverrideURL = savedFooter.SizeLimitOverrideURL
 		} else {
 			announcement := "143 Code Reviewer has started reviewing this pull request"
 			if !metadata.CreatedAt.IsZero() {
@@ -240,6 +263,10 @@ func codeReviewStatusCommentBody(metadata models.CodeReviewSessionMetadata, prev
 			paragraphs = append(paragraphs, message)
 		}
 		if previousCompleted != nil {
+			if previousURL := strings.TrimSpace(stringPtrValue(previousCompleted.GitHubReviewURL)); previousCompleted.GitHubReviewID != nil && previousURL != "" {
+				paragraphs = append(paragraphs, fmt.Sprintf("[View previous review](%s)", previousURL))
+				break
+			}
 			previousBody, previousFooter := models.SplitCodeReviewCommentFooter(stringPtrValue(previousCompleted.FinalReviewBody), sessionURL)
 			if previousBody == "" && previousCompleted.Decision != nil && *previousCompleted.Decision == models.CodeReviewDecisionApproved {
 				previousBody = "143 Code Reviewer approved this PR."
@@ -275,6 +302,41 @@ func codeReviewAvailableReviewNowURL(services *Services, sessionID uuid.UUID) st
 		return codeReviewNowURL(services.FrontendURL, sessionID)
 	}
 	return ""
+}
+
+func codeReviewOverrideSizeLimits(job runCodeReviewPayload, pr models.PullRequest, health *models.PullRequestHealthResponse) bool {
+	requestContext := job.RequestContext
+	if requestContext == nil || !requestContext.OverrideSizeLimits ||
+		requestContext.OverrideSizeLimitsHeadSHA == "" || requestContext.OverrideSizeLimitsBaseSHA == "" ||
+		requestContext.OverrideSizeLimitsBaseRef == "" ||
+		!strings.EqualFold(requestContext.OverrideSizeLimitsHeadSHA, strings.TrimSpace(job.HeadSHA)) {
+		return false
+	}
+	// The scheduler verifies the live base ref before execution and validates
+	// the original target at dispatch. Also check the base SHA from the PR
+	// refresh, which can observe a change after the scheduling check.
+	baseSHA := strings.TrimSpace(stringPtrValue(pr.BaseSHA))
+	if baseSHA != "" && !strings.EqualFold(baseSHA, requestContext.OverrideSizeLimitsBaseSHA) {
+		return false
+	}
+	if health != nil && strings.TrimSpace(health.BaseSHA) != "" {
+		return strings.EqualFold(strings.TrimSpace(health.BaseSHA), requestContext.OverrideSizeLimitsBaseSHA)
+	}
+	return baseSHA != ""
+}
+
+func codeReviewSizeLimitOverrideURL(policy models.CodeReviewPolicyConfig, reviewNowURL string) string {
+	if !policy.RiskPolicy.AllowSizeLimitOverride {
+		return ""
+	}
+	target, err := url.Parse(reviewNowURL)
+	if err != nil || target.Host == "" {
+		return ""
+	}
+	query := target.Query()
+	query.Set("override_size_limits", "true")
+	target.RawQuery = query.Encode()
+	return target.String()
 }
 
 // This is a read-only destination. The authenticated page requires a separate
@@ -315,11 +377,14 @@ func enqueueCodeReviewStatusCommentSync(ctx context.Context, stores *Stores, ser
 				Str("session_id", job.SessionID.String()).
 				Str("dispute_id", job.TriggeringDisputeID.String()).
 				Msg("failed to load terminal reassessment for dispute reconciliation")
+		} else if !codeReviewMetadataTerminal(metadata.Status) {
+			logger.Debug().Str("session_id", job.SessionID.String()).
+				Msg("skipping dispute completion for a nonterminal review")
 		} else if deferred, handoffErr := codeReviewCapturedDisputeHandoff(ctx, stores, job.OrgID, *job.TriggeringDisputeID, job.SessionID, metadata.Status); handoffErr != nil {
 			logger.Warn().Err(handoffErr).Str("session_id", job.SessionID.String()).
 				Msg("failed to check captured-identity reassessment handoff")
 		} else if !deferred {
-			detail := strings.TrimSpace(stringPtrValue(metadata.StatusMessage))
+			detail := codereviewsvc.DisputeReassessmentDetail(metadata)
 			transitioned, completeErr := stores.CodeReviewDisputes.CompleteReassessmentOnce(ctx, job.OrgID, *job.TriggeringDisputeID, job.SessionID, metadata.Status, metadata.Decision, detail)
 			if completeErr != nil {
 				logger.Warn().Err(completeErr).

@@ -310,6 +310,8 @@ describe('SessionDetailPage follow-up messages', () => {
   });
 
   it('clears attached review comments after sending them to the agent', async () => {
+    // The assertion budget covers comment behavior, not a cold lazy import.
+    await import('@/components/code-review/review-diff-view');
     let postedMessage = '';
     let postedResolveIDs: string[] | undefined;
     const user = userEvent.setup();

@@ -86,6 +86,7 @@ import {
   COMPLETED_NOT_APPROVED,
   CodeReviewFilters,
   CodeReviewSummaryCards,
+  formatReviewTurnaround,
   type CodeReviewFilterValues,
 } from "@/components/code-review-overview";
 import { applyCodeReviewPolicyOptimistic, coalesceCodeReviewPolicy, trackPolicyDraft, policyPatchFor } from "@/lib/code-review-autosave";
@@ -200,6 +201,7 @@ const QUALITY_GATE_DESCRIPTIONS = {
   disagreementBlocks:
     "Blocks approval when reviewer agents disagree. When off, disagreement is still visible but does not independently veto approval unless another safeguard does.",
   allowForks: "Allows approval decisions for PRs opened from forks. The safer default is off, which keeps forked PRs comment-only.",
+  allowSizeLimitOverride: "Lets members and admins override the files, additions, and deletions limits when they request a review. Every other safeguard still applies, and the review names the exceeded limits.",
   stopAfterDeterministicFailure:
     "Skips reviewer agents when a commit already fails a stable size, path, fork, or author rule. The rolling comment publishes those blockers immediately; leave this off to continue the substantive review and collect findings.",
 } as const;
@@ -364,13 +366,35 @@ function MobileWhyNotApproved({ review }: { review: CodeReviewListItem }) {
 function ReviewTitle({ review }: { review: CodeReviewListItem }) {
   const title = `#${review.github_pr_number} ${review.pull_request_title}`;
 
-  if (!review.github_review_url) return title;
+  const href = review.github_review_url || review.github_pr_url;
+  if (!href) return title;
 
   return (
-    <ExternalLink href={review.github_review_url} title="Open final review">
+    <ExternalLink href={href} title={review.github_review_url ? "Open final review" : "Open pull request"}>
       {title}
     </ExternalLink>
   );
+}
+
+function isReviewInProgress(review: CodeReviewListItem): boolean {
+  return !isSupersededReview(review) && (review.status === "queued" || review.status === "running");
+}
+
+function ReviewDuration({ review, mobile = false }: { review: CodeReviewListItem; mobile?: boolean }) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const inProgress = !review.completed_at && isReviewInProgress(review);
+  useEffect(() => {
+    if (!inProgress) return;
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [inProgress]);
+
+  const endMs = review.completed_at ? Date.parse(review.completed_at) : inProgress ? nowMs : NaN;
+  const elapsedSeconds = (endMs - Date.parse(review.created_at)) / 1_000;
+  const seconds = inProgress ? Math.max(0, elapsedSeconds) : elapsedSeconds;
+  const duration = formatReviewTurnaround(seconds >= 0 ? seconds : null);
+  if (mobile && duration === "—") return null;
+  return <span className="tabular-nums">{mobile ? "Duration: " : ""}{duration}</span>;
 }
 
 function ReviewActions({ onViewReview, className }: { onViewReview: () => void; className?: string }) {
@@ -378,6 +402,7 @@ function ReviewActions({ onViewReview, className }: { onViewReview: () => void; 
 }
 
 const CODE_REVIEW_PHASE_LABELS: Record<NonNullable<CodeReviewListItem["phase"]>, string> = {
+  preparing_workspace: "Preparing workspace",
   syncing_github: "Syncing GitHub",
   waiting_for_github: "Waiting for GitHub",
   reviewing: "Reviewing",
@@ -1286,6 +1311,13 @@ export default function CodeReviewsPage() {
       render: (review) => <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />,
     },
     {
+      id: "duration",
+      header: "Duration",
+      className: "text-right",
+      cellClassName: "text-right tabular-nums whitespace-nowrap",
+      render: (review) => <ReviewDuration review={review} />,
+    },
+    {
       id: "completed",
       header: sortHeader("Completed", "completed"),
       sortDirection: reviewSort === "completed" ? reviewSortOrder : false,
@@ -1479,6 +1511,7 @@ export default function CodeReviewsPage() {
                         <ReviewOperationalStatus review={review} nowMs={countdownNowMs} />
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
                             <ReviewOutcome review={review} />
+                            <ReviewDuration review={review} mobile />
                             {review.completed_at ? <span className="text-foreground">{formatDate(review.completed_at)}</span> : null}
                         </div>
                         <MobileWhyNotApproved review={review} />
@@ -2516,6 +2549,17 @@ function AdvancedPolicySettings({
                 onCheckedChange={(checked) =>
                   commitPolicy((next) => {
                     next.risk_policy.allow_forks = checked;
+                  })
+                        }
+                      />
+                      <PolicyToggle
+                        label="Allow size limit overrides"
+                        description={QUALITY_GATE_DESCRIPTIONS.allowSizeLimitOverride}
+                        checked={config?.risk_policy.allow_size_limit_override ?? false}
+                        disabled={!config}
+                onCheckedChange={(checked) =>
+                  commitPolicy((next) => {
+                    next.risk_policy.allow_size_limit_override = checked;
                   })
                         }
                       />
@@ -3901,7 +3945,7 @@ function EligibleGitHubAuthorsEditor({
   ];
   const countLabel = `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`;
   const addDisabled = disabled || !draft.trim();
-  const addDisabledReason = disabled ? "Wait for the policy to load." : "Enter a GitHub username or team.";
+  const addDisabledReason = disabled ? "Wait for the policy to load." : "Enter a GitHub user, bot, or team.";
 
   const addEntry = () => {
     const value = draft.trim();
@@ -3942,7 +3986,7 @@ function EligibleGitHubAuthorsEditor({
             </Label>
             <SettingInfoTooltip
               label="Eligible GitHub authors"
-              description="The reviewer may auto-approve when the author matches any listed user or is an active member of any listed team. Leave empty to allow any author. Team membership is checked live before approval."
+              description="The reviewer may auto-approve when the author matches any listed user or bot, or is an active member of any listed team. Bots can be listed directly without joining a team. All other approval criteria still apply. Leave empty to allow any author. Team membership is checked live before approval."
             />
           </div>
           <Badge variant="outline" className="shrink-0 text-xs">
@@ -3950,7 +3994,7 @@ function EligibleGitHubAuthorsEditor({
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground">
-          Allow automated approval for any matching user or active team member. Leave empty to allow all authors.
+          Allow listed users, bots, or active team members. Add bots by their exact GitHub login, including [bot] (for example, build-helper[bot]). Leave empty to allow all authors.
         </p>
       </div>
       <div className="divide-y divide-border border-t border-border">
@@ -3959,7 +4003,7 @@ function EligibleGitHubAuthorsEditor({
         ) : (
           entries.map((entry) => {
             const EntryIcon = entry.kind === "user" ? UserRound : Users;
-            const typeLabel = entry.kind === "user" ? "User" : "Team";
+            const typeLabel = entry.kind === "team" ? "Team" : /\[bot\]$/i.test(entry.value) ? "Bot" : "User";
             return (
               <div key={`${entry.kind}:${entry.value}`} className="flex min-h-10 items-center gap-3 px-4 py-2">
                 <EntryIcon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -3989,7 +4033,7 @@ function EligibleGitHubAuthorsEditor({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="user">User</SelectItem>
+              <SelectItem value="user">User or bot</SelectItem>
               <SelectItem value="team">Team</SelectItem>
             </SelectContent>
           </Select>
@@ -3997,7 +4041,7 @@ function EligibleGitHubAuthorsEditor({
             id="eligible-github-author-input"
             value={draft}
             disabled={disabled}
-            placeholder={kind === "user" ? "GitHub username" : "Organization/team-slug"}
+            placeholder={kind === "user" ? "GitHub user or bot login" : "Organization/team-slug"}
             aria-label="Eligible GitHub author"
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={handleKeyDown}
@@ -4460,6 +4504,17 @@ function CodeReviewDisputeQueue({
                   </div>
                 </SectionGroup>
 
+                {selectedDispute.status_detail && (
+                  selectedDispute.intake_status === "failed"
+                  || selectedDispute.reassessment_status === "failed"
+                  || selectedDispute.reassessment_status === "superseded"
+                  || selectedDispute.reply_status === "failed"
+                ) ? (
+                  <SectionGroup title="Status detail" headingLevel={3}>
+                    <p className="whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground">{selectedDispute.status_detail}</p>
+                  </SectionGroup>
+                ) : null}
+
                 <SectionGroup
                   title="Queue context"
                   description="Signals explain this dispute's position in the queue; they do not determine the outcome."
@@ -4522,11 +4577,20 @@ function CodeReviewDisputeReassessment({ dispute }: { dispute: CodeReviewDispute
   // evidence that was meant to be there, so it cannot read as quietly as the
   // deliberate "Not run".
   const failed = dispute.reassessment_status === "failed";
-  const attention = dispute.reassessment_flipped || failed;
+  const superseded = dispute.reassessment_status === "superseded";
+  const changed = dispute.reassessment_status === "completed" && dispute.reassessment_flipped === true;
+  const attention = changed || failed;
+  const detail = changed
+    ? "Decision changed"
+    : superseded
+      ? "Review target changed"
+      : failed && !dispute.status_detail
+        ? "Evidence unavailable"
+        : undefined;
   return (
     <StatusLabel
       label={label}
-      detail={dispute.reassessment_flipped ? "Decision changed" : failed ? "Evidence unavailable" : undefined}
+      detail={detail}
       tone={attention ? "warning" : "neutral"}
       indicator={attention ? "dot" : "none"}
     />
@@ -4585,6 +4649,15 @@ function CodeReviewDisputeContextLinks({ dispute }: { dispute: CodeReviewDispute
           <span className="sr-only">(opens in a new tab)</span>
         </Link>
       </Button>
+      {dispute.reassessment_session_id ? (
+        <Button size="sm" variant="link" className="h-auto p-0 text-xs" asChild>
+          <Link href={`/sessions/${dispute.reassessment_session_id}`} target="_blank" rel="noreferrer">
+            View reassessment
+            <SquareArrowOutUpRight aria-hidden="true" className="size-3" />
+            <span className="sr-only">(opens in a new tab)</span>
+          </Link>
+        </Button>
+      ) : null}
     </div>
   );
 }

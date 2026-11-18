@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { parseAsString, useQueryState } from "nuqs";
+import { parseAsBoolean, parseAsString, useQueryState } from "nuqs";
 import { api } from "@/lib/api";
 import { queryKeys } from "@/lib/query-keys";
 import { ReviewRequestDialog } from "./review-request-dialog";
@@ -11,6 +11,8 @@ const sessionIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 /** A GitHub comment link opens a read-only confirmation, never an automatic POST. */
 export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
   const [sessionID, setSessionID] = useQueryState("review_now", parseAsString);
+  const [overrideSizeLimits, setOverrideSizeLimits] = useQueryState("override_size_limits", parseAsBoolean);
+  const [useReviewHistory, setUseReviewHistory] = useQueryState("use_review_history", parseAsBoolean);
   const validID = Boolean(sessionID && sessionIDPattern.test(sessionID));
   const review = useQuery({
     queryKey: ["code-review-link", sessionID],
@@ -23,7 +25,7 @@ export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
     queryFn: () => api.codeReviews.getPolicy(),
     enabled: Boolean(sessionID),
   });
-  const close = () => { void setSessionID(null); };
+  const close = () => { void setSessionID(null); void setOverrideSizeLimits(null); void setUseReviewHistory(null); };
   const target = review.data?.data;
   const available = policy.data?.data.capabilities?.scheduling === true;
   const error = !validID ? "This review link is invalid."
@@ -41,5 +43,9 @@ export function ReviewNowFromComment({ canManage }: { canManage: boolean }) {
     loading={validID && (review.isPending || policy.isPending)}
     error={error}
     unavailable={unavailable}
+    overrideReviewSessionID={policy.data?.data.config?.risk_policy?.allow_size_limit_override === true ? sessionID ?? undefined : undefined}
+    defaultOverrideSizeLimits={overrideSizeLimits === true}
+    reviewHistoryAvailable={policy.data?.data.capabilities?.review_history === true}
+    defaultUseReviewHistory={useReviewHistory === true}
   />;
 }

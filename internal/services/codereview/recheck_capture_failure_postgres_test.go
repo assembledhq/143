@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -44,6 +45,12 @@ func testRecheckCaptureFailure(t *testing.T, pool *pgxpool.Pool, org, repo, pr u
 	now := time.Now().UTC()
 	service.scheduling.now = func() time.Time { return now }
 	captureErr := ErrAssessmentReuseUnavailable
+	if mode == "invalid guidance" {
+		captureErr = models.ErrInvalidCodeReviewGuidanceFile
+	}
+	if mode == "incomplete guidance" {
+		captureErr = fmt.Errorf("default branch guidance: %w", models.ErrIncompleteCodeReviewGuidance)
+	}
 	captures := 0
 	service.SetAssessmentContinuation(recheckCaptureFunc(func(context.Context, AssessmentInputCaptureRequest) (AssessmentInputCaptureResult, error) {
 		captures++

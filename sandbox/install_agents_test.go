@@ -2,10 +2,19 @@ package sandbox_test
 
 import (
 	"os"
+	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestPinnedNodeToolchainInstaller(t *testing.T) {
+	t.Parallel()
+	python, err := exec.LookPath("python3")
+	require.NoError(t, err, "Python must be available for sandbox build validation")
+	output, err := exec.Command(python, "-B", "-m", "unittest", "discover", "-s", ".", "-p", "install_node_toolchains_test.py").CombinedOutput()
+	require.NoError(t, err, "pinned toolchains must reject corrupt distributions and unexpected versions: %s", output)
+}
 
 func TestSandboxDockerfileVerifiesOpenCodeInstall(t *testing.T) {
 	t.Parallel()

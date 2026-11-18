@@ -24,6 +24,162 @@ import (
 	"github.com/assembledhq/143/internal/services/github/ratelimit"
 )
 
+func TestWebhookPullRequestCheckRefreshAdmissionBeforeGitHub(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		reason    PullRequestSyncReason
+		noCache   bool
+		occupied  bool
+		wantErr   error
+		wantReads int
+	}{
+		{name: "available slot permits the read", reason: PullRequestSyncReasonIncomplete, wantErr: io.ErrUnexpectedEOF, wantReads: 1},
+		{name: "occupied slot defers before fetching", reason: PullRequestSyncReasonIncomplete, occupied: true, wantErr: ErrPullRequestCheckRefreshDeferred},
+		{name: "missing Redis defers before fetching", reason: PullRequestSyncReasonIncomplete, noCache: true, wantErr: ErrPullRequestCheckRefreshDeferred},
+		{name: "occupied slot does not delay code review", reason: PullRequestSyncReasonCodeReview, occupied: true, wantErr: io.ErrUnexpectedEOF, wantReads: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var client *cache.Client
+			if !tt.noCache {
+				redis := miniredis.RunT(t)
+				client = cache.New(cache.Config{Topology: "standalone", URL: "redis://" + redis.Addr()}, zerolog.Nop(), nil)
+				t.Cleanup(func() { require.NoError(t, client.Close(), "check refresh cache should close") })
+			}
+			const installationID = 42
+			controller, err := ratelimit.NewController(ratelimit.Config{Mode: ratelimit.ModeOff, AppID: 1, Cache: client, Logger: zerolog.Nop()})
+			require.NoError(t, err, "the controller should start with provider cooldown disabled")
+			ctx := WithPullRequestSyncReason(context.Background(), tt.reason)
+			if tt.occupied {
+				admitted, err := controller.AdmitCheckRefresh(ctx, installationID)
+				require.NoError(t, err, "the other refresh should reserve the installation slot")
+				require.True(t, admitted, "an unoccupied slot should be granted")
+			}
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "the isolated sync database should start")
+			t.Cleanup(mock.Close)
+			orgID, prID, repoID := uuid.New(), uuid.New(), uuid.New()
+			const repo = "example/budgeted"
+			row := newPRTestRow(prID, nil, orgID, repo, time.Now().UTC(), nil)
+			databaseReads := 1
+			if tt.reason == PullRequestSyncReasonIncomplete {
+				databaseReads++
+			}
+			for range databaseReads {
+				mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
+					WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(row...))
+			}
+			expectReconciliationRepository(mock, orgID, repoID, repo, installationID, false)
+			if tt.wantReads > 0 {
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
+				mock.ExpectQuery("SELECT nextval").WillReturnRows(pgxmock.NewRows([]string{"nextval"}).AddRow(int64(1)))
+				mock.ExpectCommit()
+			}
+			requests := 0
+			service := &PRService{
+				backgroundQuotaController: controller, cachedResolver: identity.NewResolver(reconciliationTokenSource{}, zerolog.Nop()),
+				pullRequests: db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), logger: zerolog.Nop(),
+				httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					requests++
+					return nil, io.ErrUnexpectedEOF
+				})},
+			}
+
+			err = service.SyncPullRequestState(ctx, orgID, prID)
+			require.ErrorIs(t, err, tt.wantErr, "the check refresh should either defer locally or attempt GitHub")
+			require.Equal(t, tt.wantReads, requests, "only an admitted refresh may spend GitHub calls")
+			require.NoError(t, mock.ExpectationsWereMet(), "denied refreshes should leave authoritative health untouched")
+		})
+	}
+}
+
+func TestWebhookPullRequestCheckRefreshRevalidatesBeforeAdmission(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		checkName  string
+		mergeState models.PullRequestMergeState
+		wantRead   bool
+	}{
+		{name: "known check skips GitHub and preserves the slot", checkName: "Build", mergeState: models.PullRequestMergeStateClean},
+		{name: "unprojected new check needs verification", checkName: "New Test", mergeState: models.PullRequestMergeStateClean, wantRead: true},
+		{name: "pending mergeability still needs verification with complete checks", mergeState: models.PullRequestMergeStateMergeabilityPending, wantRead: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			redis := miniredis.RunT(t)
+			client := cache.New(cache.Config{Topology: "standalone", URL: "redis://" + redis.Addr()}, zerolog.Nop(), nil)
+			t.Cleanup(func() { require.NoError(t, client.Close(), "check refresh cache should close") })
+			const installationID = 42
+			controller, err := ratelimit.NewController(ratelimit.Config{Mode: ratelimit.ModeOff, AppID: 1, Cache: client, Logger: zerolog.Nop()})
+			require.NoError(t, err, "the isolated controller should start")
+			mock, err := pgxmock.NewPool()
+			require.NoError(t, err, "the isolated sync database should start")
+			t.Cleanup(mock.Close)
+			orgID, prID := uuid.New(), uuid.New()
+			const repo = "example/budgeted"
+			head := "current-head"
+			now := time.Now().UTC()
+			row := newPRTestRow(prID, nil, orgID, repo, now, nil)
+			row[12], row[15], row[19], row[20] = &head, tt.mergeState, &now, int64(1)
+			prArgs := pgx.NamedArgs{"org_id": orgID, "id": prID}
+			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").WithArgs(prArgs).
+				WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(row...))
+			snapshot := []byte(`{"check_set_complete":true,"checks":[{"name":"Build","provider":"github-actions"}]}`)
+			mock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+				WillReturnRows(pgxmock.NewRows(prHealthCurrentTestColumns).AddRow(prID, orgID, int64(1), head, "base", snapshot, snapshot,
+					models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(5), now, now))
+			if tt.checkName != "" {
+				mock.ExpectQuery("FROM pull_request_check_states").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "head_sha": head, "after_version": int64(5)}).
+					WillReturnRows(pgxmock.NewRows([]string{"org_id", "pull_request_id", "head_sha", "source", "external_key", "name", "category", "status", "provider", "details_url", "summary", "provider_event_id", "provider_sequence", "provider_updated_at", "projection_version", "created_at", "updated_at"}).
+						AddRow(orgID, prID, head, models.PullRequestCheckSourceCheckRun, "build", tt.checkName, models.PullRequestCheckCategoryBuild,
+							models.PullRequestCheckStatusPassed, "github-actions", "", "", "", int64(1), now, int64(6), now, now))
+			}
+			if tt.wantRead {
+				mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").WithArgs(prArgs).
+					WillReturnRows(pgxmock.NewRows(prTestPullRequestColumns).AddRow(row...))
+				expectReconciliationRepository(mock, orgID, uuid.New(), repo, installationID, false)
+				mock.ExpectBegin()
+				mock.ExpectQuery("SELECT id[\\s\\S]+FOR UPDATE").WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+					WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(prID))
+				mock.ExpectQuery("SELECT nextval").WillReturnRows(pgxmock.NewRows([]string{"nextval"}).AddRow(int64(7)))
+				mock.ExpectCommit()
+			}
+			requests := 0
+			service := &PRService{
+				backgroundQuotaController: controller, cachedResolver: identity.NewResolver(reconciliationTokenSource{}, zerolog.Nop()),
+				pullRequests: db.NewPullRequestStore(mock), repos: db.NewRepositoryStore(mock), logger: zerolog.Nop(),
+				httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					requests++
+					return nil, io.ErrUnexpectedEOF
+				})},
+			}
+			ctx := WithPullRequestSyncReason(t.Context(), PullRequestSyncReasonIncomplete)
+			err = service.SyncPullRequestState(ctx, orgID, prID)
+			if tt.wantRead {
+				require.ErrorIs(t, err, io.ErrUnexpectedEOF, "outstanding verification should reach GitHub after admission")
+				require.Equal(t, 1, requests, "outstanding verification should make the initial PR request")
+			} else {
+				require.NoError(t, err, "covered check work should complete as a no-op")
+				require.Zero(t, requests, "covered check work should never reach GitHub")
+			}
+			admitted, err := controller.AdmitCheckRefresh(ctx, installationID)
+			require.NoError(t, err, "inspect whether the worker spent the refresh slot")
+			require.Equal(t, !tt.wantRead, admitted, "only outstanding verification should spend an installation slot")
+			require.NoError(t, mock.ExpectationsWereMet(), "the job should inspect durable coverage before admission")
+		})
+	}
+}
+
 func newPRHealthQuotaController(t *testing.T) *ratelimit.Controller {
 	t.Helper()
 	return newPRHealthQuotaControllerForInstallation(t, 42, 10)

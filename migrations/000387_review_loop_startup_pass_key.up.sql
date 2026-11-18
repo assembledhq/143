@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX CONCURRENTLY idx_srl_passes_org_session_loop_id ON session_review_loop_passes(org_id,session_id,loop_id,id);

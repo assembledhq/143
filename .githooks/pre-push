@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Git supplies every outgoing ref update on stdin. Never consume it first.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+exec python3 scripts/preflight.py --push

@@ -302,9 +302,9 @@ fi
 if [ -d .git ] || git rev-parse --git-dir >/dev/null 2>&1; then
   existing_hooks_path=$(git config --get core.hooksPath 2>/dev/null || true)
   if [ -z "$existing_hooks_path" ] || [ "$existing_hooks_path" = ".githooks" ]; then
-    info "Installing git pre-commit hooks (tenancy lints + gofmt)..."
-    git config core.hooksPath .githooks
-    info "Hooks installed. Skip a commit's hooks with: git commit --no-verify"
+    info "Installing commit and push hooks..."
+    make hooks-install
+    info "Hooks verified (commit guardrails and push preflight)."
   else
     warn "core.hooksPath is already set to '$existing_hooks_path' — leaving alone."
     warn "To use 143's hooks, run: git config core.hooksPath .githooks"

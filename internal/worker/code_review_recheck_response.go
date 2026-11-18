@@ -236,13 +236,15 @@ func (v codeReviewCitationVerifier) check(citations []models.CodeReviewEvidenceC
 	if len(citations) == 0 || len(citations) > 8 {
 		return checked, errors.New("evidence citations must contain one to eight sources")
 	}
-	seen := make(map[string]bool, len(citations))
+	// Different exact quotes can support distinct claims from one text source.
+	// Reject duplicate citations, rather than repeated source identities.
+	seen := make(map[models.CodeReviewEvidenceCitation]bool, len(citations))
 	for _, citation := range citations {
 		id := citation.EvidenceID
-		if id == "" || id != strings.TrimSpace(id) || seen[id] {
+		if id == "" || id != strings.TrimSpace(id) || seen[citation] {
 			return checked, errors.New("duplicate or empty evidence citation")
 		}
-		seen[id] = true
+		seen[citation] = true
 		image, isImage := v.visual[id]
 		item, isText := v.text[id]
 		if isImage == isText {

@@ -152,6 +152,18 @@ func (s *FailureService) classifyFailure(run *models.Session) *FailureSummary {
 		}
 	}
 
+	// An explicit model-capacity response is more specific than the MCP
+	// transport shutdown diagnostics that can accompany the failed invocation.
+	if IsUpstreamModelCapacityError(errorMsg) {
+		return &FailureSummary{
+			Explanation:  "The selected model could not complete the run because it is temporarily at capacity.",
+			Category:     FailureCategoryTooling,
+			SubType:      "model_capacity",
+			NextSteps:    []string{"Wait a few minutes and retry the run", "Check the model provider's status page if capacity failures persist"},
+			RetryAdvised: true,
+		}
+	}
+
 	// 4. Upstream transport failure reaching the agent's model backend. These
 	// are connection-level failures sending the request (DNS, TLS, egress, or a
 	// dropped response stream) rather than HTTP error responses, so they surface
@@ -253,13 +265,22 @@ func (s *FailureService) UpdateRunWithFailure(ctx context.Context, orgID, runID 
 // IsUpstreamTransportError reports whether an error string describes a
 // connection-level failure reaching the agent's model backend (DNS, TLS,
 // egress, or a dropped response stream) rather than an HTTP error response.
-// Shared by classifyFailure and the codex adapter's abnormal-exit logging so
-// both recognize the same transport-blip shape from a single source of truth.
+// An explicit model-capacity response takes precedence over incidental MCP
+// shutdown diagnostics. Shared by classification and abnormal-exit logging.
 func IsUpstreamTransportError(errorMsg string) bool {
+	if IsUpstreamModelCapacityError(errorMsg) {
+		return false
+	}
 	return containsAny(strings.ToLower(errorMsg),
 		"error sending request for url",
 		"stream disconnected before completion",
 		"transport channel closed")
+}
+
+// IsUpstreamModelCapacityError reports an explicit model-capacity response,
+// rather than sandbox capacity or a credential health failure.
+func IsUpstreamModelCapacityError(errorMsg string) bool {
+	return containsAny(strings.ToLower(errorMsg), "model is at capacity", "model is overloaded")
 }
 
 // containsAny checks if s contains any of the given substrings.

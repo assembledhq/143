@@ -235,12 +235,19 @@ type CodeReviewHandler struct {
 	disputes                     codeReviewDisputeService
 	policyHistory                codeReviewPolicyHistoryService
 	conditionalRecheckCapability bool
+	reviewHistoryCapability      bool
 }
 
 // SetContinuationCapabilities is wired from the server's staged rollout
 // flags. Assessment capture alone does not expose the recheck action.
 func (h *CodeReviewHandler) SetContinuationCapabilities(assessmentsEnabled, rechecksEnabled bool) {
 	h.conditionalRecheckCapability = assessmentsEnabled && rechecksEnabled
+}
+
+// SetReviewHistoryCapability exposes the opt-in only after supporting workers
+// have been deployed and the installation's rollout flag is enabled.
+func (h *CodeReviewHandler) SetReviewHistoryCapability(enabled bool) {
+	h.reviewHistoryCapability = enabled
 }
 
 func (h *CodeReviewHandler) SetAuditEmitter(audit *db.AuditEmitter) { h.audit = audit }
@@ -989,7 +996,8 @@ func (h *CodeReviewHandler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	scheduler, ok := h.retryService.(codeReviewSchedulingService)
 	resolved.Capabilities = map[string]bool{"scheduling": ok && scheduler.SchedulingEnabled(),
-		"conditional_recheck": h.conditionalRecheckCapability, "automatic_evidence_recheck": false}
+		"conditional_recheck": h.conditionalRecheckCapability, "automatic_evidence_recheck": false,
+		"review_history": h.reviewHistoryCapability}
 	writeJSON(w, http.StatusOK, models.SingleResponse[models.CodeReviewResolvedPolicy]{Data: resolved})
 }
 

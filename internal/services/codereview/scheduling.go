@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -116,14 +117,34 @@ func reviewRequestHash(prID uuid.UUID, mode models.CodeReviewRequestMode, contex
 }
 
 type ScheduleRequestInput struct {
-	OrgID          uuid.UUID
-	PullRequestID  uuid.UUID
-	RequestID      uuid.UUID
-	RequesterID    *uuid.UUID
-	Mode           models.CodeReviewRequestMode
-	Reason         string
-	RequestContext *ReviewRequestContext
-	TriggerSource  models.CodeReviewTriggerSource
+	OrgID                   uuid.UUID
+	PullRequestID           uuid.UUID
+	RequestID               uuid.UUID
+	RequesterID             *uuid.UUID
+	Mode                    models.CodeReviewRequestMode
+	Reason                  string
+	RequestContext          *ReviewRequestContext
+	TriggerSource           models.CodeReviewTriggerSource
+	OverrideSizeLimits      bool
+	OverrideReviewSessionID *uuid.UUID
+	UseReviewHistory        bool
+}
+
+// ValidateSizeLimitOverride requires an override to identify its source review.
+func (req ScheduleRequestInput) ValidateSizeLimitOverride() error {
+	if !req.OverrideSizeLimits {
+		if req.OverrideReviewSessionID != nil {
+			return errors.New("override_review_session_id requires override_size_limits")
+		}
+		return nil
+	}
+	if req.Mode != models.CodeReviewReviewNow {
+		return errors.New("override_size_limits requires review_now")
+	}
+	if req.OverrideReviewSessionID == nil || *req.OverrideReviewSessionID == uuid.Nil {
+		return errors.New("override_size_limits requires override_review_session_id")
+	}
+	return nil
 }
 
 type ScheduleRequestResult struct {
@@ -136,6 +157,7 @@ type ScheduleRequestResult struct {
 }
 
 var ErrReviewIneligible = errors.New("pull request is not eligible for review")
+var ErrStaleSizeLimitOverride = errors.New("linked review does not match the current pull request comparison")
 var errScheduleSnapshotUnavailable = errors.New("review scheduling snapshot unavailable")
 
 func (s *Service) GetSchedule(ctx context.Context, orgID, prID uuid.UUID) (models.CodeReviewPRState, error) {
@@ -165,6 +187,12 @@ func (s *Service) GetSchedule(ctx context.Context, orgID, prID uuid.UUID) (model
 func (s *Service) RequestScheduledReview(ctx context.Context, req ScheduleRequestInput) (ScheduleRequestResult, error) {
 	if err := req.Mode.Validate(); err != nil {
 		return ScheduleRequestResult{}, err
+	}
+	if err := req.ValidateSizeLimitOverride(); err != nil {
+		return ScheduleRequestResult{}, err
+	}
+	if req.UseReviewHistory && req.Mode != models.CodeReviewReviewNow {
+		return ScheduleRequestResult{}, errors.New("use_review_history requires review_now")
 	}
 	if req.RequestID == uuid.Nil {
 		return ScheduleRequestResult{}, fmt.Errorf("request_id is required")
@@ -207,6 +235,27 @@ func (s *Service) RequestScheduledReview(ctx context.Context, req ScheduleReques
 	return ScheduleRequestResult{RequestID: req.RequestID, SessionID: sessionID, Disposition: disposition, Schedule: state}, err
 }
 
+// scheduledSessionStore retains the transaction-scoped store's existing reads
+// and row-only updates, but creation must not enter its transaction-owning wrapper.
+type scheduledSessionStore struct {
+	*db.SessionStore
+	tx pgx.Tx
+}
+
+func (s *scheduledSessionStore) Create(ctx context.Context, session *models.Session) error {
+	if s == nil || s.tx == nil {
+		return errors.New("scheduled session create: nil transaction")
+	}
+	value := reflect.ValueOf(s.tx)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return errors.New("scheduled session create: nil transaction")
+		}
+	}
+	return s.SessionStore.CreateInTx(ctx, s.tx, session)
+}
+
 func (s *Service) transactionalService(tx pgx.Tx) *Service {
 	scoped := *s
 	scoped.scheduling = nil
@@ -214,7 +263,7 @@ func (s *Service) transactionalService(tx pgx.Tx) *Service {
 	metadata := db.NewCodeReviewStore(tx)
 	scoped.metadata = metadata
 	scoped.policies = metadata
-	scoped.sessions = db.NewSessionStore(tx)
+	scoped.sessions = &scheduledSessionStore{SessionStore: db.NewSessionStore(tx), tx: tx}
 	scoped.jobs = db.NewJobStore(tx)
 	scoped.pullRequests = db.NewPullRequestStore(tx)
 	// Notifications before commit are unsafe; polling recovers session updates.
@@ -385,6 +434,16 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		if requesterID != nil && snapshot.State != "open" {
 			return ErrReviewIneligible
 		}
+		if input.ExplicitRequest && input.RequestContext != nil && input.RequestContext.OverrideReviewSessionID != nil {
+			if err := scoped.validateSizeLimitOverrideSource(ctx, input, snapshot); err != nil {
+				return err
+			}
+			// The source is part of the request identity. Subsequent refreshes
+			// and retries use the comparison bound below.
+			request := *input.RequestContext
+			request.OverrideReviewSessionID = nil
+			input.RequestContext = &request
+		}
 		if latestErr == nil {
 			if err := adoptLegacyScheduledSession(ctx, tx, state, latest, snapshot.BaseRef, now); err != nil {
 				return err
@@ -450,6 +509,9 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		if err != nil {
 			return err
 		}
+		if input.ExplicitRequest {
+			input.RequestContext = bindSizeLimitOverrideToComparison(input.RequestContext, snapshot)
+		}
 		// Automated updates move the target but preserve a pending explicit request.
 		if pending.Input.ExplicitRequest && !input.ExplicitRequest {
 			input.ExplicitRequest = true
@@ -490,6 +552,9 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 		force = force || (requestID != uuid.Nil && input.ChangeReason == explicitReviewRequestChangeReason &&
 			input.TriggerSource == models.CodeReviewTriggerSourceTeamReviewer && latestErr == nil &&
 			latest.Status == models.CodeReviewSessionStatusCompleted)
+		// A new opt-in request must be able to retrieve the latest completed round.
+		force = force || (requestID != uuid.Nil && input.RequestContext != nil && input.RequestContext.UseReviewHistory &&
+			latestErr == nil && latest.Status == models.CodeReviewSessionStatusCompleted)
 		if input.ExplicitRequest && latestErr == nil && latest.HeadSHA == snapshot.HeadSHA {
 			var hasResults bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM code_review_agent_results WHERE org_id=$1 AND session_id=$2)`, input.OrgID, latest.SessionID).Scan(&hasResults); err != nil {
@@ -646,6 +711,32 @@ func (s *Service) refreshSchedule(ctx context.Context, input ReviewChangedInput,
 	}
 
 	return result, nil
+}
+
+func (s *Service) validateSizeLimitOverrideSource(ctx context.Context, input ReviewChangedInput, snapshot ghservice.CodeReviewPullRequestSnapshot) error {
+	sourceID := *input.RequestContext.OverrideReviewSessionID
+	source, err := s.metadata.GetBySessionID(ctx, input.OrgID, sourceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrStaleSizeLimitOverride
+	}
+	if err != nil {
+		return fmt.Errorf("read size limit override source: %w", err)
+	}
+	if source.PullRequestID != input.PullRequestID || source.RepositoryID != input.RepositoryID ||
+		source.HeadSHA == "" || source.HeadSHA != snapshot.HeadSHA || source.BaseSHA == "" || source.BaseSHA != snapshot.BaseSHA {
+		return ErrStaleSizeLimitOverride
+	}
+	session, err := s.sessions.GetByID(ctx, input.OrgID, sourceID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrStaleSizeLimitOverride
+	}
+	if err != nil {
+		return fmt.Errorf("read size limit override source comparison: %w", err)
+	}
+	if baseRef := codeReviewRevisionContextString(session.RevisionContext, "base_ref"); baseRef == "" || baseRef != snapshot.BaseRef {
+		return ErrStaleSizeLimitOverride
+	}
+	return nil
 }
 
 func (s *Service) cancelStaleScheduledThreads(ctx context.Context, orgID, prID uuid.UUID) error {
@@ -902,7 +993,7 @@ func (s *Service) ReconcileSchedule(ctx context.Context, wake models.CodeReviewS
 			return wait(at)
 		}
 		in := intent.Input
-		requested := ReviewRequestedInput{OrgID: in.OrgID, RepositoryID: in.RepositoryID, PullRequestID: in.PullRequestID, GitHubRepo: in.GitHubRepo, GitHubPRNumber: in.GitHubPRNumber, GitHubPRURL: in.GitHubPRURL, PullRequestTitle: in.PullRequestTitle, PullRequestAuthor: in.PullRequestAuthor, BaseSHA: in.BaseSHA, HeadSHA: in.HeadSHA, FromFork: in.FromFork, RequestedLogin: in.RequestedReviewerLogin, RequestedTeam: in.RequestedTeamSlug, RequestContext: in.RequestContext, DeliveryID: in.GitHubDeliveryID}
+		requested := ReviewRequestedInput{OrgID: in.OrgID, RepositoryID: in.RepositoryID, PullRequestID: in.PullRequestID, GitHubRepo: in.GitHubRepo, GitHubPRNumber: in.GitHubPRNumber, GitHubPRURL: in.GitHubPRURL, PullRequestTitle: in.PullRequestTitle, PullRequestAuthor: in.PullRequestAuthor, BaseSHA: in.BaseSHA, BaseRef: current.BaseRef, HeadSHA: in.HeadSHA, FromFork: in.FromFork, RequestedLogin: in.RequestedReviewerLogin, RequestedTeam: in.RequestedTeamSlug, RequestContext: in.RequestContext, DeliveryID: in.GitHubDeliveryID}
 		source := in.TriggerSource
 		if source == "" {
 			source = models.CodeReviewTriggerSourceAutoPolicy

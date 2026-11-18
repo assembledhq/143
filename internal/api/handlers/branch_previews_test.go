@@ -126,7 +126,7 @@ var branchPreviewStartupCacheTestCols = []string{
 
 var branchPreviewNodeTestCols = []string{
 	"id", "mode", "host", "status", "drain_intent", "metadata", "started_at", "last_heartbeat_at",
-	"drain_requested_at", "drain_budget_expires_at", "drain_requested_by", "drain_reason",
+	"drain_requested_at", "drain_budget_expires_at", "drain_requested_by", "drain_reason", "lifecycle_writer_version",
 }
 
 func (f fakeBranchPreviewGitHub) GetInstallationToken(context.Context, int64) (string, error) {
@@ -1123,7 +1123,7 @@ func TestBranchPreviewHandler_StartLatestRollsBackReservationWhenJobDedupeConfli
 		WillReturnRows(pgxmock.NewRows(branchPreviewInstanceTestCols))
 	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(pgxmock.NewRows(branchPreviewNodeTestCols).AddRow(
-			workerID, models.NodeModeWorker, "worker-1.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata, now, now, nil, nil, "", "",
+			workerID, models.NodeModeWorker, "worker-1.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata, now, now, nil, nil, "", "", 0,
 		))
 	mock.ExpectQuery("SELECT worker_node_id, COUNT").
 		WithArgs(branchPreviewAnyArgs(1)...).
@@ -2875,7 +2875,7 @@ func TestBranchPreviewHandler_SelectWorkerForRestart_DegradesWhenSnapshotWorkerA
 		WithArgs(branchPreviewAnyArgs(1)...).
 		WillReturnRows(
 			pgxmock.NewRows(branchPreviewNodeTestCols).
-				AddRow(warmWorker, models.NodeModeWorker, "warm.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://warm.local"), now, now, nil, nil, "", ""),
+				AddRow(warmWorker, models.NodeModeWorker, "warm.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://warm.local"), now, now, nil, nil, "", "", 0),
 		)
 	mock.ExpectQuery("SELECT[\\s\\S]+user_standalone[\\s\\S]+worker_total").
 		WithArgs(branchPreviewAnyArgs(3)...).
@@ -2883,8 +2883,8 @@ func TestBranchPreviewHandler_SelectWorkerForRestart_DegradesWhenSnapshotWorkerA
 	mock.ExpectQuery("SELECT .+ FROM nodes WHERE status = 'active' AND drain_intent = 'none' ORDER BY id ASC").
 		WillReturnRows(
 			pgxmock.NewRows(branchPreviewNodeTestCols).
-				AddRow(warmWorker, models.NodeModeWorker, "warm.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://warm.local"), now, now, nil, nil, "", "").
-				AddRow(fallbackWorker, models.NodeModeWorker, "fallback.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://fallback.local"), now, now, nil, nil, "", ""),
+				AddRow(warmWorker, models.NodeModeWorker, "warm.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://warm.local"), now, now, nil, nil, "", "", 0).
+				AddRow(fallbackWorker, models.NodeModeWorker, "fallback.local", models.NodeStatusActive, models.DrainIntentNone, workerMetadata("http://fallback.local"), now, now, nil, nil, "", "", 0),
 		)
 	mock.ExpectQuery("SELECT worker_node_id, COUNT").
 		WithArgs(branchPreviewAnyArgs(1)...).

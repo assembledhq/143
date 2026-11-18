@@ -201,6 +201,7 @@ export interface CodeReviewPolicyConfig {
     blocked_path_patterns?: string[];
     require_up_to_date: boolean;
     allow_forks: boolean;
+    allow_size_limit_override?: boolean;
     eligible_authors?: string[];
     eligible_author_teams?: string[];
     required_checks?: string[];
@@ -231,7 +232,7 @@ export interface CodeReviewPolicyRecord extends CodeReviewPolicyConfig {
 }
 
 export interface CodeReviewResolvedPolicy {
-  capabilities?: { scheduling?: boolean; conditional_recheck?: boolean; automatic_evidence_recheck?: boolean };
+  capabilities?: { scheduling?: boolean; conditional_recheck?: boolean; automatic_evidence_recheck?: boolean; review_history?: boolean };
   config: CodeReviewPolicyConfig;
   source: "default" | "organization" | "repository" | string;
   policy?: CodeReviewPolicyRecord;
@@ -584,6 +585,7 @@ export interface CodeReviewAnalytics {
 }
 
 export type CodeReviewPhase =
+  | "preparing_workspace"
   | "syncing_github"
   | "waiting_for_github"
   | "reviewing"
@@ -717,7 +719,7 @@ export interface CodeReviewEvidence {
 export type CodeReviewDisputeDirection = "should_have_approved" | "should_not_have_approved";
 export type CodeReviewDisputeRouting = "reassess" | "policy_signal_only" | "answer_only" | "not_a_dispute" | "review_request";
 export type CodeReviewDisputeIntakeStatus = "pending" | "triaged" | "discarded" | "failed";
-export type CodeReviewDisputeReassessmentStatus = "not_requested" | "queued" | "running" | "completed" | "deduped" | "failed";
+export type CodeReviewDisputeReassessmentStatus = "not_requested" | "queued" | "running" | "completed" | "deduped" | "failed" | "superseded";
 export type CodeReviewDisputeAdjudicationStatus = "pending" | "upheld" | "rejected" | "expired" | "needs_context";
 
 export interface CodeReviewDispute {
@@ -4071,4 +4073,25 @@ export interface CodeReviewSchedule {
 }
 export interface CodeReviewScheduledTarget {
  schedule: CodeReviewSchedule; title: string; github_pr_url: string; github_pr_number: number; github_repo: string;
+}
+
+export interface PackageRegistryCredentialSummary {
+  id: string;
+  repository_id: string;
+  registry_url: string;
+  package_scope: string;
+  revision: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PackageRegistryCredentialCreateRequest {
+  registry_url: string;
+  package_scope: string;
+  token: string;
+}
+
+export interface PackageRegistryCredentialRotateRequest {
+  expected_revision: string;
+  token: string;
 }

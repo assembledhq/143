@@ -17,6 +17,7 @@ import (
 	"github.com/assembledhq/143/internal/db"
 	"github.com/assembledhq/143/internal/jobctx"
 	"github.com/assembledhq/143/internal/models"
+	"github.com/assembledhq/143/internal/observability"
 	"github.com/google/uuid"
 )
 
@@ -235,9 +236,26 @@ with pathlib.Path(str(marker) + ".lock").open("a") as lock:
 `
 
 func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
+	return o.prepareCodeReviewInputs(ctx, session, sandbox, true)
+}
+
+// prepareColdCodeReviewInputs is only for a newly cloned, unpublished sandbox.
+// Prepare and hydrate missing evidence in one private attempt, resolving current
+// credentials immediately before hydration. Expired budgets permit only verification.
+func (o *Orchestrator) prepareColdCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox) error {
+	return o.prepareCodeReviewInputs(ctx, session, sandbox, false)
+}
+
+func (o *Orchestrator) prepareCodeReviewInputs(ctx context.Context, session *models.Session, sandbox *Sandbox, verifyExisting bool) (returnErr error) {
 	if session == nil || session.Origin != models.SessionOriginCodeReview {
 		return nil
 	}
+	log := o.logger.With().Str("org_id", session.OrgID.String()).Str("session_id", session.ID.String()).Logger()
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
+		log = log.With().Str("job_id", jobID.String()).Logger()
+	}
+	stage := observability.BeginStage(true, log, "review_inputs_ensure")
+	defer func() { stage.End(observability.StageOutcome(ctx, returnErr)) }()
 	identity, err := codeReviewInputIdentityFromSession(session)
 	if err != nil {
 		return err
@@ -258,38 +276,60 @@ func (o *Orchestrator) ensureCodeReviewInputs(ctx context.Context, session *mode
 	defer cancel()
 	var started atomic.Bool
 	manifestPath, _ := CodeReviewInputPaths(identity.OrgID, identity.SessionID, identity.RepositoryID, identity.Repository, identity.BaseSHA, identity.HeadSHA)
-	result := o.reviewInputsGroup.DoChan(sandbox.ID+":"+manifestPath, func() (any, error) {
+	result := o.reviewInputsGroup.DoChan(sandbox.ID+":"+manifestPath, func() (_ any, ownerErr error) {
 		started.Store(true)
+		ownerStage := observability.BeginStage(true, log, "review_inputs_prepare")
+		defer func() { ownerStage.End(observability.StageOutcome(prepareCtx, ownerErr)) }()
 		repo, err := o.repositories.GetByID(prepareCtx, identity.OrgID, identity.RepositoryID)
 		if err != nil {
 			return nil, codeReviewInputAvailabilityError(prepareCtx, "load shared review input repository", err)
 		}
-		exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, true)
+		setupConfig, err := o.readPackageSetupConfig(prepareCtx, sandbox, sandbox.WorkDir)
+		if err != nil {
+			return nil, err
+		}
+		packageCtx := prepareCtx
 		if verifyOnly {
-			if err != nil || exit != 0 {
-				return nil, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, errors.Join(context.DeadlineExceeded, err))
+			packageCtx = context.WithValue(prepareCtx, packageSetupVerifyOnlyKey{}, true)
+		}
+		if _, err := o.preparePackageRegistryDependencies(packageCtx, session, sandbox, setupConfig); err != nil {
+			return nil, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageDependencySetup, err)
+		}
+		if verifyExisting || verifyOnly {
+			exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, true)
+			if verifyOnly {
+				if err != nil || exit != 0 {
+					return nil, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, errors.Join(context.DeadlineExceeded, err))
+				}
+				return nil, nil
 			}
-			return nil, nil
-		}
-		if err != nil || exit != 42 {
-			if err != nil {
-				return nil, err
+			if err != nil || exit != 42 {
+				if err != nil {
+					return nil, err
+				}
+				return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
 			}
-			return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
 		}
-		exit, err = o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, false)
-		if err != nil || exit != 42 {
-			if err != nil {
-				return nil, err
+		_, trusted := o.provider.(reviewPreparationTrustedStdinExecutor)
+		_, stdin := o.provider.(reviewPreparationStdinExecutor)
+		directHydration := !verifyExisting && (trusted || stdin) && o.github != nil && strings.TrimSpace(repo.CloneURL) != ""
+		if !directHydration {
+			exit, err := o.runCodeReviewInputPreparation(prepareCtx, sandbox, identity, repo.CloneURL, "", false, false)
+			if err != nil || exit != 42 {
+				if err != nil {
+					return nil, err
+				}
+				return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
 			}
-			return nil, o.finishCodeReviewInputPreparation(prepareCtx, session, sandbox, identity)
+			if o.github == nil {
+				return nil, fmt.Errorf("code review inputs incomplete: missing commits or merge-base history")
+			}
+			if strings.TrimSpace(repo.CloneURL) == "" {
+				return nil, fmt.Errorf("code review inputs incomplete: repository clone URL unavailable")
+			}
 		}
-		if o.github == nil {
-			return nil, fmt.Errorf("code review inputs incomplete: missing commits or merge-base history")
-		}
-		if strings.TrimSpace(repo.CloneURL) == "" {
-			return nil, fmt.Errorf("code review inputs incomplete: repository clone URL unavailable")
-		}
+		// Setup can outlast the clone token. Resolve it again here so the token
+		// provider can refresh expired credentials before any missing-object fetch.
 		token, err := o.github.GetInstallationToken(prepareCtx, repo.InstallationID)
 		if err != nil {
 			return nil, fmt.Errorf("authenticate shared review input preparation: %w", err)
@@ -351,7 +391,26 @@ func (o *Orchestrator) finishCodeReviewInputPreparation(ctx context.Context, ses
 	return nil
 }
 
-func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbox *Sandbox, identity codeReviewInputIdentity, repoURL, token string, hydrate, verifyOnly bool) (int, error) {
+func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbox *Sandbox, identity codeReviewInputIdentity, repoURL, token string, hydrate, verifyOnly bool) (exitCode int, returnErr error) {
+	log := o.logger.With().Str("org_id", identity.OrgID.String()).Str("session_id", identity.SessionID.String()).Bool("hydrate", hydrate).Bool("verify_only", verifyOnly).Logger()
+	if jobID, ok := jobctx.JobIDFromContext(ctx); ok {
+		log = log.With().Str("job_id", jobID.String()).Logger()
+	}
+	stageName := "review_inputs_local_prepare"
+	if verifyOnly {
+		stageName = "review_inputs_verify"
+	} else if hydrate {
+		stageName = "review_inputs_hydrate"
+	}
+	stage := observability.BeginStage(true, log, stageName)
+	stageCtx := ctx // Internal budget cleanup must not classify a failed attempt as cancellation.
+	defer func() {
+		outcome := observability.StageOutcome(stageCtx, returnErr)
+		if returnErr == nil && exitCode == 42 {
+			outcome = "incomplete"
+		}
+		stage.End(outcome)
+	}()
 	if !verifyOnly {
 		var cancel context.CancelFunc
 		ctx, cancel = codeReviewPreparationContext(ctx)
@@ -376,13 +435,14 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 		}
 	}
 	commandFor := func(hashOnly bool) string {
-		return fmt.Sprintf("cd '%s' && /usr/bin/python3 -I -S -c '%s' '%s' '%s' '%s' '%f' '%t' '%t' '%t'", shellEscapeSingleQuote(sandbox.WorkDir), shellEscapeSingleQuote(prepareCodeReviewInputsScript), shellEscapeSingleQuote(string(encoded)), shellEscapeSingleQuote(path.Dir(manifestPath)), shellEscapeSingleQuote(remote), deadline, verifyOnly, hashOnly, trusted || stdin)
+		return fmt.Sprintf("cd '%s' && /usr/bin/python3 -I -S -c '%s' '%s' '%s' '%s' '%f' '%t' '%t' '%t' 'profile'", shellEscapeSingleQuote(sandbox.WorkDir), shellEscapeSingleQuote(prepareCodeReviewInputsScript), shellEscapeSingleQuote(string(encoded)), shellEscapeSingleQuote(path.Dir(manifestPath)), shellEscapeSingleQuote(remote), deadline, verifyOnly, hashOnly, trusted || stdin)
 	}
 	command := commandFor(false)
 	if trusted || stdin {
 		payload := reviewWorkspacePreparationPayload{
 			WorkDir: sandbox.WorkDir, Standalone: true, PlatformCommand: true,
-			Prepare: command, DeadlineUnix: deadline, CancelPath: reviewPreparationMarkerPath(sandbox),
+			ProfileParent: stageName,
+			Prepare:       command, DeadlineUnix: deadline, CancelPath: reviewPreparationMarkerPath(sandbox),
 			AuthenticateGit: hydrate,
 		}
 		if !verifyOnly {
@@ -397,7 +457,7 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 		if hydrate {
 			auth = reviewGitAuthentication{repoURL, token}
 		}
-		err := o.execReviewPreparationPayload(ctx, sandbox, payload, auth, o.logger)
+		err := o.execReviewPreparationPayload(ctx, sandbox, payload, auth, log)
 		if errors.Is(err, errReviewHydrationRequired) && !errors.Is(err, ErrCodeReviewPreparationCleanup) && !hydrate {
 			return 42, nil
 		}
@@ -413,7 +473,16 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 		return -1, fmt.Errorf("review provider advertises managed preparation without private input support")
 	}
 	var stderr bytes.Buffer
-	exit, execErr := o.provider.Exec(ctx, reviewInputFetchSandbox(sandbox, token), command, io.Discard, &stderr)
+	profile := reviewPreparationProfile{log: log, parent: stageName}
+	start := time.Now()
+	defer func() {
+		outcome := observability.StageOutcome(ctx, returnErr)
+		if returnErr == nil && exitCode == 42 {
+			outcome = "incomplete"
+		}
+		profile.executor(start, outcome)
+	}()
+	exit, execErr := o.provider.Exec(ctx, reviewInputFetchSandbox(sandbox, token), command, &profile, &stderr)
 	if exit == 77 {
 		return exit, NewCodeReviewWorkspacePreparationError(CodeReviewPreparationStageReadiness, errors.Join(ErrCodeReviewPreparationCleanup, ctx.Err()))
 	}
@@ -424,51 +493,6 @@ func (o *Orchestrator) runCodeReviewInputPreparation(ctx context.Context, sandbo
 		return exit, fmt.Errorf("code review inputs incomplete: exit=%d %s", exit, redactGitToken(stderr.String(), token))
 	}
 	return exit, nil
-}
-
-func (o *Orchestrator) checkoutCodeReviewHead(ctx context.Context, sandbox *Sandbox, repoURL, token string, pullNumber int, branch, head string) error {
-	if !reviewCommitPattern.MatchString(head) || branch == "" {
-		return fmt.Errorf("code review checkout requires an exact captured head and working branch")
-	}
-	checkoutCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	command := fmt.Sprintf("git cat-file -e '%s^{commit}'", head)
-	exit, err := o.provider.Exec(checkoutCtx, sandbox, command, io.Discard, io.Discard)
-	if err != nil {
-		return fmt.Errorf("inspect captured review head: %w", err)
-	}
-	if exit != 0 {
-		command = codeReviewFetchCommand(repoURL, head)
-		var stderr bytes.Buffer
-		exit, err = o.provider.Exec(checkoutCtx, reviewInputFetchSandbox(sandbox, token), command, io.Discard, &stderr)
-		if err != nil {
-			return fmt.Errorf("fetch captured review head: %s", redactGitToken(err.Error(), token))
-		}
-		if exit != 0 {
-			stderr.Reset()
-			command = codeReviewFetchCommand(repoURL, fmt.Sprintf("pull/%d/head", pullNumber))
-			exit, err = o.provider.Exec(checkoutCtx, reviewInputFetchSandbox(sandbox, token), command, io.Discard, &stderr)
-			if err != nil || exit != 0 {
-				return fmt.Errorf("captured review head unavailable: exit=%d %s %s", exit, redactGitToken(fmt.Sprint(err), token), redactGitToken(stderr.String(), token))
-			}
-		}
-	}
-	command = fmt.Sprintf("git checkout -B '%s' '%s'", shellEscapeSingleQuote(branch), head)
-	var stderr bytes.Buffer
-	exit, err = o.provider.Exec(checkoutCtx, sandbox, command, io.Discard, &stderr)
-	if err != nil || exit != 0 {
-		return fmt.Errorf("checkout captured review head: exit=%d %v %s", exit, err, stderr.String())
-	}
-	var stdout bytes.Buffer
-	stderr.Reset()
-	exit, err = o.provider.Exec(checkoutCtx, sandbox, "git rev-parse HEAD", &stdout, &stderr)
-	if err != nil || exit != 0 {
-		return fmt.Errorf("verify captured review head: exit=%d %v %s", exit, err, stderr.String())
-	}
-	if actual := strings.TrimSpace(stdout.String()); actual != head {
-		return fmt.Errorf("%w: expected %s, got %s", ErrStalePullRequestHead, head, actual)
-	}
-	return nil
 }
 
 func reviewInputFetchSandbox(sandbox *Sandbox, token string) *Sandbox {
@@ -494,7 +518,7 @@ token = os.environ.get("GH143_REVIEW_FETCH_TOKEN", "")
 if token and remote.startswith("https://"):
     remote = "https://x-access-token:" + urllib.parse.quote(token, safe="") + "@" + remote[8:]
 try:
-    result = subprocess.run(["git", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, ref], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=35, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    result = subprocess.run(["git", "-c", "maintenance.auto=false", "-c", "gc.auto=0", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", remote, ref], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=35, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     sys.exit(result.returncode)
 except subprocess.SubprocessError:
     print("captured review commit fetch timed out", file=sys.stderr)
@@ -502,6 +526,8 @@ except subprocess.SubprocessError:
 `
 
 const prepareCodeReviewInputsScript = `import fcntl, hashlib, json, os, pathlib, select, shutil, stat, subprocess, sys, tempfile, time, urllib.parse
+` + reviewPreparationProfilePython + `
+profile_enabled = len(sys.argv) == 9 and sys.argv[8] == "profile"
 identity = json.loads(sys.argv[1])
 directory = pathlib.Path(sys.argv[2])
 remote = sys.argv[3]
@@ -584,35 +610,55 @@ def verify_captured_objects(merge_base):
     if not isinstance(merge_base, str) or not valid_oid(merge_base.encode()):
         raise ValueError("captured review merge base is invalid")
     processes = []
+    count = 0
+    start = time.monotonic()
     try:
         objects = subprocess.Popen(git_command("rev-list", "--objects", "--no-object-names", "--missing=print", "--no-walk", identity["base_sha"], identity["head_sha"], merge_base), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_environment(), bufsize=0)
         processes.append(objects)
         batch = subprocess.Popen(git_command("cat-file", "--batch"), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=git_environment(), bufsize=0)
         processes.append(batch)
         os.set_blocking(batch.stdin.fileno(), False)
+        # Keep each request within PIPE_BUF: an atomic enqueue cannot leave us
+        # writing more requests while Git is blocked on an unread object body.
+        batch_limit = min(32, os.fpathconf(batch.stdin.fileno(), "PC_PIPE_BUF") // 65)
+        if batch_limit < 1:
+            raise ValueError("captured review object request pipe is too small")
         names, contents = ObjectReader(objects.stdout), ObjectReader(batch.stdout)
         while (oid := names.line()) is not None:
-            if not valid_oid(oid):
+            oids = [oid]
+            # Consume only complete names already read from rev-list. Waiting
+            # for a full batch would delay validation if that producer stalls.
+            while len(oids) < batch_limit and b"\n" in names.buffer:
+                oids.append(names.line())
+            if any(not valid_oid(item) for item in oids):
                 raise ValueError("captured review object is missing or invalid")
-            request = oid + b"\n"
+            request = b"".join(item + b"\n" for item in oids)
             while request:
                 if not select.select([], [batch.stdin.fileno()], [], remaining())[1]:
                     raise TimeoutError("captured review object verification timed out")
-                request = request[os.write(batch.stdin.fileno(), request):]
-            header = contents.line()
-            fields = header.split() if header is not None else []
-            if len(fields) != 3 or fields[0] != oid or fields[1] not in (b"commit", b"tree", b"blob") or not fields[2].isdigit():
-                raise ValueError("captured review object is missing or invalid")
-            size = int(fields[2])
-            digest = hashlib.sha1() if len(oid) == 40 else hashlib.sha256()
-            digest.update(fields[1] + b" " + fields[2] + b"\0")
-            while size:
-                remaining()
-                data = contents.chunk(size)
-                digest.update(data)
-                size -= len(data)
-            if contents.chunk(1) != b"\n" or digest.hexdigest().encode() != oid:
-                raise ValueError("captured review source object hash mismatch")
+                try:
+                    written = os.write(batch.stdin.fileno(), request)
+                except BlockingIOError:
+                    continue
+                if written == 0:
+                    raise ValueError("captured review object request was not written")
+                request = request[written:]
+            for oid in oids:
+                header = contents.line()
+                fields = header.split() if header is not None else []
+                if len(fields) != 3 or fields[0] != oid or fields[1] not in (b"commit", b"tree", b"blob") or not fields[2].isdigit():
+                    raise ValueError("captured review object is missing or invalid")
+                size = int(fields[2])
+                digest = hashlib.sha1() if len(oid) == 40 else hashlib.sha256()
+                digest.update(fields[1] + b" " + fields[2] + b"\0")
+                while size:
+                    remaining()
+                    data = contents.chunk(size)
+                    digest.update(data)
+                    size -= len(data)
+                if contents.chunk(1) != b"\n" or digest.hexdigest().encode() != oid:
+                    raise ValueError("captured review source object hash mismatch")
+            count += len(oids)
         if objects.wait(timeout=remaining()) != 0:
             raise ValueError("captured review object closure is incomplete")
         batch.stdin.close()
@@ -637,6 +683,7 @@ def verify_captured_objects(merge_base):
                         stream.close()
                 except Exception as error:
                     failures.append(error)
+        profile("captured_object_hashing", start, count)
         if failures:
             raise ObjectCleanupError(failures) from original
 
@@ -649,8 +696,11 @@ def digest(file):
         return digest.hexdigest()
 
 def missing_objects(merge_base):
+    start = time.monotonic()
     objects = git("rev-list", "--objects", "--no-object-names", "--missing=print", "--no-walk", identity["base_sha"], identity["head_sha"], merge_base).stdout.decode().splitlines()
-    return [line[1:] for line in objects if line.startswith("?")]
+    missing = [line[1:] for line in objects if line.startswith("?")]
+    profile("missing_enumeration", start, len(missing))
+    return missing
 
 def prepare():
     if verify_only and not os.path.lexists(directory):
@@ -662,31 +712,31 @@ def prepare():
         for file in [directory / "manifest.json", directory / "changes.patch"]:
             if not stat.S_ISREG(file.lstat().st_mode):
                 raise ValueError("prepared review input evidence must be regular")
-    if git("rev-parse", "HEAD").stdout.decode().strip() != identity["head_sha"]:
+    if measured("commit_check", git, "rev-parse", "HEAD").stdout.decode().strip() != identity["head_sha"]:
         raise ValueError("workspace HEAD differs from captured review head")
     if directory.exists():
         manifest = json.loads((directory / "manifest.json").read_text())
         if any(manifest.get(key) != value for key, value in identity.items()):
             raise ValueError("prepared review input identity mismatch")
-        merge_base = git("merge-base", identity["base_sha"], identity["head_sha"]).stdout.decode().strip()
-        if manifest.get("merge_base_sha") != merge_base or manifest.get("patch_sha256") != digest(directory / "changes.patch"):
+        merge_base = measured("merge_base", git, "merge-base", identity["base_sha"], identity["head_sha"]).stdout.decode().strip()
+        if manifest.get("merge_base_sha") != merge_base or manifest.get("patch_sha256") != measured("patch_hashing", digest, directory / "changes.patch"):
             raise ValueError("prepared review input digest or merge base mismatch")
         if verify_only and not managed_verification:
             verify_captured_objects(merge_base)
         return
     for sha in [identity["base_sha"], identity["head_sha"]]:
-        if git("cat-file", "-e", sha + "^{commit}", check=False).returncode != 0:
+        if measured("commit_check", git, "cat-file", "-e", sha + "^{commit}", check=False).returncode != 0:
             if not remote:
                 sys.exit(42)
-            git(*fetch, remote, sha)
-            git("cat-file", "-e", sha + "^{commit}")
-    merge = git("merge-base", identity["base_sha"], identity["head_sha"], check=False)
+            measured("commit_fetch", git, *fetch, remote, sha)
+            measured("commit_check", git, "cat-file", "-e", sha + "^{commit}")
+    merge = measured("merge_base", git, "merge-base", identity["base_sha"], identity["head_sha"], check=False)
     if merge.returncode != 0:
         if not remote:
             sys.exit(42)
         for deepen in [200, 1000]:
-            git(*fetch, "--deepen=" + str(deepen), remote, identity["base_sha"], identity["head_sha"])
-            merge = git("merge-base", identity["base_sha"], identity["head_sha"], check=False)
+            measured("history_fetch", git, *fetch, "--deepen=" + str(deepen), remote, identity["base_sha"], identity["head_sha"])
+            merge = measured("merge_base", git, "merge-base", identity["base_sha"], identity["head_sha"], check=False)
             if merge.returncode == 0:
                 break
     if merge.returncode != 0:
@@ -696,15 +746,19 @@ def prepare():
     if missing:
         if not remote:
             sys.exit(42)
-        git("-c", "fetch.negotiationAlgorithm=noop", *fetch, "--stdin", remote, input=("\n".join(missing) + "\n").encode())
+        start = time.monotonic()
+        try:
+            git("-c", "fetch.negotiationAlgorithm=noop", *fetch, "--stdin", remote, input=("\n".join(missing) + "\n").encode())
+        finally:
+            profile("object_fetch", start, len(missing))
         if missing_objects(merge_base):
             raise ValueError("captured review trees remain incomplete after authenticated hydration")
     temporary = pathlib.Path(tempfile.mkdtemp(prefix=directory.name + ".tmp-", dir=directory.parent))
     try:
         patch = temporary / "changes.patch"
         with patch.open("wb") as stream:
-            git("diff", "--no-ext-diff", "--no-textconv", "--binary", merge_base, identity["head_sha"], "--", stdout=stream)
-        manifest = {**identity, "merge_base_sha": merge_base, "patch_sha256": digest(patch)}
+            measured("patch_generation", git, "diff", "--no-ext-diff", "--no-textconv", "--binary", merge_base, identity["head_sha"], "--", stdout=stream)
+        manifest = {**identity, "merge_base_sha": merge_base, "patch_sha256": measured("patch_hashing", digest, patch)}
         (temporary / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
         for file in temporary.iterdir():
             file.chmod(0o444)

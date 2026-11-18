@@ -39,9 +39,17 @@ type Providers struct {
 	client               *http.Client
 	githubClient         *http.Client
 	githubURL, notionURL string
+	githubAppID          int64
+	githubAppSlug        string
 }
 
 type ProviderOption func(*Providers)
+
+func WithGitHubAppIdentity(id int64, slug string) ProviderOption {
+	return func(p *Providers) {
+		p.githubAppID, p.githubAppSlug = id, slug
+	}
+}
 
 // WithGitHubHTTPClient retains the action adapter's bounded, non-redirecting
 // requests while sharing production GitHub telemetry and cooldown control.
@@ -120,6 +128,11 @@ func (p *Providers) Inspect(ctx context.Context, scope models.AutomationActionSc
 	if err != nil {
 		return result, err
 	}
+	return p.inspectPullRequest(ctx, scope, token)
+}
+
+func (p *Providers) inspectPullRequest(ctx context.Context, scope models.AutomationActionScope, token string) (PullRequest, error) {
+	var result PullRequest
 	var pr struct {
 		Title string `json:"title"`
 		URL   string `json:"html_url"`
@@ -134,7 +147,7 @@ func (p *Providers) Inspect(ctx context.Context, scope models.AutomationActionSc
 			Name string `json:"name"`
 		} `json:"labels"`
 	}
-	if err = p.request(ctx, http.MethodGet, p.githubPath(scope, "pulls"), token, "", nil, &pr); err != nil {
+	if err := p.request(ctx, http.MethodGet, p.githubPath(scope, "pulls"), token, "", nil, &pr); err != nil {
 		return result, err
 	}
 	if strings.TrimSpace(pr.Title) == "" || len(pr.Title) > 4096 || strings.TrimSpace(pr.User.Login) == "" || len(pr.User.Login) > 256 {
@@ -190,7 +203,7 @@ func (p *Providers) Preflight(ctx context.Context, scope models.AutomationAction
 }
 func (p *Providers) Send(ctx context.Context, scope models.AutomationActionScope, action models.AutomationAction, payload Payload) (Receipt, error) {
 	switch action.Kind {
-	case models.AutomationActionLabel, models.AutomationActionTeam, models.AutomationActionComment:
+	case models.AutomationActionLabel, models.AutomationActionTeam, models.AutomationActionComment, models.AutomationActionCommentUpdate, models.AutomationActionGitHubReview:
 		return p.sendGitHub(ctx, scope, action, payload)
 	case models.AutomationActionNotion:
 		return p.sendNotion(ctx, scope, payload)
@@ -202,9 +215,20 @@ func (p *Providers) Send(ctx context.Context, scope models.AutomationActionScope
 		if p.slack == nil {
 			return Receipt{}, &SendFailure{Code: "SLACK_NOT_CONNECTED", Definitive: true}
 		}
-		// Disable automatic parsing of user-controlled mention and link syntax by escaping Slack delimiters.
-		escape := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
-		text := escape.Replace(payload.Request.Text)
+		authorMention, err := p.slackPRAuthorMention(ctx, scope)
+		if err != nil {
+			return Receipt{}, err
+		}
+		text := renderSlackActionText(payload.Request.Text, scope.RepositoryName)
+		if authorMention != "" {
+			text = authorMention + " " + text
+		}
+		if scope.Config.SlackUserGroupID != "" {
+			text = "<!subteam^" + scope.Config.SlackUserGroupID + "> " + text
+		}
+		if err := ctx.Err(); err != nil {
+			return Receipt{}, &SendFailure{Code: "SLACK_SEND_CANCELED", Definitive: true, Err: err}
+		}
 		posted, err := p.slack.PostMessage(ctx, token, scope.Config.SlackChannelID, "", text)
 		if errors.Is(err, ingestion.ErrSlackRateLimited) {
 			return Receipt{}, &SendFailure{Code: "SLACK_RATE_LIMITED", Definitive: true}
@@ -273,12 +297,16 @@ func (p *Providers) sendGitHub(ctx context.Context, scope models.AutomationActio
 			return Receipt{}, err
 		}
 		return Receipt{ID: scope.Config.Team, URL: payload.PR.URL}, nil
-	default:
+	case models.AutomationActionCommentUpdate:
+		return p.updateGitHubComment(ctx, scope, token, action, payload)
+	case models.AutomationActionGitHubReview:
+		return p.submitGitHubReview(ctx, scope, token, action, payload)
+	case models.AutomationActionComment:
 		var comment struct {
 			ID  int64  `json:"id"`
 			URL string `json:"html_url"`
 		}
-		body := payload.Request.Text + "\n\n<!-- 143-automation-action:" + action.ID.String() + " -->"
+		body := automationCommentBody(payload.Request.Text, action.ID, action.ID)
 		err = p.request(ctx, http.MethodPost, p.githubPath(scope, "issues")+"/comments", token, "", map[string]string{"body": body}, &comment)
 		if err != nil {
 			return Receipt{}, err
@@ -287,8 +315,76 @@ func (p *Providers) sendGitHub(ctx context.Context, scope models.AutomationActio
 			return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_RECEIPT_INVALID"}
 		}
 		return Receipt{ID: strconv.FormatInt(comment.ID, 10), URL: safeProviderURL(comment.URL, "github.com")}, nil
+	default:
+		return Receipt{}, &SendFailure{Code: "INVALID_ACTION_KIND", Definitive: true}
 	}
 }
+
+func automationCommentBody(text string, sourceID, actionID uuid.UUID) string {
+	body := text + "\n\n" + models.AutomationActionCommentMarkerPrefix + sourceID.String() + " -->"
+	if actionID != sourceID {
+		body += "\n" + models.AutomationActionCommentUpdateMarkerPrefix + actionID.String() + " -->"
+	}
+	return body
+}
+
+func (p *Providers) updateGitHubComment(ctx context.Context, scope models.AutomationActionScope, token string, action models.AutomationAction, payload Payload) (Receipt, error) {
+	target := payload.CommentTarget
+	request := payload.Request
+	if target == nil || request.Kind != models.AutomationActionCommentUpdate || request.ValidateFor(scope.Config) != nil ||
+		scope.PRNumber != request.PRNumber || !strings.EqualFold(scope.Config.Repository, scope.RepositoryName) || ValidateRepositoryName(scope.RepositoryName) != nil {
+		return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_TARGET_INVALID", Definitive: true}
+	}
+	sourceID, err := uuid.Parse(request.SourceActionID)
+	if err != nil || sourceID != target.SourceActionID || target.PreviousActionID == uuid.Nil || action.ID == uuid.Nil || action.ID == sourceID || action.ID == target.PreviousActionID {
+		return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_TARGET_INVALID", Definitive: true}
+	}
+	commentID, err := strconv.ParseInt(target.CommentID, 10, 64)
+	if err != nil || commentID <= 0 || strconv.FormatInt(commentID, 10) != target.CommentID {
+		return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_TARGET_INVALID", Definitive: true}
+	}
+
+	endpoint := p.githubURL + "/repos/" + scope.RepositoryName + "/issues/comments/" + target.CommentID
+	var existing struct {
+		ID       int64  `json:"id"`
+		IssueURL string `json:"issue_url"`
+		Body     string `json:"body"`
+	}
+	if err := p.request(ctx, http.MethodGet, endpoint, token, "", nil, &existing); err != nil {
+		return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_LOOKUP_FAILED", Definitive: true, Err: err}
+	}
+	// A scoped create receipt anchors ownership. Comparing the last delivered
+	// body rejects external edits observed by this preflight read.
+	if existing.ID != commentID || existing.IssueURL != p.githubPath(scope, "issues") || existing.Body != automationCommentBody(target.PreviousText, sourceID, target.PreviousActionID) {
+		return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_TARGET_MISMATCH", Definitive: true}
+	}
+
+	pr, err := p.Inspect(ctx, scope)
+	if err != nil {
+		return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_HEAD_LOOKUP_FAILED", Definitive: true, Err: err}
+	}
+	if !pr.Open || pr.Head != request.HeadSHA {
+		return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_STALE_HEAD", Definitive: true, Err: ErrStaleHead}
+	}
+
+	var updated struct {
+		ID  int64  `json:"id"`
+		URL string `json:"html_url"`
+	}
+	body := automationCommentBody(request.Text, sourceID, action.ID)
+	if err := ctx.Err(); err != nil {
+		return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_SEND_CANCELED", Definitive: true, Err: err}
+	}
+	if err := p.request(ctx, http.MethodPatch, endpoint, token, "", map[string]string{"body": body}, &updated); err != nil {
+		return Receipt{}, err
+	}
+	expectedURL := pr.URL + "#issuecomment-" + target.CommentID
+	if updated.ID != commentID || updated.URL != expectedURL {
+		return Receipt{}, &SendFailure{Code: "GITHUB_COMMENT_RECEIPT_INVALID"}
+	}
+	return Receipt{ID: target.CommentID, URL: expectedURL}, nil
+}
+
 func richText(text string) []any {
 	// Notion limits individual rich-text fragments to 2,000 characters.
 	runes := []rune(text)

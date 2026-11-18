@@ -17,14 +17,45 @@ import (
 // already applied durable seeds are rejected on retry.
 func (s *SessionActivityPhaseStore) StartSeedPhase(ctx context.Context, orgID, sessionID, threadID uuid.UUID, turnNumber int, runtimeID, leaseToken uuid.UUID, messageIDs []int64, startedAt time.Time) (models.SessionActivityPhase, *models.ThreadInboxDeliveryBatch, error) {
 	startedAt = postgresTimestamp(startedAt)
-	if turnNumber < 0 || startedAt.IsZero() || len(messageIDs) == 0 {
-		return models.SessionActivityPhase{}, nil, fmt.Errorf("start seed phase: invalid turn, time, or seed")
+	if err := validateSeedPhaseStart(turnNumber, messageIDs, startedAt); err != nil {
+		return models.SessionActivityPhase{}, nil, err
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return models.SessionActivityPhase{}, nil, fmt.Errorf("begin seed activity phase: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	phase, batch, err := s.StartSeedPhaseInTx(ctx, orgID, tx, sessionID, threadID, turnNumber, runtimeID, leaseToken, messageIDs, startedAt)
+	if err != nil {
+		return models.SessionActivityPhase{}, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return models.SessionActivityPhase{}, nil, fmt.Errorf("commit resumed seed activity: %w", err)
+	}
+	return phase, batch, nil
+}
+
+func validateSeedPhaseStart(turnNumber int, messageIDs []int64, startedAt time.Time) error {
+	if turnNumber < 0 || startedAt.IsZero() || len(messageIDs) == 0 {
+		return fmt.Errorf("start seed phase: invalid turn, time, or seed")
+	}
+	return nil
+}
+
+// StartSeedPhaseInTx applies the existing seed and provider-phase writes using
+// only the caller's concrete transaction. It does not begin, settle, retry or
+// publish the transaction, including through its phase-start helper. The owner
+// must roll back the entire unit on error and treat returned rows as durable
+// only after confirmed commit. Existing lease checks are unchanged; this is
+// not new admission, start, epoch or lifecycle authority.
+func (s *SessionActivityPhaseStore) StartSeedPhaseInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, sessionID, threadID uuid.UUID, turnNumber int, runtimeID, leaseToken uuid.UUID, messageIDs []int64, startedAt time.Time) (models.SessionActivityPhase, *models.ThreadInboxDeliveryBatch, error) {
+	if nilLifecycleDependency(tx) {
+		return models.SessionActivityPhase{}, nil, fmt.Errorf("start seed phase: transaction is required")
+	}
+	startedAt = postgresTimestamp(startedAt)
+	if err := validateSeedPhaseStart(turnNumber, messageIDs, startedAt); err != nil {
+		return models.SessionActivityPhase{}, nil, err
+	}
 	// Match phase-start and inbox-append lock order before locking the lease.
 	var locked uuid.UUID
 	if err := tx.QueryRow(ctx, `
@@ -45,7 +76,7 @@ func (s *SessionActivityPhaseStore) StartSeedPhase(ctx context.Context, orgID, s
 	// Legacy messages may predate the durable inbox. Materialize their exact
 	// scoped identity under the same thread lock instead of bypassing seed
 	// acknowledgment. Threadless legacy input belongs only to the primary tab.
-	_, err = tx.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		WITH missing AS (
 			SELECT m.id, m.content, row_number() OVER (ORDER BY m.id) AS offset_no
 			FROM session_messages m
@@ -218,9 +249,6 @@ func (s *SessionActivityPhaseStore) StartSeedPhase(ctx context.Context, orgID, s
 		}
 		batch.Status = models.InboxDeliveryBatchStarted
 		batch.StartedAt = &startedAt
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return models.SessionActivityPhase{}, nil, fmt.Errorf("commit resumed seed activity: %w", err)
 	}
 	return phase, batch, nil
 }

@@ -3642,6 +3642,7 @@ type PullRequestReviewEvent struct {
 	OwnerOrgID       *uuid.UUID              `json:"-"`
 	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
+	OwnAppReview     bool                    `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
@@ -3714,7 +3715,7 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 	if event.Action != "submitted" {
 		return nil
 	}
-	s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+	request := automationevents.GitHubEventTriggerRequest{
 		Event:             models.AutomationGitHubEventPullRequestReviewSubmitted,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.PullRequest.Number,
@@ -3731,7 +3732,15 @@ func (s *PRService) HandlePullRequestReviewEvent(ctx context.Context, event Pull
 		ReviewState:       event.Review.State,
 		Labels:            githubLabelNames(event.PullRequest.Labels),
 		LabelsKnown:       true,
-	}, event.OwnerOrgID, event.Repository.ID)
+	}
+	if event.OwnAppReview && strings.EqualFold(event.Review.State, "commented") {
+		request.OwnAppReviewFeedback = &models.AutomationActionReviewFeedback{
+			ReviewID: event.Review.ID,
+			PRAuthor: event.PullRequest.User.Login,
+			Body:     event.Review.Body,
+		}
+	}
+	s.triggerGitHubAutomations(ctx, request, event.OwnerOrgID, event.Repository.ID)
 
 	pr, err := s.getWebhookPullRequest(ctx, event.OwnerOrgID, event.Repository.FullName, event.PullRequest.Number)
 	if err != nil {
@@ -3797,6 +3806,7 @@ type PullRequestReviewCommentEvent struct {
 	DeliveryID       string                  `json:"-"`
 	FeedbackMetadata FeedbackWebhookMetadata `json:"-"`
 	RecordOnly       bool                    `json:"-"`
+	OwnAppReview     bool                    `json:"-"`
 	Sender           struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
@@ -3814,6 +3824,7 @@ type PullRequestReviewCommentEvent struct {
 		AuthorAssociation     string                     `json:"author_association"`
 		InReplyToID           *int64                     `json:"in_reply_to_id"`
 		Line                  *int                       `json:"line"`
+		OriginalLine          *int                       `json:"original_line"`
 		Side                  string                     `json:"side"`
 		DiffHunk              string                     `json:"diff_hunk"`
 		CommitID              string                     `json:"commit_id"`
@@ -3858,7 +3869,7 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 	if event.Action != "created" {
 		return nil
 	}
-	s.triggerGitHubAutomations(ctx, automationevents.GitHubEventTriggerRequest{
+	request := automationevents.GitHubEventTriggerRequest{
 		Event:             models.AutomationGitHubEventPullRequestReviewCommentCreated,
 		Repository:        event.Repository.FullName,
 		PullRequestNumber: event.PullRequest.Number,
@@ -3875,7 +3886,17 @@ func (s *PRService) HandlePullRequestReviewCommentEvent(ctx context.Context, eve
 		Path:              event.Comment.Path,
 		Labels:            githubLabelNames(event.PullRequest.Labels),
 		LabelsKnown:       true,
-	}, event.OwnerOrgID, event.Repository.ID)
+	}
+	if event.OwnAppReview && event.Comment.InReplyToID == nil {
+		request.OwnAppReviewFeedback = &models.AutomationActionReviewFeedback{
+			ReviewID: event.Comment.PullRequestReviewID,
+			Body:     event.Comment.Body,
+			Inline:   true,
+			Path:     event.Comment.Path,
+			Line:     event.Comment.OriginalLine,
+		}
+	}
+	s.triggerGitHubAutomations(ctx, request, event.OwnerOrgID, event.Repository.ID)
 	if event.RecordOnly {
 		return nil
 	}
@@ -4160,6 +4181,28 @@ func (s *PRService) doGitHubRequest(ctx context.Context, token, method, path str
 }
 
 func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method, path string, body any, accept string) ([]byte, error) {
+	response, _, err := s.doGitHubRequestWithResponseHeaders(ctx, token, method, path, body, accept)
+	return response, err
+}
+
+func (s *PRService) doGitHubRequestWithResponseHeaders(ctx context.Context, token, method, path string, body any, accept string) ([]byte, http.Header, error) {
+	response, err := s.doGitHubRESTRequest(ctx, token, method, path, body, accept, "")
+	return response.body, response.header, err
+}
+
+type githubRESTResponse struct {
+	body   []byte
+	status int
+	header http.Header
+}
+
+var errGitHubRESTResponseLimit = errors.New("GitHub REST response limit exceeded")
+
+func (s *PRService) doGitHubRESTRequest(ctx context.Context, token, method, path string, body any, accept, etag string) (githubRESTResponse, error) {
+	return s.doGitHubRESTRequestWithResponseLimit(ctx, token, method, path, body, accept, etag, 0)
+}
+
+func (s *PRService) doGitHubRESTRequestWithResponseLimit(ctx context.Context, token, method, path string, body any, accept, etag string, responseLimit int64) (githubRESTResponse, error) {
 	ctx = githubtelemetry.WithRequestMetadata(ctx, s.githubRequestMetadataForToken(ctx, token))
 	jsonResponse := strings.Contains(accept, "json") && !strings.Contains(accept, ".raw") && !strings.Contains(accept, ".diff") && !strings.Contains(accept, ".patch") && !strings.Contains(accept, ".html")
 	if jsonResponse {
@@ -4169,31 +4212,41 @@ func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return nil, err
+			return githubRESTResponse{}, err
 		}
 		bodyReader = bytes.NewReader(b)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, s.baseURL+path, bodyReader)
 	if err != nil {
-		return nil, err
+		return githubRESTResponse{}, err
 	}
 	req.Header.Set("Authorization", "token "+token)
 	req.Header.Set("Accept", accept)
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := s.httpClient.Do(req) // #nosec G704 -- URL is GitHub API endpoint from config
 	if err != nil {
-		return nil, NewGitHubRequestError(ctx, err)
+		return githubRESTResponse{}, NewGitHubRequestError(ctx, err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	var responseReader io.Reader = resp.Body
+	if responseLimit > 0 {
+		responseReader = io.LimitReader(resp.Body, responseLimit+1)
+	}
+	respBody, err := io.ReadAll(responseReader)
+	if err == nil && responseLimit > 0 && int64(len(respBody)) > responseLimit && resp.StatusCode < 400 {
+		err = fmt.Errorf("%w: %d bytes", errGitHubRESTResponseLimit, responseLimit)
+	}
 	if err != nil {
 		githubtelemetry.ObserveJSONResponse(ctx, err)
-		return nil, NewGitHubResponseReadError(ctx, method, path, resp, respBody, err)
+		return githubRESTResponse{}, NewGitHubResponseReadError(ctx, method, path, resp, respBody, err)
 	}
 	var decodeErr error
 	if jsonResponse {
@@ -4210,7 +4263,7 @@ func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method
 		}
 	}
 	if resp.StatusCode >= 400 {
-		return nil, &GitHubAPIError{
+		return githubRESTResponse{}, &GitHubAPIError{
 			Method:     method,
 			Path:       path,
 			StatusCode: resp.StatusCode,
@@ -4218,7 +4271,7 @@ func (s *PRService) doGitHubRequestWithAccept(ctx context.Context, token, method
 			Header:     resp.Header.Clone(),
 		}
 	}
-	return respBody, decodeErr
+	return githubRESTResponse{body: respBody, status: resp.StatusCode, header: resp.Header}, decodeErr
 }
 
 // doGitHubGraphQL POSTs a GraphQL query to the GitHub GraphQL endpoint and
@@ -6980,11 +7033,7 @@ func (s *PRService) HandleCheckRunEvent(ctx context.Context, event CheckRunEvent
 			// is accepted so a prior enqueue failure can repair its durable work.
 			continue
 		}
-		requiresSync, err := s.checkStateRequiresAuthoritativeSync(ctx, pr, state)
-		if err != nil {
-			return err
-		}
-		if err := s.enqueuePullRequestCheckProjection(ctx, pr, requiresSync); err != nil {
+		if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
 			return err
 		}
 	}
@@ -7037,11 +7086,7 @@ func (s *PRService) HandleStatusEvent(ctx context.Context, event StatusEvent) er
 		if !applied {
 			continue
 		}
-		requiresSync, err := s.checkStateRequiresAuthoritativeSync(ctx, pr, state)
-		if err != nil {
-			return err
-		}
-		if err := s.enqueuePullRequestCheckProjection(ctx, pr, requiresSync); err != nil {
+		if err := s.enqueuePullRequestHealthRebuild(ctx, pr); err != nil {
 			return err
 		}
 	}
@@ -7050,44 +7095,6 @@ func (s *PRService) HandleStatusEvent(ctx context.Context, event StatusEvent) er
 
 func pullRequestHasHealthBaseline(pr models.PullRequest) bool {
 	return pr.GitHubStateSyncedAt != nil && pr.HealthVersion > 0 && pr.HeadSHA != nil && strings.TrimSpace(*pr.HeadSHA) != ""
-}
-
-func (s *PRService) checkStateRequiresAuthoritativeSync(ctx context.Context, pr models.PullRequest, state models.PullRequestCheckState) (bool, error) {
-	if !pullRequestHasHealthBaseline(pr) {
-		return true, nil
-	}
-	current, err := s.pullRequests.GetHealthCurrent(ctx, pr.OrgID, pr.ID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return true, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("load pull request health baseline for webhook check: %w", err)
-	}
-	if current.HeadSHA != state.HeadSHA {
-		return true, nil
-	}
-	var summary models.PullRequestHealthSummary
-	if err := json.Unmarshal(current.SummaryJSON, &summary); err != nil {
-		// Degrade to the authoritative readback rather than failing the webhook.
-		// Returning an error here would 500 the delivery, and every redelivery
-		// would decode the same bad row and fail identically — a poison pill for
-		// this PR's whole check stream. An unreadable baseline is precisely the
-		// case a full sync repairs, because it rewrites the snapshot.
-		s.logger.Warn().Err(err).
-			Str("pull_request_id", pr.ID.String()).
-			Msg("pull request health baseline is undecodable; forcing an authoritative sync")
-		return true, nil
-	}
-	if summary.CheckSetComplete == nil || !*summary.CheckSetComplete {
-		return true, nil
-	}
-	incomingKey := projectedCheckSummaryKey(state.CheckSummary())
-	for _, check := range summary.Checks {
-		if projectedCheckSummaryKey(check) == incomingKey {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 func checkRunEventState(pr models.PullRequest, event CheckRunEvent) models.PullRequestCheckState {
@@ -7114,7 +7121,7 @@ func checkRunEventState(pr models.PullRequest, event CheckRunEvent) models.PullR
 		PullRequestID:     pr.ID,
 		HeadSHA:           event.CheckRun.HeadSHA,
 		Source:            models.PullRequestCheckSourceCheckRun,
-		ExternalKey:       normalizedCheckExternalKey(name, strconv.FormatInt(event.CheckRun.ID, 10)),
+		ExternalKey:       checkRunExternalKey(event.CheckRun.App.Slug, name, event.CheckRun.ID),
 		Name:              name,
 		Category:          classifyCheckRunCategory(name),
 		Status:            normalizeCheckRunStatus(check),
@@ -7156,6 +7163,17 @@ func normalizedCheckExternalKey(name, fallback string) string {
 		return key
 	}
 	return fallback
+}
+
+func checkRunExternalKey(provider, name string, id int64) string {
+	key := normalizedCheckExternalKey(name, strconv.FormatInt(id, 10))
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return key
+	}
+	// Legacy name-only keys are trimmed, so this prefix cannot collide with
+	// an older key even if a check name contains the rest of the prefix.
+	return " check-run-v2:" + provider + ":" + key
 }
 
 func firstProviderTimestamp(values ...*time.Time) time.Time {

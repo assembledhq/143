@@ -57,8 +57,10 @@ const (
 	cancelThreadJobType       = "cancel_thread"
 	maxThreadInboxPending     = 200
 	maxSessionInboxPending    = 1000
-	maxThreadMessageBytes     = 256 * 1024
 )
+
+// MaxThreadMessageBytes is the inbox limit for a thread message's text.
+const MaxThreadMessageBytes = 256 * 1024
 
 // SessionStore defines the session DB operations needed by the thread service.
 //
@@ -1159,8 +1161,8 @@ func (s *Service) createQueuedMessageAndInboxInTx(ctx context.Context, msg *mode
 }
 
 func (s *Service) validateInboxAdmission(ctx context.Context, input SendMessageInput) error {
-	if len(input.Message) > maxThreadMessageBytes {
-		return fmt.Errorf("%w: message is %d bytes, max is %d", ErrThreadInboxBackpressure, len(input.Message), maxThreadMessageBytes)
+	if len(input.Message) > MaxThreadMessageBytes {
+		return fmt.Errorf("%w: message is %d bytes, max is %d", ErrThreadInboxBackpressure, len(input.Message), MaxThreadMessageBytes)
 	}
 	if s.inboxStore == nil {
 		return nil

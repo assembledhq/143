@@ -334,6 +334,52 @@ func TestBuildCodeReviewProvisionalBody(t *testing.T) {
 		"<!-- 143-code-review-footer:start -->\n[Follow review](https://143.dev/sessions/session-1)\n<!-- 143-code-review-footer:end -->", actual, "provisional review should explain stable blockers without claiming a terminal decision")
 }
 
+func TestBuildCodeReviewProvisionalBodySizeLimitOverride(t *testing.T) {
+	t.Parallel()
+
+	const sessionURL = "https://143.dev/sessions/session-1"
+	const overrideURL = "https://143.dev/code-reviews?override_size_limits=true&review_now=session-1"
+	tests := []struct {
+		name          string
+		reasons       []CodeReviewRiskReason
+		overrideURL   string
+		expectedLinks string
+	}{
+		{
+			name:          "size blocker offers the override while review continues",
+			reasons:       []CodeReviewRiskReason{{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 1326, Limit: 1000}},
+			overrideURL:   overrideURL,
+			expectedLinks: "[Override size limits](" + overrideURL + ") · [Follow review](" + sessionURL + ")",
+		},
+		{
+			name:          "non-size blocker has no override",
+			reasons:       []CodeReviewRiskReason{{Code: CodeReviewRiskReasonBlockedPath, Subject: "migrations/**"}},
+			overrideURL:   overrideURL,
+			expectedLinks: "[Follow review](" + sessionURL + ")",
+		},
+		{
+			name:          "policy without overrides has no link",
+			reasons:       []CodeReviewRiskReason{{Code: CodeReviewRiskReasonAdditionsLimitExceeded, Actual: 1326, Limit: 1000}},
+			expectedLinks: "[Follow review](" + sessionURL + ")",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			body := BuildCodeReviewProvisionalBody(CodeReviewFinalReviewInput{
+				RiskReasons:          tt.reasons,
+				SessionURL:           sessionURL,
+				SizeLimitOverrideURL: tt.overrideURL,
+				HeadSHA:              "1234567890abcdef",
+				AssessedAt:           time.Date(2026, time.August, 5, 18, 0, 0, 0, time.UTC),
+			})
+
+			require.True(t, strings.HasSuffix(body, "<!-- 143-code-review-footer:start -->\n"+tt.expectedLinks+"\n<!-- 143-code-review-footer:end -->"), "provisional footer should offer the size override only for a stable size blocker: %s", body)
+		})
+	}
+}
+
 func TestBuildCodeReviewFinalReviewBodyEscapesUntrustedFindingText(t *testing.T) {
 	t.Parallel()
 

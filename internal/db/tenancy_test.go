@@ -42,6 +42,7 @@ func TestMultiTenancyAudit(t *testing.T) {
 		"eval_bootstrap_runs",
 		"organization_memberships",
 		"coding_credentials",
+		"package_registry_credentials",
 		"pagerduty_integrations",
 		"pagerduty_service_repo_mappings",
 		"pagerduty_incidents",

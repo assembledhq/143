@@ -29,8 +29,8 @@ func TestSessionExecutorStore_CreateStarting(t *testing.T) {
 	executorID := uuid.New()
 	deadline := time.Now().Add(90 * time.Minute).UTC()
 
-	mock.ExpectQuery("INSERT INTO session_executors").
-		WithArgs(orgID, sessionID, (*uuid.UUID)(nil), jobID, "run_agent", "worker-1", "worker-1", lockToken, "143:sha", "build-sha", &deadline).
+	mock.ExpectQuery("INSERT INTO session_executors[\\s\\S]+lifecycle_writer_version[\\s\\S]+@lifecycle_writer_version").
+		WithArgs(orgID, sessionID, (*uuid.UUID)(nil), jobID, "run_agent", "worker-1", "worker-1", lockToken, "143:sha", "build-sha", 0, &deadline).
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(executorID))
 
 	id, err := store.CreateStarting(context.Background(), orgID, models.CreateSessionExecutorParams{
@@ -228,8 +228,8 @@ func TestSessionExecutorStore_HeartbeatWithLease(t *testing.T) {
 	executorID := uuid.New()
 	lockToken := uuid.New()
 
-	mock.ExpectQuery("UPDATE session_executors[\\s\\S]+RETURNING se.drain_intent[\\s\\S]+session_threads").
-		WithArgs(orgID, executorID, lockToken, int((2 * time.Minute).Seconds())).
+	mock.ExpectQuery("UPDATE session_executors[\\s\\S]+lifecycle_writer_version = \\$5[\\s\\S]+RETURNING se.drain_intent[\\s\\S]+session_threads").
+		WithArgs(orgID, executorID, lockToken, int((2 * time.Minute).Seconds()), 0).
 		WillReturnRows(pgxmock.NewRows([]string{"drain_intent", "thread_cancel_requested"}).AddRow("none", true))
 
 	ok, intent, threadCancelRequested, err := store.HeartbeatWithLease(context.Background(), orgID, executorID, lockToken, 2*time.Minute)
@@ -262,11 +262,11 @@ func TestSessionExecutorStore_GetByID(t *testing.T) {
 			"host_node_id", "owner_id", "lock_token", "status", "container_id", "image", "build_sha",
 			"heartbeat_at", "lease_expires_at", "runtime_deadline_at", "drain_intent",
 			"drain_requested_at", "drain_deadline_at", "started_at", "completed_at",
-			"exit_code", "last_error", "created_at", "updated_at",
+			"exit_code", "last_error", "created_at", "updated_at", "lifecycle_writer_version",
 		}).AddRow(
 			executorID, orgID, sessionID, nil, jobID, "run_agent",
 			"worker-1", "worker-1", lockToken, string(models.SessionExecutorStatusStarting), "container-1", "143:sha", "build-sha",
-			now, now.Add(time.Minute), now.Add(90*time.Minute), "none", nil, nil, now, nil, nil, nil, now, now,
+			now, now.Add(time.Minute), now.Add(90*time.Minute), "none", nil, nil, now, nil, nil, nil, now, now, 0,
 		))
 
 	executor, err := store.GetByID(context.Background(), executorID)
@@ -295,8 +295,8 @@ func TestSessionExecutorStore_StateTransitionsWithLease(t *testing.T) {
 				return store.MarkRunningWithLease(ctx, orgID, executorID, lockToken, time.Minute)
 			},
 			setupMock: func(mock pgxmock.PgxPoolIface, orgID, executorID, lockToken uuid.UUID) {
-				mock.ExpectExec("UPDATE session_executors\\s+SET status = 'running'").
-					WithArgs(orgID, executorID, lockToken, int(time.Minute.Seconds())).
+				mock.ExpectExec("UPDATE session_executors\\s+SET status = 'running'[\\s\\S]+lifecycle_writer_version = \\$5").
+					WithArgs(orgID, executorID, lockToken, int(time.Minute.Seconds()), 0).
 					WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 			},
 			expectOK: true,

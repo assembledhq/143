@@ -15,16 +15,26 @@ import (
 	otelmetric "go.opentelemetry.io/otel/metric"
 )
 
-func (c *Controller) observeBackgroundQuota(ctx context.Context, installationID int64, observation Observation, classification Classification, now time.Time) {
-	if c.backgroundQuotaReserve <= 0 || observation.RequestErr != nil || observation.BodyErr != nil || !isTrustedQuotaResponse(observation.StatusCode, classification) {
+func (c *Controller) observeBackgroundQuota(ctx context.Context, installationID int64, observation Observation, classification Classification, now time.Time, participates bool) {
+	observeAll := participates && c.backgroundQuotaReserve > 0
+	if !observeAll && c.cache == nil {
+		return
+	}
+	if observation.RequestErr != nil || observation.BodyErr != nil || !isTrustedQuotaResponse(observation.StatusCode, classification) {
 		return
 	}
 	quota, ok := backgroundQuotaFromHeaders(observation.Header, now)
-	if !ok {
+	if !ok || !observeAll && quota.Remaining > checkRefreshQuotaReserve {
 		return
 	}
 	if _, err := c.cache.ObserveGitHubQuota(ctx, c.backgroundQuotaKey(installationID), quota); err != nil {
-		c.logBackgroundQuotaDegraded(ctx, installationID, err)
+		if observeAll {
+			c.logBackgroundQuotaDegraded(ctx, installationID, err)
+		} else if c.shouldLogQuotaDegradation(installationID) {
+			c.logger.Warn().Err(err).Int64("github_installation_id", installationID).
+				Bool("github_check_refresh_quota_observation_degraded", true).
+				Msg("github core quota observation unavailable for check refresh budget")
+		}
 	}
 }
 
@@ -115,11 +125,19 @@ func (c *Controller) recordBackgroundQuotaDecision(ctx context.Context, outcome 
 
 func (c *Controller) logBackgroundQuotaDegraded(ctx context.Context, installationID int64, err error) {
 	c.recordBackgroundQuotaDecision(ctx, "degraded")
+	if c.shouldLogQuotaDegradation(installationID) {
+		c.logger.Warn().Err(err).Int64("github_installation_id", installationID).
+			Str("github_rate_limit_mode", string(c.mode)).Bool("github_background_quota_degraded", true).
+			Msg("github background quota coordination unavailable; bypassing optimization")
+	}
+}
+
+func (c *Controller) shouldLogQuotaDegradation(installationID int64) bool {
 	now := c.now().UTC()
 	c.backgroundQuotaLogMu.Lock()
 	defer c.backgroundQuotaLogMu.Unlock()
 	if previous, ok := c.backgroundQuotaDegradedAt[installationID]; ok && now.Sub(previous) < time.Minute {
-		return
+		return false
 	}
 	if len(c.backgroundQuotaDegradedAt) >= 1024 {
 		for id, previous := range c.backgroundQuotaDegradedAt {
@@ -128,11 +146,9 @@ func (c *Controller) logBackgroundQuotaDegraded(ctx context.Context, installatio
 			}
 		}
 		if len(c.backgroundQuotaDegradedAt) >= 1024 {
-			return
+			return false
 		}
 	}
 	c.backgroundQuotaDegradedAt[installationID] = now
-	c.logger.Warn().Err(err).Int64("github_installation_id", installationID).
-		Str("github_rate_limit_mode", string(c.mode)).Bool("github_background_quota_degraded", true).
-		Msg("github background quota coordination unavailable; bypassing optimization")
+	return true
 }

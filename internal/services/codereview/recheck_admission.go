@@ -111,7 +111,7 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 		cancelClosed := recovering && captured.Snapshot.State != "" && captured.Snapshot.State != "open"
 		return s.rejectIneligibleAssessmentCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, state, cancelClosed, captureErr)
 	}
-	if errors.Is(captureErr, ErrAssessmentReuseUnavailable) {
+	if errors.Is(captureErr, ErrAssessmentReuseUnavailable) || errors.Is(captureErr, models.ErrInvalidCodeReviewGuidanceFile) || errors.Is(captureErr, models.ErrIncompleteCodeReviewGuidance) {
 		return s.failRecheckCapture(ctx, req, state.RepositoryID, ordinaryHash, kind, captureErr, state)
 	}
 	if captureErr != nil {
@@ -174,13 +174,27 @@ func (s *Service) requestAssessmentReview(ctx context.Context, req ScheduleReque
 }
 
 func assessmentRequestContext(req ScheduleRequestInput) *ReviewRequestContext {
+	overrideSizeLimits := req.Mode == models.CodeReviewReviewNow && req.OverrideSizeLimits
+	useReviewHistory := req.Mode == models.CodeReviewReviewNow && req.UseReviewHistory
 	if req.RequestContext != nil {
-		return normalizeReviewRequestContext(req.RequestContext)
+		request := normalizeReviewRequestContext(req.RequestContext)
+		if request != nil {
+			request.UseReviewHistory = request.UseReviewHistory || useReviewHistory
+			if overrideSizeLimits {
+				request.OverrideSizeLimits = true
+				request.OverrideReviewSessionID = req.OverrideReviewSessionID
+			}
+			return request
+		}
 	}
-	if strings.TrimSpace(req.Reason) == "" {
+	if strings.TrimSpace(req.Reason) == "" && !overrideSizeLimits && !useReviewHistory {
 		return nil
 	}
-	return &ReviewRequestContext{Source: "ui", Body: strings.TrimSpace(req.Reason)}
+	request := &ReviewRequestContext{Source: "ui", Body: strings.TrimSpace(req.Reason), OverrideSizeLimits: overrideSizeLimits, UseReviewHistory: useReviewHistory}
+	if overrideSizeLimits {
+		request.OverrideReviewSessionID = req.OverrideReviewSessionID
+	}
+	return request
 }
 
 func decodeAssessmentManifest(raw json.RawMessage) (ReviewInputManifest, error) {
@@ -763,7 +777,7 @@ func (s *Service) cancelForcedEvidenceAssessment(ctx context.Context, orgID, prI
 		}
 	}
 	if err := s.scheduling.store.WithLockedPR(ctx, orgID, state.RepositoryID, prID, func(tx pgx.Tx, _ *models.CodeReviewPRState) error {
-		_, err := db.NewCodeReviewRecheckStore(tx).ReconcileDrainedTerminalTurn(ctx, orgID, assessmentID)
+		_, err := db.NewCodeReviewRecheckStore(tx).ReconcileDrainedTerminalTurnInTx(ctx, orgID, tx, assessmentID)
 		return err
 	}); err != nil {
 		return err
@@ -943,7 +957,7 @@ func (s *Service) RefreshUnsentEvidenceAssessment(ctx context.Context, orgID, as
 	}
 	requestID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("code-review-evidence-refresh:"+assessmentID.String()))
 	_, err = s.requestAssessmentReview(ctx, ScheduleRequestInput{OrgID: orgID, PullRequestID: a.PullRequestID, RequestID: requestID, Mode: models.CodeReviewRecheck,
-		RequestContext: normalizeReviewRequestContext(&ReviewRequestContext{Source: "assessment_refresh", Body: manifest.Request.SubstantiveText})})
+		RequestContext: normalizeReviewRequestContext(&ReviewRequestContext{Source: "assessment_refresh", Body: manifest.Request.SubstantiveText, UseReviewHistory: manifest.Request.UseReviewHistory})})
 	if errors.Is(err, ErrRecheckUnavailable) {
 		return s.scheduling.store.MarkEvidenceRefreshFailed(ctx, orgID, assessmentID)
 	}
@@ -989,7 +1003,7 @@ func (s *Service) FallbackAssessmentToFull(ctx context.Context, orgID, assessmen
 	}
 	// Recovery explains why work was restarted; it must not replace the human
 	// request that the captured assessment was intended to answer.
-	_, err = s.requestFullAssessmentReview(ctx, ScheduleRequestInput{OrgID: orgID, PullRequestID: a.PullRequestID, RequestID: requestID, Mode: models.CodeReviewForceFresh, Reason: reason}, a.RepositoryID, &ReviewRequestContext{Source: "assessment_fallback", Body: manifest.Request.SubstantiveText}, true, false)
+	_, err = s.requestFullAssessmentReview(ctx, ScheduleRequestInput{OrgID: orgID, PullRequestID: a.PullRequestID, RequestID: requestID, Mode: models.CodeReviewForceFresh, Reason: reason}, a.RepositoryID, &ReviewRequestContext{Source: "assessment_fallback", Body: manifest.Request.SubstantiveText, UseReviewHistory: manifest.Request.UseReviewHistory}, true, false)
 	if err != nil {
 		return err
 	}

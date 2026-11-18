@@ -7,6 +7,7 @@ import (
 
 	"github.com/assembledhq/143/internal/config"
 	"github.com/assembledhq/143/internal/db"
+	"github.com/assembledhq/143/internal/version"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +23,7 @@ func workerControlPlanePoolConfig(cfg config.Config) (*pgxpool.Config, error) {
 	poolConfig, err := db.NewPoolConfig(cfg.DatabaseURL, db.PoolOptions{
 		MaxConns:        2,
 		MaxConnIdleTime: cfg.DatabaseMaxConnIdleTime,
+		ApplicationName: serverLifecycleConnectionApplicationName(cfg.Mode, version.BuildSHA),
 	})
 	if err != nil {
 		return nil, err

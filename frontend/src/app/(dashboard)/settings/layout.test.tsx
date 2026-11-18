@@ -72,6 +72,14 @@ describe('SettingsLayout', () => {
     expect(screen.queryByText('secret admin content')).not.toBeInTheDocument();
   });
 
+  it.each(['member', 'viewer', 'builder'])('redirects %s away from package registries', async (role) => {
+    useAuthMock.mockReturnValue({ user: { role }, isLoading: false });
+    pathnameMock.value = '/settings/package-registries';
+    renderWithProviders(<SettingsLayout><div>credential content</div></SettingsLayout>);
+    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith('/settings/account'));
+    expect(screen.queryByText('credential content')).not.toBeInTheDocument();
+  });
+
   it('lets members view /settings/integrations (read-only access)', () => {
     useAuthMock.mockReturnValue({ user: { role: 'member' }, isLoading: false });
     pathnameMock.value = '/settings/integrations';

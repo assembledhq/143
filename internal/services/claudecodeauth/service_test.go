@@ -382,6 +382,7 @@ func TestGetValidToken_SkipsAPIKeyRow(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("expected subscription, got nil")
+		return
 	}
 	if got.AccessToken != "access-1" {
 		t.Errorf("want access_token access-1, got %s", got.AccessToken)
@@ -478,6 +479,7 @@ func TestGetValidToken_UnusableTopCredentialDoesNotStrandLowerPriority(t *testin
 			}
 			if sub == nil {
 				t.Fatal("expected the healthy priority-2 credential, got nil")
+				return
 			}
 			if sub.AccessToken != "access-good" {
 				t.Errorf("expected token from the healthy credential, got %q", sub.AccessToken)

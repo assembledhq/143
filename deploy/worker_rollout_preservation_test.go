@@ -29,7 +29,9 @@ func runWorkerShell(t *testing.T, source, body string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", "-c", "set -euo pipefail\n"+source+"\n"+body)
+	capacity, readErr := os.ReadFile("scripts/worker-disk-capacity.sh")
+	require.NoError(t, readErr, "should load the shared capacity observation helper")
+	cmd := exec.CommandContext(ctx, "bash", "-c", "set -euo pipefail\n"+string(capacity)+"\n"+source+"\n"+body)
 	cmd.Dir = t.TempDir()
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, ctx.Err(), "the preservation scenario should finish within its bound")
@@ -531,7 +533,9 @@ func runWorkerShellWithClosedErrorPipe(t *testing.T, source, body string) (strin
 			t.Logf("error pipe cleanup: %v", err)
 		}
 	})
-	cmd := exec.CommandContext(ctx, "bash", "-c", "set -euo pipefail\n"+source+"\n"+body)
+	capacity, readErr := os.ReadFile("scripts/worker-disk-capacity.sh")
+	require.NoError(t, readErr, "should load the shared capacity observation helper")
+	cmd := exec.CommandContext(ctx, "bash", "-c", "set -euo pipefail\n"+string(capacity)+"\n"+source+"\n"+body)
 	cmd.Dir = t.TempDir()
 	cmd.Stderr = writer
 	var output bytes.Buffer
@@ -621,7 +625,7 @@ func TestRoutineWorkerPrunePreservesStoppedGenerationContainers(t *testing.T) {
 			function := extractShellFunction(t, script, "prune_unused_docker_resources", "run_worker_session_deploy_guardrail")
 			output, err := runWorkerShell(t, function, `IMAGE_TAG=build-a
 DEPLOY_MODE=`+tt.mode+`
-docker(){ printf 'docker %s\n' "$*"; }
+docker(){ printf 'docker %s\n' "$*" >&2; }
 run_worker_deployctl(){ :; }
 prune_unused_docker_resources `+tt.role)
 			require.NoError(t, err, "safe prune mode should complete")
@@ -630,7 +634,11 @@ prune_unused_docker_resources `+tt.role)
 			} else {
 				require.NotContains(t, output, "docker container prune", "routine deployment must preserve stopped worker logs and exact generation evidence")
 			}
-			require.Contains(t, output, "docker image prune", "safe image cache cleanup should remain available")
+			if tt.role == "worker" {
+				require.NotContains(t, output, "docker image prune", "worker rollback and retained executor images must survive container collection")
+			} else {
+				require.Contains(t, output, "docker image prune", "app image cache cleanup should remain available")
+			}
 		})
 	}
 }
@@ -810,8 +818,10 @@ worker_rollout_guard attempt-a build-a `+shellQuote(root)+` `+shellQuote(root)+`
 	require.Error(t, err, "insufficient disk must reject admission to every host-side deployment operation")
 	require.NotContains(t, output, "ready:attempt-a", "failed pre-pull capacity must never acknowledge readiness to stage or reconcile")
 	require.NotContains(t, output, "unexpected-worker-mutation", "capacity refusal must leave all prior workers and ownership untouched")
-	data, readErr := os.ReadFile(filepath.Join(root, ".worker-rollout", "failure.json"))
+	data, readErr := os.ReadFile(filepath.Join(root, ".worker-rollout-rejections", "attempt-a", "failure.json"))
 	require.NoError(t, readErr, "pre-ready refusal must preserve its durable capacity reason")
+	_, statErr := os.Stat(filepath.Join(root, ".worker-rollout"))
+	require.ErrorIs(t, statErr, os.ErrNotExist, "a durably archived initial refusal must not block the next attempt")
 	var actual map[string]string
 	require.NoError(t, json.Unmarshal(data, &actual), "capacity failure context should remain structured")
 	require.Equal(t, map[string]string{"attempt": "attempt-a", "build_sha": "build-a", "phase": "host_disk_capacity_failed", "candidate_node": "unknown", "candidate_container": "unknown"}, actual, "generic guardian exit must preserve the specific capacity failure without inventing a candidate")

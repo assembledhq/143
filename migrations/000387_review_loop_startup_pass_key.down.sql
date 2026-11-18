@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_srl_passes_org_session_loop_id;

@@ -103,38 +103,7 @@ func (s *CodeReviewScheduleStore) WithLockedPR(ctx context.Context, orgID, repoI
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "code_review_pr:"+orgID.String()+":"+prID.String()); err != nil {
-		return err
-	}
-	// Validate tenant and repository ownership even when a scheduling row exists.
-	var owned bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pull_requests p JOIN repositories r ON r.org_id=p.org_id AND r.full_name=p.github_repo WHERE p.org_id=$1 AND p.id=$2 AND r.id=$3)`, orgID, prID, repoID).Scan(&owned); err != nil {
-		return err
-	}
-	if !owned {
-		return pgx.ErrNoRows
-	}
-	if _, err = tx.Exec(ctx, `INSERT INTO code_review_pr_state(org_id,repository_id,pull_request_id) VALUES($1,$2,$3) ON CONFLICT(org_id,pull_request_id) DO NOTHING`, orgID, repoID, prID); err != nil {
-		return err
-	}
-	rows, err := tx.Query(ctx, `SELECT * FROM code_review_pr_state WHERE org_id=$1 AND pull_request_id=$2 FOR UPDATE`, orgID, prID)
-	if err != nil {
-		return err
-	}
-	state, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewPRState])
-	if err != nil {
-		return err
-	}
-	if err = fn(tx, &state); err != nil {
-		return err
-	}
-	if err = state.State.Validate(); err != nil {
-		return err
-	}
-	if err = state.WaitReason.Validate(); err != nil {
-		return err
-	}
-	_, err = tx.Exec(ctx, `UPDATE code_review_pr_state SET generation=$3,automatic_paused=$4,head_sha=$5,base_sha=$6,base_ref=$7,is_draft=$8,snapshot_observed_at=$9,last_material_change_at=$10,first_pending_at=$11,last_agent_start_at=$12,eligible_at=$13,retry_at=$14,active_session_id=$15,pending_request_id=$16,pending_input=$17,state=$18,wait_reason=$19,active_assessment_id=$20,current_assessment_id=$21,updated_at=now() WHERE org_id=$1 AND pull_request_id=$2`, orgID, prID, state.Generation, state.AutomaticPaused, state.HeadSHA, state.BaseSHA, state.BaseRef, state.IsDraft, state.SnapshotObservedAt, state.LastMaterialChangeAt, state.FirstPendingAt, state.LastAgentStartAt, state.EligibleAt, state.RetryAt, state.ActiveSessionID, state.PendingRequestID, state.PendingInput, state.State, state.WaitReason, state.ActiveAssessmentID, state.CurrentAssessmentID)
+	state, err := s.withLockedPRInTx(ctx, tx, orgID, repoID, prID, fn)
 	if err != nil {
 		return err
 	}
@@ -147,6 +116,51 @@ func (s *CodeReviewScheduleStore) WithLockedPR(ctx context.Context, orgID, repoI
 		}
 	}
 	return nil
+}
+
+// withLockedPRInTx composes the existing PR lock and callback protocol without
+// settling or publishing. The supplied transaction owner retains any staged
+// callback writes on failure and is responsible for rolling back the whole unit.
+func (s *CodeReviewScheduleStore) withLockedPRInTx(ctx context.Context, tx pgx.Tx, orgID, repoID, prID uuid.UUID, fn func(pgx.Tx, *models.CodeReviewPRState) error) (models.CodeReviewPRState, error) {
+	if nilLifecycleDependency(tx) {
+		return models.CodeReviewPRState{}, errors.New("lock code review PR in tx: nil transaction")
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "code_review_pr:"+orgID.String()+":"+prID.String()); err != nil {
+		return models.CodeReviewPRState{}, err
+	}
+	// Validate tenant and repository ownership even when a scheduling row exists.
+	var owned bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pull_requests p JOIN repositories r ON r.org_id=p.org_id AND r.full_name=p.github_repo WHERE p.org_id=$1 AND p.id=$2 AND r.id=$3)`, orgID, prID, repoID).Scan(&owned); err != nil {
+		return models.CodeReviewPRState{}, err
+	}
+	if !owned {
+		return models.CodeReviewPRState{}, pgx.ErrNoRows
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO code_review_pr_state(org_id,repository_id,pull_request_id) VALUES($1,$2,$3) ON CONFLICT(org_id,pull_request_id) DO NOTHING`, orgID, repoID, prID); err != nil {
+		return models.CodeReviewPRState{}, err
+	}
+	rows, err := tx.Query(ctx, `SELECT * FROM code_review_pr_state WHERE org_id=$1 AND pull_request_id=$2 FOR UPDATE`, orgID, prID)
+	if err != nil {
+		return models.CodeReviewPRState{}, err
+	}
+	state, err := pgx.CollectOneRow(rows, pgx.RowToStructByName[models.CodeReviewPRState])
+	if err != nil {
+		return models.CodeReviewPRState{}, err
+	}
+	if err = fn(tx, &state); err != nil {
+		return models.CodeReviewPRState{}, err
+	}
+	if err = state.State.Validate(); err != nil {
+		return models.CodeReviewPRState{}, err
+	}
+	if err = state.WaitReason.Validate(); err != nil {
+		return models.CodeReviewPRState{}, err
+	}
+	_, err = tx.Exec(ctx, `UPDATE code_review_pr_state SET generation=$3,automatic_paused=$4,head_sha=$5,base_sha=$6,base_ref=$7,is_draft=$8,snapshot_observed_at=$9,last_material_change_at=$10,first_pending_at=$11,last_agent_start_at=$12,eligible_at=$13,retry_at=$14,active_session_id=$15,pending_request_id=$16,pending_input=$17,state=$18,wait_reason=$19,active_assessment_id=$20,current_assessment_id=$21,updated_at=now() WHERE org_id=$1 AND pull_request_id=$2`, orgID, prID, state.Generation, state.AutomaticPaused, state.HeadSHA, state.BaseSHA, state.BaseRef, state.IsDraft, state.SnapshotObservedAt, state.LastMaterialChangeAt, state.FirstPendingAt, state.LastAgentStartAt, state.EligibleAt, state.RetryAt, state.ActiveSessionID, state.PendingRequestID, state.PendingInput, state.State, state.WaitReason, state.ActiveAssessmentID, state.CurrentAssessmentID)
+	if err != nil {
+		return models.CodeReviewPRState{}, err
+	}
+	return state, nil
 }
 
 // UpsertCodeReviewWake is called under the PR lock. Running jobs are left to

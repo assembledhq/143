@@ -44,7 +44,7 @@ func TestPreviewToolExecutor_WaitSessionReadyReportsPhaseChanges(t *testing.T) {
 		_, err := fmt.Fprintf(w, `{"data":{"instance":{"id":"preview-1","session_id":"session-1","status":%q,"current_phase":%q}}}`, status, phase)
 		require.NoError(t, err, "test response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	var progress bytes.Buffer
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"}), progress: &progress, pollInterval: time.Millisecond}
@@ -83,7 +83,7 @@ func TestPreviewToolExecutor_WaitSessionReadyRetriesTransientStatusErrors(t *tes
 				_, err := w.Write([]byte(`{"data":{"instance":{"id":"preview-1","session_id":"session-1","status":"ready","current_phase":"readiness"}}}`))
 				require.NoError(t, err, "ready status response should write")
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 
 			var progress bytes.Buffer
 			executor := &previewToolExecutor{
@@ -108,7 +108,7 @@ func TestPreviewToolExecutor_WaitSessionReadyFailsFastOnPermanentStatusError(t *
 		calls.Add(1)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{
 		client:       NewClient(Config{ServerURL: server.URL, Token: "token"}),
@@ -175,7 +175,7 @@ func TestIsRetryablePreviewWaitErrorRetriesRequestTimeout(t *testing.T) {
 	}))
 	t.Cleanup(func() {
 		close(release)
-		server.Close()
+		closeCLIHTTPTestServer(t, server)
 	})
 
 	client := NewClient(Config{ServerURL: server.URL}).WithRequestTimeout(50 * time.Millisecond)
@@ -198,7 +198,7 @@ func TestPreviewToolExecutor_SessionScreenshotOmitsInlineBase64(t *testing.T) {
 		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","captured_at":"2026-06-27T00:00:00Z"}}}`))
 		require.NoError(t, err, "test response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.screenshot(context.Background(), mustJSON(map[string]any{
@@ -239,7 +239,7 @@ func TestPreviewToolExecutor_SessionScreenshotInlinesWithoutCapture(t *testing.T
 		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","captured_at":"2026-06-27T00:00:00Z"}}}`))
 		require.NoError(t, err, "test response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
@@ -257,7 +257,7 @@ func TestPreviewToolExecutor_SessionScreenshotDropsInlineWhenCapturePresent(t *t
 		_, err := w.Write([]byte(`{"data":{"screenshot":{"page_title":"Home","url":"https://preview.test/","png_base64":"abc","capture":{"id":"art-1","url":"https://cdn.test/art-1.png"},"captured_at":"2026-06-27T00:00:00Z"}}}`))
 		require.NoError(t, err, "test response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
@@ -275,7 +275,7 @@ func TestPreviewToolExecutor_SessionScreenshotDropsInlineForLegacyStoredReferenc
 		_, err := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"abc","artifact":{"id":"legacy-1"}}}}`))
 		require.NoError(t, err, "test response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.screenshot(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
@@ -296,7 +296,7 @@ func TestPreviewToolExecutor_InteractParsesJSONSteps(t *testing.T) {
 		_, err := w.Write([]byte(`{"data":{"steps":[{"action":"click","success":true}]}}`))
 		require.NoError(t, err, "test response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.interact(context.Background(), mustJSON(map[string]string{
@@ -320,7 +320,7 @@ func TestPreviewToolExecutor_ObserveUsesUnifiedEndpoint(t *testing.T) {
 		_, err := w.Write([]byte(`{"data":{"url":"https://preview.test/app","semantic_state":"[]","screenshot":{"png_base64":"iVBORw0KGgo="},"ready":true}}`))
 		require.NoError(t, err, "observe response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.observe(context.Background(), mustJSON(map[string]any{"session_id": "session-1", "path": "/app", "include_dom": true}))
 	require.False(t, result.IsError, "observe should succeed")
@@ -340,7 +340,7 @@ func TestPreviewToolExecutor_InternalObserveUsesSessionScopedEndpoint(t *testing
 		_, err := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"iVBORw0KGgo="},"ready":true}}`))
 		require.NoError(t, err, "internal observe response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "sandbox-token"}), internal: true}
 	result := executor.call(context.Background(), "preview_observe", mustJSON(map[string]any{"session_id": "session-1"}))
 	require.False(t, result.IsError, "internal observe should succeed")
@@ -357,7 +357,7 @@ func TestPreviewToolExecutor_ActUsesUnifiedEndpoint(t *testing.T) {
 		_, err := w.Write([]byte(`{"data":{"interaction":{"steps":[{"success":true}]},"observation":{"screenshot":{"png_base64":"iVBORw0KGgo=","capture":{"id":"capture-1"}},"ready":true}}}`))
 		require.NoError(t, err, "act response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.act(context.Background(), mustJSON(map[string]any{"session_id": "session-1", "steps": `[{"action":"click","role":"button","name":"Save"}]`}))
 	require.False(t, result.IsError, "act should succeed")
@@ -381,7 +381,7 @@ func TestPreviewToolExecutor_RequestHandoffUsesSessionScopedEndpoint(t *testing.
 		_, err := w.Write([]byte(`{"data":{"state":"waiting_for_handoff","handoff_reason":"MFA required"}}`))
 		require.NoError(t, err, "handoff response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "sandbox-token"}), internal: true}
 	result := executor.call(context.Background(), "preview_request_handoff", mustJSON(map[string]any{"session_id": "session-1", "reason": "MFA required"}))
 	require.False(t, result.IsError, "sandbox agent should request handoff")
@@ -420,7 +420,7 @@ func TestPreviewToolExecutor_InternalSessionCommandsDefaultToCodingSessionID(t *
 				_, err := w.Write([]byte(`{"data":{"action":"created","instance":{"id":"preview-1","session_id":"session-from-env","status":"provisioning"}}}`))
 				require.NoError(t, err, "session preview response should write")
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 
 			executor := &previewToolExecutor{
 				client:   NewClient(Config{ServerURL: server.URL, Token: "sandbox-token"}),
@@ -447,7 +447,7 @@ func TestPreviewToolExecutor_ObserveWritesWorkspaceImage(t *testing.T) {
 		_, writeErr := w.Write([]byte(`{"data":{"screenshot":{"png_base64":"iVBORw0KGgo="},"ready":true}}`))
 		require.NoError(t, writeErr, "observe response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.observe(context.Background(), mustJSON(map[string]any{"session_id": "session-1", "output": output}))
 	require.False(t, result.IsError, "observe with output should succeed")
@@ -492,7 +492,7 @@ func TestPreviewToolExecutor_ObserveRejectsInvalidImages(t *testing.T) {
 				_, err := w.Write([]byte(body))
 				require.NoError(t, err, "invalid image fixture should write")
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 
 			executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 			result := executor.observe(context.Background(), mustJSON(map[string]any{"session_id": "session-1"}))
@@ -561,7 +561,7 @@ func TestPreviewToolExecutor_ScreenshotTargetsPreviewID(t *testing.T) {
 		_, err := w.Write([]byte(`{"data":{"capture":{"url":"/api/v1/uploads/files/org/preview.png"},"captured_at":"2026-06-27T00:00:00Z"}}`))
 		require.NoError(t, err, "test response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.screenshot(context.Background(), mustJSON(map[string]any{
@@ -585,7 +585,7 @@ func TestPreviewToolExecutor_ListSessionPreview(t *testing.T) {
 		_, err := w.Write([]byte(`{"data":{"instance":{"id":"preview-1","session_id":"session-1","status":"ready"},"preview_origin":"https://preview.test"}}`))
 		require.NoError(t, err, "test response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.list(context.Background(), mustJSON(map[string]string{"session_id": "session-1"}))
@@ -624,7 +624,7 @@ func TestPreviewToolExecutor_BranchCreateWaitPollsUntilReady(t *testing.T) {
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.create(context.Background(), mustJSON(map[string]any{
@@ -651,7 +651,7 @@ func TestPreviewToolExecutor_WaitBranchReadyRetriesTransientStatusError(t *testi
 		_, err := w.Write([]byte(`{"data":{"target_id":"target-1","preview_id":"preview-1","status":"running","preview_url":"https://preview.test"}}`))
 		require.NoError(t, err, "ready branch status response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{
 		client:       NewClient(Config{ServerURL: server.URL, Token: "token"}),
@@ -674,7 +674,7 @@ func TestPreviewToolExecutor_UpdateWaitReturnsUpdateResponse(t *testing.T) {
 		_, err := w.Write([]byte(`{"data":{"preview_id":"preview-1","session_id":"session-1","mode":"soft_service_restart","action":"restarting","status":"ready","message":"preview service restart started"}}`))
 		require.NoError(t, err, "update response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.update(context.Background(), mustJSON(map[string]any{
@@ -699,7 +699,7 @@ func TestPreviewToolExecutor_InspectAllowsTopLeftCoordinate(t *testing.T) {
 		_, err := w.Write([]byte(`{"data":{"tag":"div"}}`))
 		require.NoError(t, err, "test response should write")
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.inspect(context.Background(), mustJSON(map[string]any{
@@ -719,7 +719,7 @@ func TestPreviewToolExecutor_InspectRequiresSelectorOrCoordinates(t *testing.T) 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("no HTTP request should be made when neither selector nor coordinates are given, got %s %s", r.Method, r.URL.Path)
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.inspect(context.Background(), mustJSON(map[string]string{"session_id": "session-1"}))
@@ -734,7 +734,7 @@ func TestPreviewToolExecutor_RejectsAmbiguousTarget(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("no HTTP request should be made when the target is ambiguous, got %s %s", r.Method, r.URL.Path)
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	both := mustJSON(map[string]string{"session_id": "session-1", "preview_id": "preview-1"})
@@ -766,7 +766,7 @@ func TestPreviewToolExecutor_CreateRejectsAmbiguousTarget(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("no HTTP request should be made when create target is ambiguous, got %s %s", r.Method, r.URL.Path)
 	}))
-	defer server.Close()
+	defer closeCLIHTTPTestServer(t, server)
 
 	executor := &previewToolExecutor{client: NewClient(Config{ServerURL: server.URL, Token: "token"})}
 	result := executor.create(context.Background(), mustJSON(map[string]string{

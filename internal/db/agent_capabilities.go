@@ -15,6 +15,10 @@ import (
 // the requested capability is already present in the session snapshot.
 var ErrCapabilityAlreadyGranted = errors.New("capability already granted")
 
+// ErrCapabilityGrantRequiresReadCommitted rejects isolation levels whose fixed
+// transaction snapshot cannot refresh after waiting for the session lock.
+var ErrCapabilityGrantRequiresReadCommitted = errors.New("approved capability grants require READ COMMITTED")
+
 // ErrAutomationNotFound is returned when a capability policy write targets an
 // automation UUID that does not exist in the given org.
 var ErrAutomationNotFound = errors.New("automation not found")
@@ -185,6 +189,9 @@ func (s *AgentCapabilityPolicyStore) replacePolicy(ctx context.Context, orgID uu
 	return policyID, nil
 }
 
+// AppendApprovedSessionGrant owns the existing transaction boundary and delegates
+// fresh-snapshot persistence to its InTx seam. A non-READ-COMMITTED connection
+// default fails explicitly rather than silently changing the caller's isolation.
 func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Context, orgID, sessionID uuid.UUID, item models.AgentCapabilitySnapshotItem) ([]models.AgentCapabilitySnapshotItem, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -192,6 +199,55 @@ func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Cont
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	snapshot, err := s.AppendApprovedSessionGrantInTx(ctx, orgID, tx, sessionID, item)
+	if err != nil {
+		return snapshot, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit append capability grant tx: %w", err)
+	}
+	return snapshot, nil
+}
+
+// AppendApprovedSessionGrantInTx persists a session capability snapshot and the
+// optional linked automation snapshot in the caller's transaction. It preserves
+// the legacy session-before-automation lock order; it does not establish consent,
+// request readiness, domain ownership, epochs or lifecycle compatibility authority.
+// The caller must validate that authority and compose any required locks before
+// calling. This method never begins, settles or retries a transaction or uses the
+// store pool. On any error the caller owns rollback of the whole unit, including
+// earlier writes. A returned snapshot is valid only after the caller commits;
+// discard/reset captured results on errors or transaction replay.
+//
+// READ COMMITTED is required before any row lock or write: a repeatable-read or
+// serializable transaction cannot acquire the needed fresh statement snapshot
+// after waiting. The parent is locked in an earlier statement before reading
+// metadata, so another conforming grant's committed snapshot and duplicate are
+// visible. Historical writers using the old joined read/lock SQL can still lose
+// updates; this is not proof that those writers have drained or a floor is active.
+func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrantInTx(ctx context.Context, orgID uuid.UUID, tx pgx.Tx, sessionID uuid.UUID, item models.AgentCapabilitySnapshotItem) ([]models.AgentCapabilitySnapshotItem, error) {
+	if nilLifecycleDependency(tx) {
+		return nil, errors.New("append approved session grant in tx: nil transaction")
+	}
+	var isolation string
+	if err := tx.QueryRow(ctx, "SHOW transaction_isolation").Scan(&isolation); err != nil {
+		return nil, fmt.Errorf("read append capability grant transaction isolation: %w", err)
+	}
+	if isolation != string(pgx.ReadCommitted) {
+		return nil, ErrCapabilityGrantRequiresReadCommitted
+	}
+	var lockedSession uuid.UUID
+	if err := tx.QueryRow(ctx, `
+		SELECT id FROM sessions
+		WHERE org_id = @org_id AND id = @session_id AND deleted_at IS NULL
+		FOR UPDATE`,
+		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
+	).Scan(&lockedSession); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("lock session capability snapshot: %w", err)
+	}
 	var snapshot []models.AgentCapabilitySnapshotItem
 	var automationRunID *uuid.UUID
 	rows, err := tx.Query(ctx, `
@@ -201,8 +257,7 @@ func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Cont
 		  ON sem.org_id = s.org_id AND sem.session_id = s.id
 		LEFT JOIN session_automation_links sal
 		  ON sal.org_id = s.org_id AND sal.session_id = s.id
-		WHERE s.org_id = @org_id AND s.id = @session_id AND s.deleted_at IS NULL
-		FOR UPDATE OF s`,
+		WHERE s.org_id = @org_id AND s.id = @session_id AND s.deleted_at IS NULL`,
 		pgx.NamedArgs{"org_id": orgID, "session_id": sessionID},
 	)
 	if err != nil {
@@ -247,9 +302,6 @@ func (s *AgentCapabilityPolicyStore) AppendApprovedSessionGrant(ctx context.Cont
 		); err != nil {
 			return nil, fmt.Errorf("update automation run capability snapshot: %w", err)
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit append capability grant tx: %w", err)
 	}
 	return snapshot, nil
 }

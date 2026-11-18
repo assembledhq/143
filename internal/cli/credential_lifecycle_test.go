@@ -87,7 +87,7 @@ func TestCLICredentialLifecycle(t *testing.T) {
 					w.WriteHeader(404)
 				}
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 			if tt.seed {
 				require.NoError(t, SaveConfig(Config{ServerURL: server.URL, Token: token, OrgID: "org"}), "seed isolated config")
 			}
@@ -168,7 +168,7 @@ func TestCLIExchangeCodeAndDeviceRetirement(t *testing.T) {
 				_, err := fmt.Fprintf(w, `{"data":{"token":%q,"token_id":"new-id","token_prefix":"new-prefix","user":{"id":"user","name":"Person","email":"person@example.test"},"org":{"id":"org","name":"Example"}}}`, token)
 				require.NoError(t, err, "write exchange fixture")
 			}))
-			defer server.Close()
+			defer closeCLIHTTPTestServer(t, server)
 			response, err := exchangeCode(context.Background(), server.URL, "one-time-code", "private-verifier")
 			if tt.expectedError != "" {
 				require.ErrorContains(t, err, tt.expectedError, "invalid exchange must not create usable credentials")
@@ -196,7 +196,7 @@ func TestCLIExchangeCodeAndDeviceRetirement(t *testing.T) {
 				w.WriteHeader(204)
 			}
 		}))
-		defer server.Close()
+		defer closeCLIHTTPTestServer(t, server)
 		var stderr bytes.Buffer
 		revokeStaleDeviceTokens(context.Background(), Config{ServerURL: server.URL, Token: "new-token"}, "keep", "Laptop", &stderr)
 		mu.Lock()

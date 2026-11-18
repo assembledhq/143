@@ -1358,9 +1358,10 @@ func TestGitHubEventTriggerService_ReadyForReviewSnapshot(t *testing.T) {
 }
 
 type reviewCommentLookup struct {
-	found bool
-	owner uuid.UUID
-	calls int
+	found       bool
+	owner       uuid.UUID
+	calls       int
+	reviewCalls int
 }
 
 func (s *reviewCommentLookup) ListAutomationActionCommentOwners(context.Context, uuid.UUID, uuid.UUID, int, int64, string) ([]uuid.UUID, error) {
@@ -1370,6 +1371,15 @@ func (s *reviewCommentLookup) ListAutomationActionCommentOwners(context.Context,
 	}
 	return nil, nil
 }
+
+func (s *reviewCommentLookup) FindAutomationActionReviewOwner(context.Context, uuid.UUID, uuid.UUID, int, models.AutomationActionReviewFeedback) (uuid.UUID, error) {
+	s.reviewCalls++
+	if s.found {
+		return s.owner, nil
+	}
+	return uuid.Nil, nil
+}
+
 func TestOwnReviewCommentDoesNotTriggerContinuousAutomation(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1391,6 +1401,60 @@ func TestOwnReviewCommentDoesNotTriggerContinuousAutomation(t *testing.T) {
 			require.NoError(t, err, "process trusted event")
 			require.Equal(t, tt.lookups, lookup.calls, "only verified own app comments consult action receipts")
 			require.Equal(t, tt.runs, len(runs.runs), "only this automation's own recorded effect is a no-op")
+		})
+	}
+}
+
+func TestOwnReviewFeedbackSkipsOnlyThePostingAutomation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		event    models.AutomationGitHubEvent
+		ownApp   bool
+		recorded bool
+		skips    bool
+	}{
+		{"own submitted review", models.AutomationGitHubEventPullRequestReviewSubmitted, true, true, true},
+		{"own inline comment", models.AutomationGitHubEventPullRequestReviewCommentCreated, true, true, true},
+		{"native 143 review", models.AutomationGitHubEventPullRequestReviewSubmitted, true, false, false},
+		{"other app or user", models.AutomationGitHubEventPullRequestReviewCommentCreated, false, true, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			orgID, repoID := uuid.New(), uuid.New()
+			owner := newLabelFilterAutomation(orgID, repoID, json.RawMessage(`{}`))
+			other := newLabelFilterAutomation(orgID, repoID, json.RawMessage(`{}`))
+			store := &fakeGitHubAutomationStore{automations: []models.Automation{owner, other}}
+			runs := &fakeGitHubAutomationRunStore{}
+			service := newTestService(store, runs, &fakeGitHubAutomationJobStore{})
+			lookup := &reviewCommentLookup{found: tt.recorded, owner: owner.ID}
+			service.SetActions(lookup)
+			request := GitHubEventTriggerRequest{
+				OrgID: orgID, RepositoryID: repoID, Event: tt.event,
+				Repository: "owner/repo", PullRequestNumber: 42, ProviderEventID: "delivery",
+			}
+			if tt.ownApp {
+				request.OwnAppReviewFeedback = &models.AutomationActionReviewFeedback{ReviewID: 123}
+			}
+
+			require.NoError(t, service.TriggerGitHubEvent(context.Background(), request), "dispatch the review event")
+			want := []uuid.UUID{owner.ID, other.ID}
+			if tt.skips {
+				want = []uuid.UUID{other.ID}
+			}
+			var got []uuid.UUID
+			for _, run := range runs.runs {
+				got = append(got, run.AutomationID)
+			}
+			require.Equal(t, want, got, "a matching receipt suppresses only the posting automation")
+			require.Zero(t, lookup.calls, "review feedback never looks up a timeline comment ID")
+			if tt.ownApp {
+				require.Equal(t, 1, lookup.reviewCalls, "verified own reviews consult their action receipt")
+			} else {
+				require.Zero(t, lookup.reviewCalls, "foreign authors cannot use copied receipt markers to suppress feedback")
+			}
 		})
 	}
 }

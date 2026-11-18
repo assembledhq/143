@@ -125,6 +125,8 @@ describe('SessionDetailPage session states', () => {
   });
 
   it('clicking diff stats badge in header opens Changes tab', async () => {
+    // Exercise session navigation independently of the lazy viewer's cold import.
+    await import('@/components/code-review/review-diff-view');
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',
@@ -145,6 +147,7 @@ describe('SessionDetailPage session states', () => {
   });
 
   it('refetches stale empty diff data when the conversation files-changed button opens review', async () => {
+    await import('@/components/code-review/review-diff-view');
     const sessionWithDiff: Session = {
       ...mockSessions[0],
       diff: 'diff --git a/src/app.ts b/src/app.ts\n--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,3 +1,4 @@\n import express from "express";\n+import cors from "cors";\n const app = express();\n app.listen(3000);',

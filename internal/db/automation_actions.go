@@ -177,6 +177,9 @@ func (s *AutomationActionStore) Reserve(ctx context.Context, orgID uuid.UUID, ac
 	if len(existing) >= 100 {
 		return out, ErrAutomationActionLimit
 	}
+	if err = validateAutomationCommentUpdate(ctx, tx, orgID, scope, request, payload, uuid.Nil); err != nil {
+		return out, err
+	}
 	destination, err := json.Marshal(scope.Config)
 	if err != nil {
 		return out, err
@@ -232,6 +235,12 @@ func (s *AutomationActionStore) Claim(ctx context.Context, orgID uuid.UUID, acto
 	if !reflect.DeepEqual(old.Canonical(), scope.Config.Canonical()) || !actionRequestAllowed(scope, frozen.Request) {
 		return out, ErrAutomationActionConflict
 	}
+	if out.Status != models.AutomationActionPending && out.Status != models.AutomationActionFailed {
+		return out, ErrAutomationActionBusy
+	}
+	if err = validateAutomationCommentUpdate(ctx, tx, orgID, scope, frozen.Request, out.Payload, out.ID); err != nil {
+		return out, err
+	}
 	rows, err = tx.Query(ctx, `UPDATE automation_actions SET status='sending',attempt_count=attempt_count+1,send_token=$3,send_deadline_at=clock_timestamp()+interval '8 seconds',last_run_id=$4,last_error_code=NULL,updated_at=now()
  WHERE org_id=$1 AND id=$2 AND status IN ('pending','failed') RETURNING `+automationActionColumns, orgID, id, uuid.New(), actor.RunID)
 	if err != nil {
@@ -276,4 +285,34 @@ func (s *AutomationActionStore) ListAutomationActionCommentOwners(ctx context.Co
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+}
+
+func (s *AutomationActionStore) FindAutomationActionReviewOwner(ctx context.Context, orgID, repoID uuid.UUID, pr int, feedback models.AutomationActionReviewFeedback) (uuid.UUID, error) {
+	actionID := feedback.ActionID()
+	if actionID == uuid.Nil || feedback.ReviewID <= 0 {
+		return uuid.Nil, nil
+	}
+
+	var automationID uuid.UUID
+	var raw json.RawMessage
+	err := s.db.QueryRow(ctx, `SELECT automation_id,payload->'request' FROM automation_actions
+ WHERE org_id=$1 AND repository_id=$2 AND pr_number=$3 AND id=$4 AND kind='github_pull_request_review'
+ AND attempt_count>0 AND status IN ('sending','unknown','succeeded')
+ AND (provider_object_id IS NULL OR provider_object_id=$5)`,
+		orgID, repoID, pr, actionID, strconv.FormatInt(feedback.ReviewID, 10)).Scan(&automationID, &raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, nil
+	}
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	var request models.AutomationActionRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return uuid.Nil, fmt.Errorf("decode automation review request: %w", err)
+	}
+	if !feedback.Matches(request, actionID) {
+		return uuid.Nil, nil
+	}
+	return automationID, nil
 }

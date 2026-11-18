@@ -20,6 +20,71 @@ from pg_backup_runtime_test import safe_resources
 
 
 class HashTests(unittest.TestCase):
+    def test_paced_hash_caps_reads_without_banking_slow_work(self):
+        mib = 1024 ** 2
+        cases = [
+            ('fast reads', 17 * mib, [0, 0, 0], 17 / 32),
+            ('slow first read', 17 * mib, [1, 0, 0], 1 + 9 / 32),
+            ('short final read', 19, [0], 19 / (32 * mib)),
+            ('empty archive', 0, [], 0),
+        ]
+        for name, size, work_delays, expected_seconds in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'archive'
+                content = b'x' * size
+                path.write_bytes(content)
+                path.chmod(0o600)
+                before = state.identity(path)
+                clock = types.SimpleNamespace(seconds=0, sleeps=[])
+                digest = hashlib.sha256()
+                delays = iter(work_delays)
+
+                def update(block):
+                    digest.update(block)
+                    clock.seconds += next(delays)
+
+                def sleep(seconds):
+                    self.assertGreater(seconds, 0)
+                    self.assertLessEqual(seconds, .25, 'pacing must keep watchdog checks responsive')
+                    clock.sleeps.append(seconds)
+                    clock.seconds += seconds
+
+                hasher = types.SimpleNamespace(update=update, hexdigest=digest.hexdigest)
+                with mock.patch.object(state.hashlib, 'sha256', return_value=hasher), \
+                        mock.patch.object(state.time, 'monotonic', side_effect=lambda: clock.seconds), \
+                        mock.patch.object(state.time, 'sleep', side_effect=sleep), \
+                        mock.patch.object(state.os, 'posix_fadvise', create=True), \
+                        mock.patch.multiple(state.os, POSIX_FADV_SEQUENTIAL=2, POSIX_FADV_DONTNEED=4, create=True):
+                    tick = mock.Mock()
+                    actual = state.sha256(path, tick=tick, drop_cache=True,
+                                          read_bytes_per_second=32 * mib)
+                self.assertEqual(actual, hashlib.sha256(content).hexdigest())
+                self.assertEqual(state.identity(path), before, 'pacing must not change archive identity')
+                self.assertAlmostEqual(clock.seconds, expected_seconds)
+                self.assertGreaterEqual(tick.call_count, len(clock.sleeps) + len(work_delays) + 1)
+
+    def test_paced_hash_rejects_invalid_rate(self):
+        for rate in (0, -1, True, 1.5, '32', float('nan')):
+            with self.subTest(rate=rate):
+                with self.assertRaisesRegex(state.Refused, 'checksum read rate'):
+                    state.sha256(Path('/unused'), read_bytes_per_second=rate)
+
+    def test_guard_remains_active_while_hash_waits(self):
+        for reason in ('backup cancelled', 'backup checksum timed out', 'host_io pressure at risk'):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / 'archive'
+                path.write_bytes(b'completed backup')
+                path.chmod(0o600)
+                before = state.identity(path)
+                with mock.patch.object(state.time, 'monotonic', return_value=0), \
+                        mock.patch.object(state.time, 'sleep') as sleep:
+                    tick = mock.Mock(side_effect=[None, state.Refused(reason)])
+                    with self.assertRaisesRegex(state.Refused, reason):
+                        state.sha256(path, tick=tick, read_bytes_per_second=1)
+                    sleep.assert_not_called()
+                self.assertEqual(state.identity(path), before)
+                self.assertEqual(path.read_bytes(), b'completed backup')
+
     def test_hash_drops_each_read_without_changing_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'archive'
@@ -87,6 +152,61 @@ class TransferTests(unittest.TestCase):
         state.atomic_json(self.guard.record, self.owned)
         state.atomic_json(self.state / 'pending.json', dict(app_name=self.app, partial=self.partial.name,
                                                           phase='verification', runtime='postdump'))
+
+    def test_checksum_uses_pacing_with_existing_guard_and_deadline(self):
+        with mock.patch.object(self.guard, 'checkpoint') as checkpoint, \
+                mock.patch.object(runtime, 'sha256', return_value='archive-checksum') as checksum, \
+                mock.patch.object(runtime.time, 'monotonic', return_value=123):
+            self.assertEqual(self.guard.checksum(self.partial), 'archive-checksum')
+        checksum.assert_called_once_with(self.partial, tick=self.guard.tick, drop_cache=True,
+                                         read_bytes_per_second=32 * 1024 ** 2)
+        self.assertEqual(checkpoint.call_args_list, [mock.call('checksum_started'),
+                                                   mock.call('checksum_completed', enforce=False)])
+        self.assertEqual(self.guard.phase_deadline, 123 + self.p.verify_timeout)
+        self.assertEqual(self.guard.timeline['checksum_read_bytes_per_second'], 32 * 1024 ** 2)
+        self.assertIs(runtime.VerificationRecoveryGuard.checksum, runtime.TransferGuard.checksum,
+                      'automatic verification recovery must inherit the paced reader')
+
+    def test_pacing_does_not_defer_real_guard_failures(self):
+        for failure in ('io', 'cancel', 'deadline'):
+            with self.subTest(failure=failure):
+                self.partial.write_bytes(b'x' * (6 * 1024 ** 2))
+                before = state.identity(self.partial)
+                self.p.verify_timeout = 2 if failure == 'deadline' else 600
+                self.guard = runtime.TransferGuard(self.p, self.partial, self.app, {}, 100, 'test-cli')
+                self.guard.owned = dict(self.owned)
+                self.guard.cancel.unlink(missing_ok=True)
+                clock = types.SimpleNamespace(seconds=100)
+
+                def resources(*args):
+                    sample = dict(safe_resources(), monotonic=clock.seconds)
+                    if failure == 'io' and clock.seconds >= 105:
+                        sample['host_io'] = dict(some=20.01, full=0)
+                    return sample
+
+                def sleep(seconds):
+                    clock.seconds += seconds
+                    if failure == 'cancel':
+                        self.guard.cancel.write_text('{}')
+
+                reason = {'io': 'host_io pressure at risk', 'cancel': 'backup cancelled',
+                          'deadline': 'backup checksum timed out'}[failure]
+                with mock.patch.object(runtime, 'CHECKSUM_READ_BYTES_PER_SECOND', 1024 ** 2), \
+                        mock.patch.object(runtime.time, 'monotonic', side_effect=lambda: clock.seconds), \
+                        mock.patch.object(runtime.time, 'sleep', side_effect=sleep), \
+                        mock.patch.object(self.guard, 'database'), \
+                        mock.patch.object(runtime, 'resources', side_effect=resources), \
+                        mock.patch.object(state.os, 'posix_fadvise', create=True), \
+                        mock.patch.multiple(state.os, POSIX_FADV_SEQUENTIAL=2, POSIX_FADV_DONTNEED=4, create=True):
+                    with self.assertRaisesRegex(state.Refused, reason):
+                        self.guard.checksum(self.partial)
+                    result = self.guard.fail(reason)
+                self.assertEqual(result['failed_phase'], 'checksum')
+                self.assertTrue(result['cleanup_verified'])
+                self.assertTrue(result['archive_preserved'])
+                self.assertEqual(state.identity(self.partial), before)
+                self.assertTrue((self.state / 'pending.json').exists())
+                self.assertLess(clock.seconds, 106, 'guard must interrupt the pacing wait')
 
     def test_scheduled_rate_applies_to_verification_and_upload_with_original_total_limit(self):
         self.p.swap_out_mib_per_second = 8

@@ -217,7 +217,7 @@ func TestRunAgentReviewCheckoutFailuresPersistTerminalState(t *testing.T) {
 				return nil
 			}
 			d.provider.ExecFn = func(_ context.Context, _ *agent.Sandbox, command string, stdout, _ io.Writer) (int, error) {
-				if command == "git rev-parse HEAD" {
+				if command == "git rev-parse HEAD" || (strings.Contains(command, " checkout -B ") && strings.Contains(command, "git rev-parse HEAD")) {
 					_, err := io.WriteString(stdout, strings.Repeat("c", 40)+"\n")
 					return 0, err
 				}

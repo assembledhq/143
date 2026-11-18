@@ -234,6 +234,7 @@ func TestShouldSkipIndeterminateSnapshotWrite(t *testing.T) {
 		mergeIndet      bool
 		testsIndet      bool
 		newHeadSHA      string
+		newBaseSHA      string
 		newFailingCount int
 		prior           models.PullRequestHealthCurrent
 		expectSkip      bool
@@ -300,6 +301,20 @@ func TestShouldSkipIndeterminateSnapshotWrite(t *testing.T) {
 			expectSkip:      false,
 		},
 		{
+			name:       "base movement invalidates prior conflict state",
+			mergeIndet: true,
+			newHeadSHA: "sha-1",
+			newBaseSHA: "new-base",
+			prior:      makePrior(t, "sha-1", conflictedPrior),
+		},
+		{
+			name:       "base movement invalidates prior failing check snapshot",
+			testsIndet: true,
+			newHeadSHA: "sha-1",
+			newBaseSHA: "new-base",
+			prior:      makePrior(t, "sha-1", twoFailingPrior),
+		},
+		{
 			name:       "corrupt prior summary JSON falls through to write",
 			mergeIndet: true,
 			newHeadSHA: "sha-1",
@@ -312,7 +327,7 @@ func TestShouldSkipIndeterminateSnapshotWrite(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			skip := shouldSkipIndeterminateSnapshotWrite(tt.mergeIndet, tt.testsIndet, tt.newHeadSHA, tt.newFailingCount, tt.prior)
+			skip := shouldSkipIndeterminateSnapshotWrite(tt.mergeIndet, tt.testsIndet, tt.newHeadSHA, tt.newBaseSHA, tt.newFailingCount, tt.prior)
 			require.Equal(t, tt.expectSkip, skip, "skip decision should match the expected outcome")
 		})
 	}
@@ -394,7 +409,7 @@ func TestClassifyCheckRunCategory(t *testing.T) {
 	}
 }
 
-func TestDedupeCheckRunsByName(t *testing.T) {
+func TestDedupeCheckRunsByProviderAndName(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -455,8 +470,8 @@ func TestDedupeCheckRunsByName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := dedupeCheckRunsByName(tt.input)
-			require.Equal(t, tt.expected, got, "dedupeCheckRunsByName should keep highest-ID check per name")
+			got := dedupeCheckRunsByProviderAndName(tt.input)
+			require.Equal(t, tt.expected, got, "deduplication should keep the highest-ID check per provider and name")
 		})
 	}
 }

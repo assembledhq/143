@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_automation_consumer_job;

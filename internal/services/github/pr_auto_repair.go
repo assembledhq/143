@@ -16,6 +16,9 @@ import (
 
 const maxAutomaticRepairAttemptsPerHeadAction = 1
 
+// PRCheckProjectionAutoRepairReason evaluates repairs using stored check health.
+const PRCheckProjectionAutoRepairReason = "github_pr_check_state_updated"
+
 type AutoRepairDecisionStatus string
 
 const (
@@ -106,7 +109,9 @@ func (s *PRService) MaybeStartAutoRepair(ctx context.Context, orgID uuid.UUID, s
 		}
 	}
 
-	health, err := s.getPullRequestHealth(ctx, orgID, pr.ID, autoRepairHealthBuildOptions())
+	healthOptions := autoRepairHealthBuildOptions()
+	healthOptions.skipSync = reason == PRCheckProjectionAutoRepairReason
+	health, err := s.getPullRequestHealth(ctx, orgID, pr.ID, healthOptions)
 	if err != nil {
 		return nil, fmt.Errorf("load pull request health for auto-repair: %w", err)
 	}
@@ -269,7 +274,7 @@ func autoRepairSessionCanStart(status models.SessionStatus) bool {
 // coordinator runs from the sync_pull_request_state and
 // rebuild_pull_request_health job handlers, so borrowing the read path's
 // two-minute threshold would make every projected rebuild pull in the
-// authoritative readback that checkStateRequiresAuthoritativeSync avoided.
+// authoritative readback that the check projection avoided.
 // Conflicts — the blocker this path actually reads merge state for — come
 // from base-branch movement, which produces no webhook on this PR at all
 // and is detected by the reconcile sweep regardless. The budget is fixed at

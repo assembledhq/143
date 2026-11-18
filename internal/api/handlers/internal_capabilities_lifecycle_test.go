@@ -107,7 +107,7 @@ func TestInternalCapabilityRequestLifecycle(t *testing.T) {
 			svc := agentcapabilities.NewService(nil)
 			svc.SetHumanInputRequestWriter(writer)
 			if tt.status == 202 || tt.stage == "pause" {
-				q := mock.ExpectQuery(`UPDATE sessions SET status = @status, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id`).WithArgs(pgx.NamedArgs{"id": session, "org_id": org, "status": string(models.SessionStatusAwaitingInput)})
+				q := mock.ExpectQuery(`UPDATE sessions SET status = @status, runtime_soft_deadline_at = NULL, runtime_hard_deadline_at = NULL, last_activity_at = now\(\) WHERE id = @id AND org_id = @org_id`).WithArgs(pgx.NamedArgs{"id": session, "org_id": org, "status": string(models.SessionStatusAwaitingInput)})
 				if tt.stage == "pause" {
 					q.WillReturnError(errors.New("private pause error"))
 				} else {

@@ -46,6 +46,7 @@ import (
 	"github.com/assembledhq/143/internal/services/ingestion"
 	"github.com/assembledhq/143/internal/services/linear"
 	"github.com/assembledhq/143/internal/services/ownerloss"
+	"github.com/assembledhq/143/internal/services/packagecredentials"
 	pagerdutysvc "github.com/assembledhq/143/internal/services/pagerduty"
 	"github.com/assembledhq/143/internal/services/preview"
 	"github.com/assembledhq/143/internal/services/publicationintent"
@@ -221,6 +222,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		} else {
 			ghSvc.SetRateLimitController(githubRateLimitController, logger)
 			automationActionTokens = ghSvc
+			if strings.TrimSpace(cfg.GitHubAppSlug) == "" {
+				logger.Warn().Msg("GITHUB_APP_SLUG is unset. Automation review attribution requires an App ID in GitHub's review payloads")
+			}
 			prService = ghservice.NewPRService(
 				ghSvc, pullRequestStore, sessionStore, issueStore,
 				deployStore, repoStore, jobStore, logger,
@@ -464,7 +468,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		pullRequestHandler.SetFeedbackService(prService)
 	}
 	codeReviewHandler := handlers.NewCodeReviewHandler(codeReviewStore, repoStore)
+	codeReviewExportHandler := handlers.NewCodeReviewExportHandler(codereviewsvc.NewHistoricalExportService(db.NewCodeReviewExportStore(pool)))
 	codeReviewHandler.SetContinuationCapabilities(cfg.CodeReviewAssessmentsEnabled, cfg.CodeReviewRechecksEnabled)
+	codeReviewHandler.SetReviewHistoryCapability(cfg.CodeReviewHistoryEnabled)
 	codeReviewHandler.SetAssessments(db.NewCodeReviewAssessmentStore(pool), db.NewCodeReviewRecheckStore(pool), pullRequestStore)
 	codeReviewHandler.SetRetryService(codeReviewSvc)
 	codeReviewHandler.SetAuditEmitter(auditEmitter)
@@ -725,6 +731,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 	credentialHandler := handlers.NewCredentialHandler(credentialStore)
 	credentialHandler.SetSelfHeal(orgStore, cfg.SafeLLMEnv())
 	previewSecretBundleHandler := handlers.NewPreviewSecretBundleHandler(previewSecretBundleStore)
+	packageRegistryCredentialHandler := handlers.NewPackageRegistryCredentialHandler(packagecredentials.NewService(db.NewPackageRegistryCredentialStore(pool), cryptoSvc), auditEmitter)
 	memoryHandler := handlers.NewMemoryHandler(memoryStore, reviewCommentStore)
 	// Unified coding-credentials handler — see docs/design/future/65-unified-coding-credentials.md.
 	codingCredentialHandler := handlers.NewCodingCredentialHandler(codingCredentialStore, orgStore)
@@ -1188,12 +1195,14 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 		internalSessionHistoryHandler := handlers.NewInternalSessionHistoryHandler(sessionHistoryStore, sessionStore, sessionMessageStore, cfg.SessionSecret)
 		internalCodeReviewHandler := handlers.NewInternalCodeReviewHandler(codeReviewStore, sessionStore, cfg.SessionSecret)
 		internalCodeReviewHandler.SetAuditEmitter(auditEmitter)
+		internalCodeReviewHistoryHandler := handlers.NewInternalCodeReviewHistoryHandler(db.NewCodeReviewHistoryStore(pool), sessionStore, cfg.SessionSecret)
 		internalChangesetHandler := handlers.NewInternalChangesetHandler(sessionStore, sessionHandler, cfg.SessionSecret)
 		internalSessionTabsHandler.SetAuditEmitter(auditEmitter)
 		// Every internal route names its tool so the per-target allowlist
 		// (design doc 125) is enforced server-side on every call.
 		toolGate := handlers.NewInternalToolGate(cfg.SessionSecret)
 		automationActions := automationactions.New(db.NewAutomationActionStore(pool), automationactions.NewProviders(automationActionTokens, credentialStore, ingestion.NewSlackAPIClient(logger),
+			automationactions.WithGitHubAppIdentity(cfg.GitHubAppID, cfg.GitHubAppSlug),
 			automationactions.WithGitHubHTTPClient(githubtelemetry.NewControlledHTTPClient(4*time.Second, logger, githubRateLimitController, "automation_action"))), logger)
 		automationActionHandler := handlers.NewInternalAutomationActionHandler(sessionStore, automationActions, cfg.SessionSecret)
 		r.Route("/api/v1/internal", func(r chi.Router) {
@@ -1251,6 +1260,9 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Put("/code-reviews/policy", toolGate.Require("code-review-history:update_policy", internalCodeReviewHandler.UpdatePolicy))
 			r.Get("/code-reviews/policies/{policy_id}", toolGate.Require("code-review-history:policy", internalCodeReviewHandler.PolicyByID))
 			r.Get("/code-reviews/{session_id}", toolGate.Require("code-review-history:get", internalCodeReviewHandler.Get))
+			r.Get("/code-review-history/prior-rounds", toolGate.Require("code-review-history:prior-rounds", internalCodeReviewHistoryHandler.List))
+			r.Get("/code-review-history/prior-rounds/{session_id}", toolGate.Require("code-review-history:prior-round", internalCodeReviewHistoryHandler.Get))
+			r.Get("/code-review-history/prior-rounds/{session_id}/threads/{thread_id}/messages", toolGate.Require("code-review-history:prior-messages", internalCodeReviewHistoryHandler.Messages))
 			r.Get("/session-tabs", toolGate.Require("session-tabs:list", internalSessionTabsHandler.List))
 			r.Post("/session-tabs", toolGate.Require("session-tabs:create", internalSessionTabsHandler.Create))
 			r.Get("/session-tabs/{thread_id}", toolGate.Require("session-tabs:get", internalSessionTabsHandler.Get))
@@ -1400,6 +1412,8 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 
 				r.Get("/api/v1/version", healthHandler.Version)
 				r.Get("/api/v1/code-reviews", codeReviewHandler.List)
+				r.Get("/api/v1/code-reviews/export", codeReviewExportHandler.Export)
+				r.Get("/api/v1/code-reviews/export/{id}", codeReviewExportHandler.Status)
 				r.Get("/api/v1/code-reviews/stats", codeReviewHandler.Stats)
 				r.Get("/api/v1/code-reviews/analytics", codeReviewHandler.Analytics)
 				r.Get("/api/v1/code-reviews/stream", codeReviewHandler.StreamUpdates)
@@ -1544,6 +1558,7 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 			r.Group(func(r chi.Router) {
 				r.Use(middleware.OrgContext)
 				r.Use(middleware.RequireRole("admin", "builder", "member"))
+				r.Post("/api/v1/code-reviews/export/{id}/release", codeReviewExportHandler.Release)
 
 				// Local agent gateway: tool list + server-proxied execution for
 				// `143-tools mcp serve` and local CLI tool calls. Builder-tier
@@ -1817,6 +1832,10 @@ func NewRouter(cfg *config.Config, pool *pgxpool.Pool, logger zerolog.Logger, se
 				r.Get("/api/v1/previews/api-tokens", branchPreviewHandler.ListAPITokens)
 				r.Post("/api/v1/previews/api-tokens", branchPreviewHandler.CreateAPIToken)
 				r.Delete("/api/v1/previews/api-tokens/{token_id}", branchPreviewHandler.RevokeAPIToken)
+				r.Get("/api/v1/repositories/{id}/package-registry-credentials", packageRegistryCredentialHandler.List)
+				r.Post("/api/v1/repositories/{id}/package-registry-credentials", packageRegistryCredentialHandler.Create)
+				r.Put("/api/v1/repositories/{id}/package-registry-credentials/{credential_id}", packageRegistryCredentialHandler.Rotate)
+				r.Delete("/api/v1/repositories/{id}/package-registry-credentials/{credential_id}", packageRegistryCredentialHandler.Delete)
 				r.Post("/api/v1/repositories/{id}/preview-secret-bundles", previewSecretBundleHandler.Upsert)
 				r.Delete("/api/v1/repositories/{id}/preview-secret-bundles/{name}", previewSecretBundleHandler.Delete)
 				r.Patch("/api/v1/preview-secret-bundles/{id}", previewSecretBundleHandler.Patch)

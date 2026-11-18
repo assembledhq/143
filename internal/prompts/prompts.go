@@ -7,6 +7,8 @@ import (
 	"embed"
 	"strings"
 	"text/template"
+
+	"github.com/assembledhq/143/internal/models"
 )
 
 //go:embed templates/*.template
@@ -270,6 +272,7 @@ func ReviewLoopFixPrompt(data ReviewLoopFixPromptData) string {
 // ─── Code Reviews ───────────────────────────────────────────────────────────
 
 type CodeReviewReviewerPromptData struct {
+	RepositoryGuidance      *models.CodeReviewRepositoryGuidance
 	ManifestPath            string
 	DiffPath                string
 	ReviewInstructions      string
@@ -277,6 +280,9 @@ type CodeReviewReviewerPromptData struct {
 	PullNumber              int
 	PullRequestURL          string
 	Title                   string
+	PRBody                  string
+	PRBodyOmitted           bool
+	PRContextUnavailable    bool
 	Author                  string
 	BaseSHA                 string
 	HeadSHA                 string
@@ -324,11 +330,15 @@ type CodeReviewDescriptionRequirementPromptData struct {
 }
 
 func CodeReviewReviewerPrompt(data CodeReviewReviewerPromptData) string {
+	data.Title = sanitizeUntrustedXML(data.Title)
+	data.PRBody = sanitizeUntrustedXML(data.PRBody)
 	data.VisualEvidence = sanitizeCodeReviewVisualEvidence(data.VisualEvidence)
 	return render("code_review_reviewer.template", data)
 }
 
 type CodeReviewOrchestratorPromptData struct {
+	ReviewHistory              *CodeReviewHistoryPromptData
+	RepositoryGuidance         *models.CodeReviewRepositoryGuidance
 	Repository                 string
 	PullNumber                 int
 	PullRequestURL             string
@@ -354,6 +364,22 @@ type CodeReviewOrchestratorPromptData struct {
 	UseAutomatedApprovalPolicy bool
 	VisualEvidence             []CodeReviewVisualEvidencePromptData
 	VisualEvidenceOmitted      int
+}
+
+// CodeReviewHistoryPromptData carries references only. Earlier conclusions and
+// conversation excerpts are retrieved by the orchestrator when they are useful.
+type CodeReviewHistoryPromptData struct {
+	SessionID string
+	Rounds    []CodeReviewHistoryRoundReference
+	HasMore   bool
+}
+
+type CodeReviewHistoryRoundReference struct {
+	SessionID    string
+	AssessmentID string
+	BaseSHA      string
+	HeadSHA      string
+	CreatedAt    string
 }
 
 func CodeReviewOrchestratorPrompt(data CodeReviewOrchestratorPromptData) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,6 +15,8 @@ import (
 type PoolOptions struct {
 	MaxConns        int32
 	MaxConnIdleTime time.Duration
+	// ApplicationName overrides DSN naming only when explicitly supplied.
+	ApplicationName string
 }
 
 // DBTX is the interface satisfied by pgxpool.Pool, pgx.Tx, and pgxmock.
@@ -40,6 +43,14 @@ func NewPoolConfig(databaseURL string, opts PoolOptions) (*pgxpool.Config, error
 	}
 	if opts.MaxConnIdleTime > 0 {
 		config.MaxConnIdleTime = opts.MaxConnIdleTime
+	}
+	if opts.ApplicationName != "" {
+		for key := range config.ConnConfig.RuntimeParams {
+			if strings.EqualFold(key, "application_name") {
+				delete(config.ConnConfig.RuntimeParams, key)
+			}
+		}
+		config.ConnConfig.RuntimeParams["application_name"] = opts.ApplicationName
 	}
 	return config, nil
 }

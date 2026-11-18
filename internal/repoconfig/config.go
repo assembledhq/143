@@ -3,6 +3,7 @@ package repoconfig
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"strings"
 )
 
@@ -13,6 +14,7 @@ type CommandSection struct {
 }
 
 type Config struct {
+	Setup        SetupSection      `json:"setup,omitempty"`
 	Preview      json.RawMessage   `json:"preview,omitempty"`
 	Dependencies map[string]string `json:"dependencies,omitempty"`
 	Bootstrap    CommandSection    `json:"bootstrap,omitempty"`
@@ -38,6 +40,9 @@ func Parse(data []byte) (Config, error) {
 		return Config{}, err
 	}
 	cfg.Dependencies = deps
+	if err := cfg.Setup.normalize(); err != nil {
+		return Config{}, err
+	}
 	if err := normalizeCommandSection("bootstrap.commands", &cfg.Bootstrap); err != nil {
 		return Config{}, err
 	}
@@ -50,6 +55,38 @@ func Parse(data []byte) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+type SetupSection struct {
+	NPM []NPMSetup `json:"npm,omitempty"`
+}
+
+type NPMSetup struct {
+	Directory      string `json:"directory"`
+	LegacyPeerDeps bool   `json:"legacy_peer_deps,omitempty"`
+}
+
+func (s *SetupSection) normalize() error {
+	if len(s.NPM) > 16 {
+		return fmt.Errorf("setup.npm supports at most 16 directories")
+	}
+	seen := make(map[string]bool, len(s.NPM))
+	for _, entry := range s.NPM {
+		dir := entry.Directory
+		if dir == "" || path.IsAbs(dir) || path.Clean(dir) != dir || dir == ".." || strings.HasPrefix(dir, "../") || strings.ContainsAny(dir, "\\\x00\r\n") {
+			return fmt.Errorf("setup.npm directory must be a canonical relative path")
+		}
+		for _, component := range strings.Split(dir, "/") {
+			if component == "node_modules" || component == ".git" || component == ".143" {
+				return fmt.Errorf("setup.npm directory cannot contain managed directories")
+			}
+		}
+		if seen[dir] {
+			return fmt.Errorf("setup.npm directory must be unique")
+		}
+		seen[dir] = true
+	}
+	return nil
 }
 
 func normalizeCommandSection(fieldPath string, section *CommandSection) error {

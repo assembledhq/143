@@ -587,6 +587,9 @@ func SlugForRepo(fullName string) string {
 	return slug
 }
 
+// DefaultSandboxPATH includes the tool directories installed in the sandbox image.
+const DefaultSandboxPATH = "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 // Sandbox represents a running isolated environment for agent execution.
 type Sandbox struct {
 	ID       string            // unique sandbox identifier (container ID, VM ID, etc.)
@@ -595,6 +598,9 @@ type Sandbox struct {
 	HomeDir  string            // sandbox user's home dir (HOME env); distinct from WorkDir
 	Env      map[string]string `json:"-"` // environment passed to agent CLI execs; never persist secrets
 	Metadata map[string]string // provider-specific metadata
+
+	// In-memory auth selection for this execution; never persisted or exported.
+	credentialResolution *resolvedAgentEnv
 
 	// Tracing identifiers copied from SandboxConfig at Create time. Providers
 	// attach these to every lifecycle log line so operators can find all

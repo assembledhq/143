@@ -1137,7 +1137,7 @@ func TestPRServiceGetPullRequestHealthEnqueuesSyncAndEnrichment(t *testing.T) {
 // sync_pull_request_state and rebuild_pull_request_health job handlers invoke.
 // If that background path inherited the interactive staleness budget, every
 // projected rebuild would re-request the authoritative readback that
-// checkStateRequiresAuthoritativeSync just avoided.
+// check projection just avoided.
 func TestPRServiceGetPullRequestHealthStalenessBudgetIsPerCaller(t *testing.T) {
 	t.Parallel()
 
@@ -1147,17 +1147,25 @@ func TestPRServiceGetPullRequestHealthStalenessBudgetIsPerCaller(t *testing.T) {
 	tests := []struct {
 		name        string
 		opts        healthBuildOptions
+		age         time.Duration
 		wantEnqueue bool
 	}{
 		{
 			name:        "interactive read refreshes past the tight budget",
 			opts:        healthBuildOptions{},
+			age:         5 * time.Minute,
 			wantEnqueue: true,
 		},
 		{
 			name:        "background caller tracks the reconcile budget",
 			opts:        healthBuildOptions{asyncRefreshAfter: prHealthStaleAfter},
+			age:         5 * time.Minute,
 			wantEnqueue: false,
+		},
+		{
+			name: "projected check repair reads stale health from the database only",
+			opts: healthBuildOptions{asyncRefreshAfter: prHealthStaleAfter, skipSync: true},
+			age:  time.Hour,
 		},
 	}
 
@@ -1172,8 +1180,7 @@ func TestPRServiceGetPullRequestHealthStalenessBudgetIsPerCaller(t *testing.T) {
 			orgID := uuid.New()
 			pullRequestID := uuid.New()
 			now := time.Now().UTC()
-			// Between the two budgets: stale for a human, fresh for the sweep.
-			syncedAt := now.Add(-5 * time.Minute)
+			syncedAt := now.Add(-tt.age)
 
 			mock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
 				WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg()).
@@ -1210,7 +1217,7 @@ func TestPRServiceGetPullRequestHealthStalenessBudgetIsPerCaller(t *testing.T) {
 			_, err = service.getPullRequestHealth(context.Background(), orgID, pullRequestID, tt.opts)
 			require.NoError(t, err, "health build should succeed")
 			require.NoError(t, mock.ExpectationsWereMet(),
-				"a five-minute-old snapshot should enqueue a readback only for the interactive budget")
+				"the caller's health refresh policy should control whether a readback is queued")
 		})
 	}
 }
@@ -1445,7 +1452,77 @@ func TestPullRequestSyncReasonCoalesces(t *testing.T) {
 	} {
 		t.Run(string(tt.reason), func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tt.want, tt.reason.coalesces(), "initial reads share separately while safety and check reads always fetch")
+			require.Equal(t, tt.want, tt.reason.coalesces(), "only initial, stale reconciliation, and mergeability wait share ordinary flights")
+		})
+	}
+}
+
+func TestRebuildPullRequestHealthFromCheckStatesSchedulesVerification(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name            string
+		currentHead     string
+		summary         json.RawMessage
+		readCheckStates bool
+		wantDelay       time.Duration
+	}{
+		{name: "no snapshot", wantDelay: prHealthCheckBaselineDelay},
+		{name: "previous head", currentHead: "old-head", summary: json.RawMessage(`{"check_set_complete":true}`), wantDelay: prHealthCheckBaselineDelay},
+		{name: "corrupt snapshot", currentHead: "head", summary: json.RawMessage(`{"checks":`), wantDelay: prHealthCheckBaselineDelay},
+		{name: "legacy snapshot", currentHead: "head", summary: json.RawMessage(`{}`), readCheckStates: true, wantDelay: prHealthCheckBaselineDelay},
+		{name: "complete snapshot", currentHead: "head", summary: json.RawMessage(`{"check_set_complete":true}`), readCheckStates: true},
+		{name: "projected incomplete snapshot", currentHead: "head", summary: json.RawMessage(`{"check_set_complete":false}`), readCheckStates: true, wantDelay: prHealthCheckBatchDelay},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			prMock, jobMock := newMockPool(t), newMockPool(t)
+			orgID, prID := uuid.New(), uuid.New()
+			now := time.Now().UTC()
+			head := "head"
+			prRow := handlerPRRow(prID, nil, orgID, "example/repo", now)
+			prRow[12], prRow[19], prRow[20] = &head, &now, int64(1)
+			prMock.ExpectQuery("SELECT .+ FROM pull_requests WHERE id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "id": prID}).
+				WillReturnRows(pgxmock.NewRows(handlerPRColumns).AddRow(prRow...))
+			currentRows := pgxmock.NewRows(prHealthCurrentTestColumns)
+			if tt.currentHead != "" {
+				currentRows.AddRow(prID, orgID, int64(1), tt.currentHead, "base", tt.summary, tt.summary,
+					models.PullRequestHealthEnrichmentStatusNotRequested, nil, int64(5), now, now)
+			}
+			prMock.ExpectQuery("SELECT .+ FROM pull_request_health_current WHERE org_id").
+				WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID}).
+				WillReturnRows(currentRows)
+			if tt.readCheckStates {
+				prMock.ExpectQuery("SELECT .+ FROM pull_request_check_states WHERE org_id").
+					WithArgs(pgx.NamedArgs{"org_id": orgID, "pull_request_id": prID, "head_sha": head, "after_version": int64(5)}).
+					WillReturnRows(pgxmock.NewRows([]string{"projection_version"}))
+			}
+			var runAt time.Time
+			if tt.wantDelay > 0 {
+				key := pullRequestStateSyncDedupeKey(prID, PullRequestSyncReasonIncomplete)
+				payload, err := json.Marshal(map[string]string{"org_id": orgID.String(), "pull_request_id": prID.String(), "sync_reason": string(PullRequestSyncReasonIncomplete)})
+				require.NoError(t, err, "encode the verification job payload")
+				expectCheckSyncLaneEmpty(t, jobMock, orgID, prID, key)
+				jobMock.ExpectQuery("INSERT INTO jobs").WithArgs(pgx.NamedArgs{
+					"org_id": orgID, "queue": prHealthSyncQueue, "job_type": prHealthSyncJobType,
+					"payload": payload, "priority": 3, "dedupe_key": &key, "run_at": capturedTimeArg{got: &runAt},
+				}).WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow(uuid.New()))
+				jobMock.ExpectCommit()
+			}
+
+			service := &PRService{pullRequests: db.NewPullRequestStore(prMock), jobs: db.NewJobStore(jobMock), logger: zerolog.Nop()}
+			before := time.Now()
+			changed, err := service.RebuildPullRequestHealthFromCheckStates(context.Background(), orgID, prID)
+			require.NoError(t, err, "projection should finish without a remote call")
+			require.False(t, changed, "a rebuild without pending check states should preserve stored health")
+			require.NoError(t, prMock.ExpectationsWereMet(), "projection should inspect only the current org's snapshot and check states")
+			require.NoError(t, jobMock.ExpectationsWereMet(), "only a coverage gap should enqueue verification")
+			if tt.wantDelay > 0 {
+				require.False(t, runAt.Before(before.Add(tt.wantDelay)), "verification must wait the appropriate batching interval")
+				require.False(t, runAt.After(time.Now().Add(tt.wantDelay)), "verification should use a bounded delay")
+			}
 		})
 	}
 }
@@ -4402,7 +4479,7 @@ func expectCheckStateReconciliation(mock pgxmock.PgxPoolIface, orgID, pullReques
 		mock.ExpectExec("INSERT INTO pull_request_check_states").
 			WithArgs(pgx.NamedArgs{
 				"org_id": pgxmock.AnyArg(), "pull_request_id": pgxmock.AnyArg(), "head_sha": pgxmock.AnyArg(),
-				"source": pgxmock.AnyArg(), "external_key": pgxmock.AnyArg(), "name": pgxmock.AnyArg(),
+				"source": pgxmock.AnyArg(), "external_key": pgxmock.AnyArg(), "legacy_external_key": pgxmock.AnyArg(), "name": pgxmock.AnyArg(),
 				"category": pgxmock.AnyArg(), "status": pgxmock.AnyArg(), "provider": pgxmock.AnyArg(),
 				"details_url": pgxmock.AnyArg(), "summary": pgxmock.AnyArg(), "provider_event_id": pgxmock.AnyArg(),
 				"provider_sequence": pgxmock.AnyArg(), "provider_updated_at": pgxmock.AnyArg(), "projection_version": pgxmock.AnyArg(),
@@ -4553,7 +4630,6 @@ func TestPRServiceSyncPullRequestStateRequiresFreshRead(t *testing.T) {
 		{name: "repair", reason: PullRequestSyncReasonRepair},
 		{name: "manual", reason: PullRequestSyncReasonManual},
 		{name: "merge safety", reason: PullRequestSyncReasonMergeSafety},
-		{name: "check successor", reason: PullRequestSyncReasonIncomplete},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

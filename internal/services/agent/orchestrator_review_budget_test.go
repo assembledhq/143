@@ -90,7 +90,7 @@ func TestReviewPreparationBudgetStartsAfterQueueBeforeWorkspaceSetup(t *testing.
 					if strings.Contains(command, "with pathlib.Path(sys.argv[1]).open() as marker:") {
 						return 42, nil
 					}
-					if command == "git rev-parse HEAD" {
+					if command == "git rev-parse HEAD" || (strings.Contains(command, " checkout -B ") && strings.Contains(command, "git rev-parse HEAD")) {
 						_, err := io.WriteString(stdout, head+"\n")
 						return 0, err
 					}

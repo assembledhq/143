@@ -53,7 +53,8 @@ func (l *TargetLifecycle) OnPullRequestClosed(ctx context.Context, orgID uuid.UU
 			l.logger.Info().
 				Str("org_id", orgID.String()).
 				Str("target_id", targetID.String()).
-				Msg("dropped a pull request close that describes the target before its current state")
+				Bool("merged", merged).
+				Msg("dropped a pull request close that is older than the target's lifecycle evidence or would move a merged target")
 			return nil
 		}
 		if err := l.completer.EnqueueWakeJob(ctx, tx, orgID, targetID); err != nil {

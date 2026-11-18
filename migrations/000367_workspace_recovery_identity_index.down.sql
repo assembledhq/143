@@ -1,0 +1,1 @@
+DROP INDEX CONCURRENTLY idx_sessions_workspace_recovery_id;

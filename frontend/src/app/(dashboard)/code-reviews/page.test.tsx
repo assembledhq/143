@@ -1,10 +1,12 @@
 import { policyMerge, type PolicyPatch } from "@/lib/code-review-autosave";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { act } from "react";
+import { notifyManager } from "@tanstack/react-query";
 import { delay, http, HttpResponse } from "msw";
 import { createTestQueryClient, fireEvent, renderWithProviders as renderWithBaseProviders, screen, userEvent, waitFor, within } from "@/test/test-utils";
 import { server } from "@/test/mocks/server";
 import { queryKeys } from "@/lib/query-keys";
+import * as pollIntervals from "@/lib/poll-intervals";
 
 const toast = vi.hoisted(() => ({
   success: vi.fn(),
@@ -16,6 +18,18 @@ const sse = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/notify", () => ({ notify: toast }));
+
+const summaryRenders = vi.hoisted(() => vi.fn());
+vi.mock("@/components/code-review-overview", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/code-review-overview")>();
+  return {
+    ...actual,
+    CodeReviewSummaryCards: (props: Parameters<typeof actual.CodeReviewSummaryCards>[0]) => {
+      summaryRenders();
+      return <actual.CodeReviewSummaryCards {...props} />;
+    },
+  };
+});
 
 import CodeReviewsPage from "./page";
 
@@ -683,6 +697,7 @@ describe("CodeReviewsPage", () => {
       "Outcome",
       "Why not approved",
       "Run status",
+      "Duration",
       "Completed",
       "Actions",
     ]);
@@ -691,8 +706,10 @@ describe("CodeReviewsPage", () => {
     expect(within(reviewCells[3]).getByText("Completed").closest('[data-slot="status-label"]')).not.toBeNull();
     expect(within(reviewCells[0]).getByText(/api · anya · abcdef1/)).toBeInTheDocument();
     expect(within(reviewCells[2]).getByText("—")).toBeInTheDocument();
-    expect(within(reviewCells[5]).getByRole("button", { name: "View review" })).toBeInTheDocument();
-    expect(within(reviewCells[5]).queryByRole("link", { name: "Session" })).not.toBeInTheDocument();
+    expect(reviewCells[4]).toHaveTextContent("5m 0s");
+    expect(within(screen.getByLabelText("Code review activity")).getByText("Duration: 5m 0s")).toBeInTheDocument();
+    expect(within(reviewCells[6]).getByRole("button", { name: "View review" })).toBeInTheDocument();
+    expect(within(reviewCells[6]).queryByRole("link", { name: "Session" })).not.toBeInTheDocument();
     await user.click(screen.getAllByRole("button", { name: /View review/i })[0]);
     const evidenceSheet = await screen.findByRole("dialog", {
       name: /Review for #428/i,
@@ -842,7 +859,7 @@ describe("CodeReviewsPage", () => {
     expect(within(mobileNeedsReview).queryByText("Risk")).not.toBeInTheDocument();
 
     await user.keyboard("{Escape}");
-    await user.click(within(needsReviewCells[5]).getByRole("button", { name: "View review" }));
+    await user.click(within(needsReviewCells[6]).getByRole("button", { name: "View review" }));
     const evidenceSheet = await screen.findByRole("dialog", { name: /Review for #428/i });
     expect(within(evidenceSheet).getByText("Why this verdict")).toBeInTheDocument();
     expect(within(evidenceSheet).getByText("Reviewers found a blocking issue")).toBeInTheDocument();
@@ -1076,6 +1093,10 @@ describe("CodeReviewsPage", () => {
     });
     const cards = await screen.findByLabelText("Approval outcomes");
     await waitFor(() => expect(requests).toHaveLength(1));
+    // Let the mount-time search debounce commit before selecting a metric:
+    // the in-memory URL adapter resets pending writes when it re-renders.
+    await waitFor(() => expect(onUrlUpdate).toHaveBeenCalled());
+    onUrlUpdate.mockClear();
     await user.click(within(cards).getByRole("button", { name: /^Show P95 rounds to approval trend/ }));
     await waitFor(() => {
       const update = onUrlUpdate.mock.calls.at(-1)?.[0];
@@ -1840,6 +1861,8 @@ describe("CodeReviewsPage", () => {
     await user.click(within(disputeRow as HTMLTableRowElement).getByRole("button", { name: "Review dispute on acme/api #428" }));
     const disputeSheet = await screen.findByRole("dialog", { name: "Review dispute" });
     expect(within(disputeSheet).getByText("Human reviewer disagreed")).toBeInTheDocument();
+    expect(within(disputeSheet).queryByRole("link", { name: /View reassessment/ })).not.toBeInTheDocument();
+    expect(within(disputeSheet).queryByRole("heading", { name: "Status detail" })).not.toBeInTheDocument();
     expect(within(disputeSheet).getByText("Same result after reassessment")).toBeInTheDocument();
     expect(within(disputeSheet).getByText("Filed by another contributor")).toBeInTheDocument();
     expect(within(disputeSheet).getByText("3 similar objections")).toBeInTheDocument();
@@ -1979,6 +2002,7 @@ describe("CodeReviewsPage", () => {
     expect(within(disputeSheet).getByText("Approved")).toBeInTheDocument();
     // The queue row behind the sheet tracks the same refresh.
     expect(within(disputeTable).getByText("Approved")).toBeInTheDocument();
+    expect(within(disputeTable).getByText("Decision changed")).toBeInTheDocument();
 
     await user.click(within(disputeSheet).getByRole("button", { name: "Uphold" }));
     await waitFor(() => expect(updateBody).toEqual({
@@ -1999,7 +2023,7 @@ describe("CodeReviewsPage", () => {
       author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
       trusted: true, source: "app_ui", body: "The reassessment never produced a result.",
       contested_reason_codes: [], intake_status: "triaged", routing: "reassess",
-      reassessment_status: "failed", adjudication_status: "pending",
+      reassessment_status: "failed", reassessment_flipped: true, reassessment_decision: "approved", adjudication_status: "pending",
       queue_signals: {}, queue_priority: 0,
       reply_status: "not_applicable", version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
     };
@@ -2013,10 +2037,80 @@ describe("CodeReviewsPage", () => {
     await user.click(await screen.findByRole("tab", { name: "Disputes" }));
     const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
     expect(within(disputeTable).getByText("Failed")).toBeInTheDocument();
+    expect(within(disputeTable).queryByText("Decision changed")).not.toBeInTheDocument();
+    expect(within(disputeTable).queryByText("Approved")).not.toBeInTheDocument();
     expect(within(disputeTable).getByText("Evidence unavailable")).toBeInTheDocument();
     // Falls back to the reviewed commit when the PR context is missing.
     expect(within(disputeTable).getByRole("button", { name: `Review dispute on commit ${review.head_sha.slice(0, 7)}` })).toBeInTheDocument();
     expect(within(disputeTable).getByText("Asks not to approve")).toBeInTheDocument();
+  });
+
+  it.each<{ stage: string; state: Partial<CodeReviewDispute>; detail: string }>([
+    {
+      stage: "intake failure",
+      state: { intake_status: "failed" },
+      detail: "The objection could not be classified.",
+    },
+    {
+      stage: "reassessment failure",
+      state: { reassessment_status: "failed", reassessment_session_id: "session-reassessment" },
+      detail: "The reassessment could not load the latest revision.",
+    },
+    {
+      stage: "reply failure",
+      state: { reassessment_status: "completed", reassessment_decision: "approved", reassessment_session_id: "session-reassessment", reply_status: "failed" },
+      detail: "GitHub reply delivery exhausted its attempts.",
+    },
+    {
+      stage: "superseded reassessment",
+      state: { reassessment_status: "superseded", reassessment_session_id: "session-reassessment" },
+      detail: "The review target changed before reassessment completed.",
+    },
+  ])("shows $stage details without confusing the original review and reassessment", async ({ state, detail }) => {
+    const user = userEvent.setup();
+    const dispute: CodeReviewDispute = {
+      id: "dispute-diagnostic-1", org_id: "org-1", session_id: "session-1", pull_request_id: "pr-1",
+      repository_id: "repo-1", policy_id: "policy-1", reviewed_head_sha: review.head_sha,
+      decision: "blocked", direction: "should_have_approved", filed_by_login: "anya",
+      author_association: "MEMBER", author_is_pr_author: true, repository_visibility: "private",
+      trusted: true, source: "app_ui", body: "Please reconsider the original decision.",
+      contested_reason_codes: [], intake_status: "triaged", routing: "reassess",
+      reassessment_status: "not_requested", adjudication_status: "pending",
+      queue_signals: {}, queue_priority: 0, reply_status: "not_applicable", status_detail: detail,
+      version: 3, created_at: "2026-06-26T12:06:00Z", updated_at: "2026-06-26T12:06:00Z",
+      ...state,
+    };
+    mockCodeReviewBaseHandlers();
+    server.use(
+      http.get("/api/v1/code-review-disputes", () => HttpResponse.json({ data: [dispute], meta: {} } satisfies ListResponse<CodeReviewDispute>)),
+    );
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: "Disputes" }));
+    const disputeTable = await screen.findByRole("table", { name: "Code review disputes" });
+    expect(within(disputeTable).queryByText("Evidence unavailable")).not.toBeInTheDocument();
+    expect(within(disputeTable).queryByText(detail)).not.toBeInTheDocument();
+    if (dispute.reassessment_status === "superseded") {
+      expect(within(disputeTable).getByText("Superseded")).toBeInTheDocument();
+      expect(within(disputeTable).getByText("Review target changed")).toBeInTheDocument();
+      expect(within(disputeTable).queryByText("Failed")).not.toBeInTheDocument();
+    }
+
+    await user.click(within(disputeTable).getByRole("button", { name: `Review dispute on commit ${review.head_sha.slice(0, 7)}` }));
+    const disputeSheet = await screen.findByRole("dialog", { name: "Review dispute" });
+    expect(within(disputeSheet).getByRole("heading", { name: "Status detail" })).toBeInTheDocument();
+    expect(within(disputeSheet).getByText(detail)).toBeInTheDocument();
+    const evidenceLink = within(disputeSheet).getByRole("link", { name: /View evidence/ });
+    expect(evidenceLink).toHaveAttribute("href", "/code-reviews?evidence=session-1");
+    expect(evidenceLink).toHaveAttribute("target", "_blank");
+    if (dispute.reassessment_session_id) {
+      const reassessmentLink = within(disputeSheet).getByRole("link", { name: /View reassessment/ });
+      expect(reassessmentLink).toHaveAttribute("href", `/sessions/${dispute.reassessment_session_id}`);
+      expect(reassessmentLink).toHaveAttribute("target", "_blank");
+    } else {
+      expect(within(disputeSheet).queryByRole("link", { name: /View reassessment/ })).not.toBeInTheDocument();
+    }
   });
 
   it("closes the dispute sheet when the dispute leaves the pending queue", async () => {
@@ -2368,6 +2462,86 @@ describe("CodeReviewsPage", () => {
     expect(within(row).getByText("Completed")).toBeInTheDocument();
   });
 
+  it.each(["queued", "running"] as const)("links %s review titles and updates elapsed duration", async (status) => {
+    // Keep background polling outside the two-second duration check. The
+    // shared test setup compresses a 30-second poll to 1.5 seconds, which can
+    // legitimately rerender the summary while this test checks timer isolation.
+    const pollMs = vi.spyOn(pollIntervals, "pollMs").mockImplementation((ms) => ms);
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    vi.setSystemTime(new Date("2026-06-26T12:06:49Z"));
+    const setInterval = vi.spyOn(window, "setInterval");
+    const clearInterval = vi.spyOn(window, "clearInterval");
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: [{ ...review, status, completed_at: undefined, github_review_url: undefined, github_review_id: undefined }],
+      meta: {},
+    } satisfies ListResponse<CodeReviewListItem>)));
+    const queryClient = createTestQueryClient();
+    const { unmount } = renderWithProviders(<CodeReviewsPage />, { queryClient });
+    try {
+      const table = await screen.findByRole("table", { name: "Code reviews" });
+      const mobile = screen.getByLabelText("Code review activity");
+      for (const container of [table, mobile]) {
+        expect(within(container).getByRole("link", { name: "#428 Fix invoice rounding" }))
+          .toHaveAttribute("href", review.github_pr_url);
+      }
+      expect(within(table).getByText("6m 49s")).toBeInTheDocument();
+      expect(within(mobile).getByText("Duration: 6m 49s")).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(within(table).getByText("6m 50s")).toBeInTheDocument();
+      expect(within(mobile).getByText("Duration: 6m 50s")).toBeInTheDocument();
+      const durationTimers = setInterval.mock.calls.flatMap((args, index) =>
+        args[1] === 1_000 ? [setInterval.mock.results[index].value] : []);
+      expect(durationTimers).toHaveLength(2);
+      await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+      await act(async () => {
+        await new Promise<void>((resolve) => notifyManager.schedule(resolve));
+      });
+      summaryRenders.mockClear();
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(within(table).getByText("6m 51s")).toBeInTheDocument();
+      expect(summaryRenders).not.toHaveBeenCalled();
+    } finally {
+      const durationTimers = setInterval.mock.calls.flatMap((args, index) =>
+        args[1] === 1_000 ? [setInterval.mock.results[index].value] : []);
+      unmount();
+      try {
+        for (const timer of durationTimers) expect(clearInterval).toHaveBeenCalledWith(timer);
+      } finally {
+        setInterval.mockRestore();
+        clearInterval.mockRestore();
+        vi.useRealTimers();
+        pollMs.mockRestore();
+      }
+    }
+  });
+
+  it("shows fixed durations for finished reviews and no duration for missing or invalid timestamps", async () => {
+    const cases: { status: CodeReviewListItem["status"]; created_at?: string; completed_at?: string; expected: string }[] = [
+      { status: "running", created_at: new Date(Date.now() + 60_000).toISOString(), expected: "0s" },
+      { status: "completed", completed_at: "2026-06-26T12:06:49Z", expected: "6m 49s" },
+      { status: "failed", completed_at: "2026-06-26T12:01:30Z", expected: "1m 30s" },
+      { status: "cancelled", completed_at: "2026-06-26T12:00:30Z", expected: "30s" },
+      { status: "stale", completed_at: "2026-06-26T12:02:00Z", expected: "2m 0s" },
+      { status: "stale", expected: "—" },
+      { status: "completed", expected: "—" },
+      { status: "completed", created_at: "invalid", completed_at: review.completed_at, expected: "—" },
+      { status: "completed", completed_at: "2026-06-26T11:59:00Z", expected: "—" },
+    ];
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: cases.map((testCase, index) => ({ ...review, id: `review-${index}`, session_id: `session-${index}`,
+        github_pr_number: 500 + index, status: testCase.status, created_at: testCase.created_at ?? review.created_at, completed_at: testCase.completed_at })),
+      meta: {},
+    } satisfies ListResponse<CodeReviewListItem>)));
+    renderWithProviders(<CodeReviewsPage />);
+    const table = await screen.findByRole("table", { name: "Code reviews" });
+    for (const [index, testCase] of cases.entries()) {
+      const row = within(table).getByRole("row", { name: new RegExp(`#${500 + index} Fix invoice rounding`) });
+      expect(within(row).getAllByRole("cell")[4]).toHaveTextContent(testCase.expected);
+    }
+  });
+
   it("omits the mobile completion timestamp until a review completes", async () => {
     const queuedReview: CodeReviewListItem = {
       ...review,
@@ -2454,6 +2628,17 @@ describe("CodeReviewsPage", () => {
     renderWithProviders(<CodeReviewsPage />);
     expect(await screen.findAllByText("Blocked")).toHaveLength(2);
     expect(screen.queryByText("No outcome")).not.toBeInTheDocument();
+  });
+
+  it.each(["queued", "running"] as const)("shows preparing workspace for a %s review on desktop and mobile", async (status) => {
+    mockCodeReviewBaseHandlers();
+    server.use(http.get("/api/v1/code-reviews", () => HttpResponse.json({
+      data: [{ ...review, status, phase: "preparing_workspace", decision: undefined, acceptable: undefined, completed_at: undefined }], meta: {},
+    } satisfies ListResponse<CodeReviewListItem>)));
+
+    renderWithProviders(<CodeReviewsPage />);
+
+    expect(await screen.findAllByText("Preparing workspace")).toHaveLength(2);
   });
 
   it("shows operational phases and the automatic GitHub retry countdown without a manual retry action", async () => {
@@ -2922,6 +3107,7 @@ describe("CodeReviewsPage", () => {
       "Require up-to-date branch",
       "Block reviewer disagreement",
       "Allow fork PRs",
+      "Allow size limit overrides",
       "Stop after stable policy blockers",
     ]) {
       expect(screen.getByRole("button", { name: `About ${label}` })).toBeInTheDocument();
@@ -3650,7 +3836,7 @@ describe("CodeReviewsPage", () => {
     if (originalWidth) Object.defineProperty(window, "innerWidth", originalWidth);
   });
 
-  it("edits paths, authors, and checks as compact autosaved lists", async () => {
+  it("edits sensitive paths as a compact autosaved list", async () => {
     const user = userEvent.setup();
     const policyUpdates = vi.fn();
     mockCodeReviewBaseHandlers(githubTriggerReady, policyUpdates);
@@ -3706,6 +3892,15 @@ describe("CodeReviewsPage", () => {
       );
     });
     expect(screen.queryByText("*auth*")).not.toBeInTheDocument();
+  });
+
+  it("edits eligible authors and displays required checks as compact lists", async () => {
+    const user = userEvent.setup();
+    const policyUpdates = vi.fn();
+    mockCodeReviewBaseHandlers(githubTriggerReady, policyUpdates);
+
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+    await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
 
     const requiredChecksEditor = screen.getByText("Required checks").closest("section");
     expect(requiredChecksEditor).not.toBeNull();
@@ -3783,6 +3978,58 @@ describe("CodeReviewsPage", () => {
     });
     expect(screen.getByText("No author whitelist configured. Any author is eligible.")).toBeInTheDocument();
     expect(within(eligibleAuthorsEditor as HTMLElement).getByText("0 entries")).toBeInTheDocument();
+  });
+
+  it("allows a named bot alongside eligible teams without broadening author eligibility", async () => {
+    const user = userEvent.setup();
+    const policyUpdates = vi.fn();
+    const state = mockCodeReviewBaseHandlers(githubTriggerReady, policyUpdates);
+
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+    await user.click(await screen.findByRole("button", { name: /Paths, authors & checks/i }));
+
+    expect(screen.getByRole("combobox", { name: "GitHub author type" })).toHaveTextContent("User or bot");
+    expect(screen.getByText(/Add bots by their exact GitHub login/)).toBeInTheDocument();
+    const input = screen.getByRole("textbox", { name: "Eligible GitHub author" });
+    expect(input).toHaveAttribute("placeholder", "GitHub user or bot login");
+    await user.click(input);
+    await user.paste("  build-helper[bot]  ");
+    await user.click(screen.getByRole("button", { name: "Add author" }));
+
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy,
+      eligible_authors: ["anya", "build-helper[bot]"],
+    }));
+    const botRow = (await screen.findByText("build-helper[bot]")).parentElement;
+    expect(within(botRow as HTMLElement).getByText("Bot")).toBeInTheDocument();
+
+    const savesAfterAdding = policyUpdates.mock.calls.length;
+    await user.click(input);
+    await user.paste("BUILD-HELPER[BOT]");
+    await user.keyboard("{Enter}");
+    expect(input).toHaveValue("");
+    expect(policyUpdates).toHaveBeenCalledTimes(savesAfterAdding);
+    expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy,
+      eligible_authors: ["anya", "build-helper[bot]"],
+    });
+
+    await user.click(screen.getByRole("button", { name: "Remove user build-helper[bot]" }));
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual(policy.config.risk_policy));
+    expect(screen.queryByText("build-helper[bot]")).not.toBeInTheDocument();
+  });
+
+  it("saves the size limit override setting", async () => {
+    const user = userEvent.setup();
+    const state = mockCodeReviewBaseHandlers();
+    renderWithProviders(<CodeReviewsPage />, { searchParams: { tab: "policy" } });
+    await user.click(await screen.findByRole("button", { name: /Quality gates/i }));
+
+    await user.click(await screen.findByRole("switch", { name: "Allow size limit overrides" }));
+    await waitFor(() => expect(state.getCurrentConfig().risk_policy).toEqual({
+      ...policy.config.risk_policy,
+      allow_size_limit_override: true,
+    }));
   });
 
   it("saves independent additions and deletions limits", async () => {

@@ -112,6 +112,16 @@ A **git pre-commit hook** (`.githooks/pre-commit`, installed by `./setup.sh` or 
 
 **Verification**: Prefer focused verification during ordinary implementation. For frontend changes, run targeted Vitest tests for changed components/pages when useful, and lint the touched files when practical. Run full `npm run typecheck`, `npm run lint`, and `npm run build` only for broad changes, routing/build/config changes, public docs/MDX changes, shared type/API contract changes, or pre-PR final verification when explicitly requested.
 
+## Before Pushing
+
+Run `make hooks-install` when setting up a checkout; `make hooks-check` verifies both commit and push hooks, including in worktrees. Preserve custom hook configurations and arrange equivalent checks explicitly.
+
+The pre-push hook is the required local gate: it selects checks for outgoing branch updates and requires a clean checkout at the pushed HEAD. A separate manual preflight is optional for earlier feedback; do not run it solely to duplicate the hook. Use `PREFLIGHT_BASE=<base-ref-or-sha> make preflight` (default: `origin/main`) or `python3 scripts/preflight.py --dry-run` to inspect the selected checks. For a new branch, fetch `origin/main` first. Missing tools or failed checks block the push; do not bypass for ordinary publication. Focused tests do not replace CI lint.
+
+Preflight runs pinned backend lint checks and frontend typecheck/lint and affected tests when application inputs change. CI-only edits run the Python helper and preflight tests plus deployment configuration, vet, and script checks; they do not trigger unrelated application checks. Shared inputs, including the preflight selector itself, still select the full local plan. Mixed CI/application changes retain the applicable application checks, and public documentation changes retain full frontend validation. Run focused Go tests for changed behavior as well. Use `make preflight-extended` to include the full application plan for CI edits plus the security scan and database/browser checks, with disposable database and browser prerequisites. Explicitly report checks skipped because prerequisites were unavailable; local preflight does not establish hosted CI success.
+
+Parallel HTTP tests must own their transports (clone the default transport and clean up that clone); do not share `http.DefaultTransport` across fixture lifetimes. PostgreSQL fixtures must set explicit connection limits, register cleanup immediately after acquiring resources, and budget aggregate connections including admin/observer connections. Create fixtures inside the subtest that owns them where possible. Preserve concurrency inside lock/admission tests when bounding fixture concurrency.
+
 ## Go Toolchain and Verification
 
 Prefer focused Go verification during ordinary implementation. Run tests for the touched package(s) first, and broaden only when the change crosses package boundaries or shared contracts.

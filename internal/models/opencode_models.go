@@ -10,7 +10,7 @@ import "strings"
 // *transport* (how the sandbox reaches it). The user picks a logical model
 // (e.g. "glm-5.2"); at session launch the resolver walks that model's routes
 // in priority order and picks the first one backed by a runnable credential
-// (internal/services/agent/env.go resolveOpenCodeProviderConfig).
+// (internal/services/agent/env.go resolveOpenCodeProviderConfigWithCredential).
 //
 // Two interchangeable transports may be merged under one logical model ONLY
 // when they serve genuinely equivalent weights (same model, context window,
