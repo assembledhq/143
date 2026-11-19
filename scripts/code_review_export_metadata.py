@@ -16,6 +16,8 @@ MAX_RECORDS = 100_000
 MAX_ACQUISITIONS = 256
 MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 MAX_DEPTH = 64
+CURSOR_MANIFEST_V1 = "cursor_manifest_v1"
+OPERATOR_ACQUISITION_V0 = "operator_acquisition_v0"
 STRING_SPECIAL = re.compile(r'["\\\x00-\x1f]')
 PRIMITIVE = re.compile(r"(?:null|true|false|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)")
 
@@ -299,6 +301,17 @@ def project(document, span, acquisition_id, manifest_sha, page_sha, record_index
     return result
 
 
+def manifest_format(entry):
+    value = entry.get("manifest_format", CURSOR_MANIFEST_V1)
+    need(type(value) is str and value in (CURSOR_MANIFEST_V1, OPERATOR_ACQUISITION_V0))
+    return value
+
+
+def validate_page_size(entry, page, raw):
+    if manifest_format(entry) == OPERATOR_ACQUISITION_V0:
+        need(len(raw) == page["bytes"])
+
+
 def catalog_input(root, catalog_raw):
     catalog = load(catalog_raw)
     keys(catalog, ("schema_version", "original_catalog", "acquisitions"))
@@ -310,14 +323,25 @@ def catalog_input(root, catalog_raw):
     need(type(entries) is list and 0 < len(entries) <= MAX_ACQUISITIONS)
     seen = set()
     for entry in entries:
-        keys(entry, ("manifest", "manifest_sha256", "checksums", "checksums_sha256"))
+        expected = {"manifest", "manifest_sha256", "checksums", "checksums_sha256"}
+        if "manifest_format" in entry:
+            expected.add("manifest_format")
+        keys(entry, expected)
+        operator_manifest = manifest_format(entry) == OPERATOR_ACQUISITION_V0
         manifest_raw = read_relative(root, entry["manifest"], MAX_MANIFEST)
         need(sha(manifest_raw) == digest(entry["manifest_sha256"]))
         sums_raw = read_relative(root, entry["checksums"], MAX_MANIFEST)
         need(sha(sums_raw) == digest(entry["checksums_sha256"]))
         manifest = load(manifest_raw)
-        keys(manifest, ("version", "acquisition", "pages"))
-        need(type(manifest["version"]) is int and manifest["version"] == 1)
+        if operator_manifest:
+            flags = ("publication_denominator_established", "split_assignment_performed", "holdout_opened", "historical_scoring_performed")
+            keys(manifest, ("status", "acquisition", "live_sha_before_acquisition", "pages", "unique_source_records", *flags))
+            need(manifest["status"] == "acquired_unpartitioned_unscored")
+            need(all(manifest[key] is False for key in flags))
+            git_sha(manifest["live_sha_before_acquisition"])
+        else:
+            keys(manifest, ("version", "acquisition", "pages"))
+            need(type(manifest["version"]) is int and manifest["version"] == 1)
         acquisition = manifest["acquisition"]
         validate_acquisition(acquisition)
         acquisition_id = identity(acquisition["id"])
@@ -330,6 +354,8 @@ def catalog_input(root, catalog_raw):
         need(acquisition["consistency"] == "frozen_payloads_repeatable_read")
         need(acquisition["filters"]["include_unresolved_publication_time"] is True)
         total = integer(acquisition["counts"]["records"], 0, 20_000)
+        if operator_manifest:
+            need(integer(manifest["unique_source_records"], 0, 20_000) == total)
         pages = manifest["pages"]
         need(type(pages) is list and 1 <= len(pages) <= max(1, total))
         sums = {}
@@ -341,7 +367,9 @@ def catalog_input(root, catalog_raw):
         need(len(names) == len(set(names)) and set(names) == set(sums))
         need(sums[PurePosixPath(entry["manifest"]).name] == sha(manifest_raw))
         for page in pages:
-            keys(page, ("file", "sha256", "request_cursor"))
+            keys(page, ("file", "sha256", "bytes") if operator_manifest else ("file", "sha256", "request_cursor"))
+            if operator_manifest:
+                integer(page["bytes"], 0, MAX_PAGE)
             need(len(relative(page["file"])) == 1 and sums[page["file"]] == digest(page["sha256"]))
         yield entry, manifest
 
@@ -361,11 +389,15 @@ def inventory(root, catalog_raw):
         seen = set()
         position, cursor = 0, None
         for page_entry in manifest["pages"]:
-            need(page_entry["request_cursor"] == cursor)
+            if manifest_format(entry) == CURSOR_MANIFEST_V1:
+                need(page_entry["request_cursor"] == cursor)
+            # Operator manifests retain responses, not original request cursors.
+            # Validate response positions/IDs/EOF below without fabricating them.
             name = str(PurePosixPath(entry["manifest"]).parent / page_entry["file"])
             raw = read_relative(root, name, MAX_PAGE)
             spent += len(raw)
             need(spent <= MAX_TOTAL_BYTES and sha(raw) == page_entry["sha256"])
+            validate_page_size(entry, page_entry, raw)
             document = Document(raw)
             page = document.members()
             keys(page, ("data", "acquisition", "meta"))

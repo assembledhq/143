@@ -80,7 +80,7 @@ def source_record(number):
         "evidence": {"decision": SENTINEL}, "safeguards": [{"result": SENTINEL}]}
 
 
-def fixture(root, batches=None):
+def fixture(root, batches=None, manifest_format="cursor_manifest_v1"):
     if batches is None:
         batches = [[source_record(i) for i in range(1, 11)]]
     catalog = {"schema_version": 1, "acquisitions": []}
@@ -102,13 +102,22 @@ def fixture(root, batches=None):
             raw = json.dumps(page, ensure_ascii=False, indent=2).encode()
             name = f"page-{page_index}.json"
             (directory / name).write_bytes(raw)
-            entries.append({"file": name, "sha256": sha(raw), "request_cursor": cursor})
+            entries.append({"file": name, "sha256": sha(raw), **({"bytes": len(raw)} if manifest_format == "operator_acquisition_v0" else {"request_cursor": cursor})})
             cursor = next_cursor
-        manifest_raw = canonical({"version": 1, "acquisition": a, "pages": entries}) + b"\n"
+        manifest = {"version": 1, "acquisition": a, "pages": entries}
+        if manifest_format == "operator_acquisition_v0":
+            manifest = {"status": "acquired_unpartitioned_unscored", "acquisition": a,
+                        "live_sha_before_acquisition": "c" * 40, "pages": entries, "unique_source_records": len(records),
+                        "publication_denominator_established": False, "split_assignment_performed": False,
+                        "holdout_opened": False, "historical_scoring_performed": False}
+        manifest_raw = canonical(manifest) + b"\n"
         (directory / "archive-manifest.json").write_bytes(manifest_raw)
         sums_raw = "".join(e["sha256"] + "  " + e["file"] + "\n" for e in entries).encode() + (sha(manifest_raw) + "  archive-manifest.json\n").encode()
         (directory / "SHA256SUMS").write_bytes(sums_raw)
-        catalog["acquisitions"].append({"manifest": f"acquisition-{batch_index}/archive-manifest.json", "manifest_sha256": sha(manifest_raw), "checksums": f"acquisition-{batch_index}/SHA256SUMS", "checksums_sha256": sha(sums_raw)})
+        entry = {"manifest": f"acquisition-{batch_index}/archive-manifest.json", "manifest_sha256": sha(manifest_raw), "checksums": f"acquisition-{batch_index}/SHA256SUMS", "checksums_sha256": sha(sums_raw)}
+        if manifest_format != "cursor_manifest_v1":
+            entry["manifest_format"] = manifest_format
+        catalog["acquisitions"].append(entry)
     original_raw = canonical({"format": "synthetic-original-catalog", "manifests": [e["manifest_sha256"] for e in catalog["acquisitions"]]}) + b"\n"
     (root / "original-catalog.json").write_bytes(original_raw)
     catalog["original_catalog"] = {"file": "original-catalog.json", "sha256": sha(original_raw)}
@@ -139,7 +148,7 @@ def documents(index, partitions=("development", "calibration"), graph=None):
     return index_raw, graph_raw, PROTOCOL, plan_raw, selection_raw
 
 
-def write_synthetic_fixture(destination):
+def write_synthetic_fixture(destination, manifest_format="cursor_manifest_v1"):
     """Create a new invented golden archive and all binding metadata files.
 
     Never discovers/reads an operator archive. Existing destinations are refused.
@@ -149,7 +158,7 @@ def write_synthetic_fixture(destination):
     """
     root = Path(destination)
     root.mkdir(mode=0o700)
-    catalog = fixture(root, [[source_record(i) for i in range(1, 11)], [source_record(1)]])
+    catalog = fixture(root, [[source_record(i) for i in range(1, 11)], [source_record(1)]], manifest_format)
     index = inventory(root, catalog)
     values = documents(index)
     for name, raw in zip(("inventory.json", "graph.json", "protocol.toml", "partition.json", "selection.json"), values):
@@ -158,6 +167,163 @@ def write_synthetic_fixture(destination):
     return {"catalog_sha256": sha(catalog), "selection_sha256": sha(values[-1]),
             "expected_partitions": {"development": 5, "calibration": 2, "review_holdout": 2, "model_holdout": 2},
             "expected_selected_observations": 7}
+
+
+class LegacyManifestTest(unittest.TestCase):
+    @staticmethod
+    def repin(root, catalog_raw, manifest):
+        catalog = load(catalog_raw)
+        entry = catalog["acquisitions"][0]
+        directory = (root / entry["manifest"]).parent
+        for page in manifest["pages"]:
+            page["sha256"] = sha((directory / page["file"]).read_bytes())
+        raw = canonical(manifest) + b"\n"
+        (root / entry["manifest"]).write_bytes(raw)
+        sums = ("".join(p["sha256"] + "  " + p["file"] + "\n" for p in manifest["pages"]) + sha(raw) + "  archive-manifest.json\n").encode()
+        (root / entry["checksums"]).write_bytes(sums)
+        entry.update(manifest_sha256=sha(raw), checksums_sha256=sha(sums))
+        return canonical(catalog)
+
+    def test_operator_manifest_preserves_original_bytes_and_output_contract(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "invented"
+            write_synthetic_fixture(root, "operator_acquisition_v0")
+            originals = {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            catalog = (root / "catalog.json").read_bytes()
+            index = load((root / "inventory.json").read_bytes())
+            args = documents(index)
+            output = root / "selected.zip"
+            custodian.materialize(root, catalog, *args, sha(args[-1]), output)
+            with zipfile.ZipFile(output) as bundle:
+                receipt = load(bundle.read("receipt.json"))
+                self.assertEqual(7, len(receipt["observations"]))
+                original_manifests = {a["id"]: a["manifest_sha256"] for a in index["acquisitions"]}
+                for entry in receipt["observations"]:
+                    row = next(r for r in index["observations"] if r["locator"] == entry["locator"])
+                    self.assertEqual(row["record_sha256"], sha(bundle.read(entry["member"])))
+                    self.assertEqual(original_manifests[row["locator"]["acquisition_id"]], row["locator"]["acquisition_manifest_sha256"])
+            again = root / "selected-again.zip"
+            custodian.materialize(root, catalog, *args, sha(args[-1]), again)
+            self.assertEqual(output.read_bytes(), again.read_bytes())
+            self.assertEqual(originals, {name: (root / name).read_bytes() for name in originals})
+            self.assertNotIn(b"SENTINEL_RESULT", canonical(index))
+            self.assertEqual({1}, {a["schema_version"] for a in index["acquisitions"]})
+
+    def test_formats_preserve_same_record_and_source_fingerprints(self):
+        with tempfile.TemporaryDirectory() as temp:
+            values = []
+            for fmt in ("cursor_manifest_v1", "operator_acquisition_v0"):
+                root = Path(temp) / fmt
+                root.mkdir()
+                index = inventory(root, fixture(root, manifest_format=fmt))
+                values.append([(r["locator"]["source_identity"], r["source_sha256"], r["record_sha256"]) for r in index["observations"]])
+            self.assertEqual(values[0], values[1])
+
+    def test_legacy_requires_explicit_correct_format(self):
+        for case in ("missing", "wrong", "unknown", "non-string"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                raw = fixture(root, manifest_format="operator_acquisition_v0")
+                catalog = load(raw)
+                entry = catalog["acquisitions"][0]
+                if case == "missing": del entry["manifest_format"]
+                if case == "wrong": entry["manifest_format"] = "cursor_manifest_v1"
+                if case == "unknown": entry["manifest_format"] = "future_manifest"
+                if case == "non-string": entry["manifest_format"] = True
+                with self.assertRaises(InvalidCustody): inventory(root, canonical(catalog))
+
+    def test_operator_manifest_envelope_and_byte_lengths_fail_closed(self):
+        for case in ("count", "count type", "state", "flag", "flag type", "extra", "bytes", "bytes type", "negative bytes", "oversized bytes", "request cursor"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                raw = fixture(root, manifest_format="operator_acquisition_v0")
+                manifest = load((root / "acquisition-0/archive-manifest.json").read_bytes())
+                if case == "count": manifest["unique_source_records"] += 1
+                if case == "count type": manifest["unique_source_records"] = True
+                if case == "state": manifest["status"] = "incomplete"
+                if case == "flag": manifest["split_assignment_performed"] = True
+                if case == "flag type": manifest["holdout_opened"] = 0
+                if case == "extra": manifest["unexpected"] = SENTINEL
+                if case == "bytes": manifest["pages"][0]["bytes"] += 1
+                if case == "bytes type": manifest["pages"][0]["bytes"] = True
+                if case == "negative bytes": manifest["pages"][0]["bytes"] = -1
+                if case == "oversized bytes": manifest["pages"][0]["bytes"] = metadata.MAX_PAGE + 1
+                if case == "request cursor": manifest["pages"][0]["request_cursor"] = None
+                raw = self.repin(root, raw, manifest)
+                with self.assertRaises(InvalidCustody): inventory(root, raw)
+
+    def test_legacy_limits_are_unchanged(self):
+        for constant in ("MAX_PAGE", "MAX_RECORDS", "MAX_TOTAL_BYTES"):
+            with self.subTest(constant=constant), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                raw = fixture(root, manifest_format="operator_acquisition_v0")
+                with patch.object(metadata, constant, 1), self.assertRaises(InvalidCustody): inventory(root, raw)
+
+    def test_materialize_rechecks_declared_legacy_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            raw = fixture(root, manifest_format="operator_acquisition_v0")
+            index = inventory(root, raw)
+            manifest = load((root / "acquisition-0/archive-manifest.json").read_bytes())
+            manifest["pages"][0]["bytes"] += 1
+            raw = self.repin(root, raw, manifest)
+            entry = load(raw)["acquisitions"][0]
+            # Even self-consistently rebound metadata cannot authorize a page
+            # whose retained byte count contradicts the actual original bytes.
+            index["catalog_sha256"] = sha(raw)
+            index["acquisitions"][0]["manifest_sha256"] = entry["manifest_sha256"]
+            for row in index["observations"]:
+                row["locator"]["acquisition_manifest_sha256"] = entry["manifest_sha256"]
+            args = documents(index)
+            output = root / "not-published.zip"
+            with self.assertRaises(InvalidCustody): custodian.materialize(root, raw, *args, sha(args[-1]), output)
+            self.assertFalse(output.exists())
+
+    def test_mixed_formats_preserve_recorded_request_cursor_checks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            raw = fixture(root, [[source_record(1)], [source_record(2)]], "operator_acquisition_v0")
+            catalog = load(raw)
+            second = catalog["acquisitions"][1]
+            operator = load((root / second["manifest"]).read_bytes())
+            cursor = {"version": 1, "acquisition": operator["acquisition"],
+                      "pages": [{"file": p["file"], "sha256": p["sha256"], "request_cursor": None} for p in operator["pages"]]}
+            single = canonical(catalog | {"acquisitions": [second]})
+            rebound = load(self.repin(root, single, cursor))["acquisitions"][0]
+            rebound["manifest_format"] = "cursor_manifest_v1"
+            catalog["acquisitions"][1] = rebound
+            self.assertEqual(2, len(inventory(root, canonical(catalog))["observations"]))
+            cursor["pages"][0]["request_cursor"] = "invented-wrong-request"
+            single = canonical(catalog | {"acquisitions": [rebound]})
+            catalog["acquisitions"][1] = load(self.repin(root, single, cursor))["acquisitions"][0]
+            with self.assertRaises(InvalidCustody): inventory(root, canonical(catalog))
+
+    def test_operator_response_chain_and_empty_acquisitions(self):
+        for case in ("valid", "foreign cursor", "position", "false EOF", "extra EOF cursor", "empty"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                records = [source_record(i % 10 + 1) for i in range(101)] if case != "empty" else []
+                for i, row in enumerate(records):
+                    row["raw"]["id"] = row["raw"]["source"]["id"] = uid(5000+i)
+                    row["source_identity"] = "assessment:" + uid(5000+i)
+                raw = fixture(root, [records], "operator_acquisition_v0")
+                manifest = load((root / "acquisition-0/archive-manifest.json").read_bytes())
+                if case not in ("valid", "empty"):
+                    page_path = root / "acquisition-0/page-0.json"
+                    page = load(page_path.read_bytes())
+                    if case == "foreign cursor": page["meta"]["next_cursor"] = base64.urlsafe_b64encode(canonical({"acquisition_id": uid(9999), "position":100})).decode().rstrip("=")
+                    if case == "position": page["meta"]["position"] = 99
+                    if case == "false EOF": page["meta"]["complete"] = True
+                    if case == "extra EOF cursor":
+                        page_path = root / "acquisition-0/page-1.json"
+                        page = load(page_path.read_bytes()); page["meta"]["next_cursor"] = "unavailable-request-receipt"
+                    payload = canonical(page)
+                    page_path.write_bytes(payload)
+                    manifest["pages"][0 if page_path.name=="page-0.json" else 1]["bytes"] = len(payload)
+                    raw = self.repin(root, raw, manifest)
+                    with self.assertRaises(InvalidCustody): inventory(root, raw)
+                else:
+                    self.assertEqual(len(records), len(inventory(root, raw)["observations"]))
 
 
 class InventoryTest(unittest.TestCase):
