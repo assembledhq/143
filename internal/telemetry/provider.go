@@ -57,12 +57,10 @@ type Config struct {
 // This means you can run both Prometheus scraping AND push to Datadog/Grafana
 // Cloud at the same time — no code changes, just config.
 func InitMeterProvider(ctx context.Context, cfg Config) (*metric.MeterProvider, func(context.Context) error, error) {
+	// Preserve the SDK resource schema while overriding only the service name.
 	res, err := resource.Merge(
 		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceName(cfg.ServiceName),
-		),
+		resource.NewSchemaless(semconv.ServiceName(cfg.ServiceName)),
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create OTel resource: %w", err)
