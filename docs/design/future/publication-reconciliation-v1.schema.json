@@ -1,0 +1,880 @@
+{
+  "$defs": {
+    "accepted_artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[!-~]{1,128}$",
+          "type": "string"
+        },
+        "basis": {
+          "enum": [
+            "authenticated_provider_submission",
+            "verified_historical_publication_edit",
+            "provider_object_metadata_only"
+          ],
+          "type": "string"
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/coverage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "verification_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "sha256",
+        "basis",
+        "verification_receipt_sha256",
+        "coverage"
+      ],
+      "type": "object"
+    },
+    "coverage": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "maxLength": 40,
+              "pattern": "^(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6}|\\.[0-9]{6}0{1,3})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identities": {
+          "items": {
+            "$ref": "#/$defs/provider_identity"
+          },
+          "maxItems": 100000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "projection": {
+          "enum": [
+            "complete",
+            "partial"
+          ],
+          "type": "string"
+        },
+        "until": {
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "^(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6}|\\.[0-9]{6}0{1,3})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identities",
+        "from",
+        "until",
+        "projection"
+      ],
+      "type": "object"
+    },
+    "event": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[!-~]{1,128}$",
+          "type": "string"
+        },
+        "clock_kind": {
+          "enum": [
+            "provider_submitted_at",
+            "provider_edit_event_at"
+          ],
+          "type": "string"
+        },
+        "commit_sha": {
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+          "type": "string"
+        },
+        "event_id": {
+          "pattern": "^[!-~]{1,128}$",
+          "type": "string"
+        },
+        "event_kind": {
+          "enum": [
+            "review_submitted",
+            "review_body_edited"
+          ],
+          "type": "string"
+        },
+        "event_time": {
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "^(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6}|\\.[0-9]{6}0{1,3})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "pr_number": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "provider_repository_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "provider_review_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "publication_key_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "publication_link_basis": {
+          "enum": [
+            "provider_event_output_marker",
+            "publisher_event_exact_publication_key"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_id",
+        "artifact_id",
+        "provider_repository_id",
+        "pr_number",
+        "provider_review_id",
+        "commit_sha",
+        "publication_key_sha256",
+        "event_kind",
+        "clock_kind",
+        "event_time",
+        "publication_link_basis"
+      ],
+      "type": "object"
+    },
+    "locator": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisition_id": {
+          "not": {
+            "const": "00000000-0000-0000-0000-000000000000"
+          },
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "type": "string"
+        },
+        "acquisition_manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "page_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "record_index": {
+          "maximum": 99,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source_identity": {
+          "pattern": "^(assessment|legacy):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "acquisition_id",
+        "acquisition_manifest_sha256",
+        "page_sha256",
+        "record_index",
+        "source_identity"
+      ],
+      "type": "object"
+    },
+    "metadata_witness": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/witness_artifact"
+          },
+          "maxItems": 4096,
+          "type": "array"
+        },
+        "bindings": {
+          "items": {
+            "$ref": "#/$defs/witness_binding"
+          },
+          "maxItems": 100000,
+          "type": "array"
+        },
+        "catalog_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "dataset_kind": {
+          "pattern": "^[a-z][a-z0-9_]{0,31}$",
+          "type": "string"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/event"
+          },
+          "maxItems": 200000,
+          "type": "array"
+        },
+        "extractor_code_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "extractor_revision": {
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+          "type": "string"
+        },
+        "inventory_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "object_observations": {
+          "items": {
+            "$ref": "#/$defs/object_observation"
+          },
+          "maxItems": 200000,
+          "type": "array"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "^(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6}|\\.[0-9]{6}0{1,3})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "original_catalog_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "source_publication_metadata_witness"
+        },
+        "ruleset": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_-]*(/[a-z0-9_-]+)+$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "source_profile": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_-]*(/[a-z0-9_-]+)+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "dataset_kind",
+        "ruleset",
+        "inventory_sha256",
+        "catalog_sha256",
+        "original_catalog_sha256",
+        "purpose",
+        "source_profile",
+        "extractor_revision",
+        "extractor_code_sha256",
+        "observed_at",
+        "artifacts",
+        "events",
+        "object_observations",
+        "bindings"
+      ],
+      "type": "object"
+    },
+    "object_observation": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[!-~]{1,128}$",
+          "type": "string"
+        },
+        "commit_sha": {
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+          "type": "string"
+        },
+        "object_submitted_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "maxLength": 40,
+              "pattern": "^(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6}|\\.[0-9]{6}0{1,3})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observation_id": {
+          "pattern": "^[!-~]{1,128}$",
+          "type": "string"
+        },
+        "pr_number": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "provider_repository_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "provider_review_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "observation_id",
+        "artifact_id",
+        "provider_repository_id",
+        "pr_number",
+        "provider_review_id",
+        "commit_sha",
+        "object_submitted_at"
+      ],
+      "type": "object"
+    },
+    "operator_attestation": {
+      "additionalProperties": false,
+      "properties": {
+        "attested_at": {
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "^(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6}|\\.[0-9]{6}0{1,3})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "attestor_id": {
+          "pattern": "^[!-~]{1,128}$",
+          "type": "string"
+        },
+        "confers_execution_authorization": {
+          "const": false
+        },
+        "limitation": {
+          "const": "operator_attested_projection_original_not_reverified_by_consumer"
+        },
+        "permitted_use": {
+          "const": "publication_clock_reconstruction_only"
+        },
+        "verification_receipt_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "attestor_id",
+        "attested_at",
+        "verification_receipt_sha256",
+        "permitted_use",
+        "confers_execution_authorization",
+        "limitation"
+      ],
+      "type": "object"
+    },
+    "provider_identity": {
+      "additionalProperties": false,
+      "properties": {
+        "pr_number": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "provider_repository_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "provider_review_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider_repository_id",
+        "pr_number",
+        "provider_review_id"
+      ],
+      "type": "object"
+    },
+    "reconciliation": {
+      "additionalProperties": false,
+      "properties": {
+        "catalog_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "dataset_kind": {
+          "pattern": "^[a-z][a-z0-9_]{0,31}$",
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/sidecar_entry"
+          },
+          "maxItems": 100000,
+          "type": "array"
+        },
+        "inventory_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "original_catalog_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "publication_clock_reconciliation"
+        },
+        "ruleset": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_-]*(/[a-z0-9_-]+)+$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "source_acceptance_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "witness_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "dataset_kind",
+        "ruleset",
+        "inventory_sha256",
+        "catalog_sha256",
+        "original_catalog_sha256",
+        "purpose",
+        "witness_sha256",
+        "source_acceptance_sha256",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "repository_binding": {
+      "additionalProperties": false,
+      "properties": {
+        "provider_repository_id": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "repository_id": {
+          "not": {
+            "const": "00000000-0000-0000-0000-000000000000"
+          },
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repository_id",
+        "provider_repository_id"
+      ],
+      "type": "object"
+    },
+    "sidecar_entry": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "reconciled_publication_time": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "matched_event"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "original_publication_time": {
+                "type": "null"
+              },
+              "reasons": {
+                "maxItems": 0
+              },
+              "reconciled_publication_time": {
+                "format": "date-time",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{6}Z$",
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "unresolved"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "original_publication_time": {
+                "type": "null"
+              },
+              "reasons": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "preserve_frozen"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "original_publication_time": {
+                "type": "string"
+              },
+              "reasons": {
+                "maxItems": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "disposition": {
+                "const": "frozen_conflict"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "original_publication_time": {
+                "type": "string"
+              },
+              "reasons": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ],
+      "properties": {
+        "disposition": {
+          "enum": [
+            "matched_event",
+            "unresolved",
+            "preserve_frozen",
+            "frozen_conflict"
+          ],
+          "type": "string"
+        },
+        "event_ids": {
+          "items": {
+            "pattern": "^[!-~]{1,128}$",
+            "type": "string"
+          },
+          "maxItems": 200000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "locator": {
+          "$ref": "#/$defs/locator"
+        },
+        "object_observation_ids": {
+          "items": {
+            "pattern": "^[!-~]{1,128}$",
+            "type": "string"
+          },
+          "maxItems": 200000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "original_publication_time": {
+          "anyOf": [
+            {
+              "maxLength": 40,
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reasons": {
+          "items": {
+            "enum": [
+              "missing_provider_review_id",
+              "missing_pr_identity",
+              "missing_publication_key",
+              "missing_head_sha",
+              "missing_source_created_at",
+              "submitted_head_mismatch",
+              "no_authoritative_event",
+              "source_not_authoritative",
+              "publication_key_mismatch",
+              "event_head_mismatch",
+              "before_source_creation",
+              "after_acquisition_boundary",
+              "event_after_source_observation",
+              "reused_provider_review",
+              "conflicting_event_times",
+              "conflicting_original_observations",
+              "frozen_clock_conflict",
+              "conflicting_original_clocks",
+              "edit_basis_not_supported_v1",
+              "source_coverage_incomplete"
+            ],
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "reconciled_publication_time": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "maxLength": 40,
+              "pattern": "^(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6}|\\.[0-9]{6}0{1,3})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "record_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "locator",
+        "record_sha256",
+        "source_sha256",
+        "event_ids",
+        "object_observation_ids",
+        "original_publication_time",
+        "disposition",
+        "reconciled_publication_time",
+        "reasons"
+      ],
+      "type": "object"
+    },
+    "source_acceptance": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/accepted_artifact"
+          },
+          "maxItems": 4096,
+          "type": "array"
+        },
+        "catalog_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "dataset_kind": {
+          "pattern": "^[a-z][a-z0-9_]{0,31}$",
+          "type": "string"
+        },
+        "extractor_code_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "extractor_revision": {
+          "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+          "type": "string"
+        },
+        "inventory_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "operator_attestation": {
+          "$ref": "#/$defs/operator_attestation"
+        },
+        "original_catalog_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "accept_publication_metadata_source"
+        },
+        "repository_bindings": {
+          "items": {
+            "$ref": "#/$defs/repository_binding"
+          },
+          "maxItems": 256,
+          "type": "array"
+        },
+        "ruleset": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_-]*(/[a-z0-9_-]+)+$",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "source_profile": {
+          "maxLength": 128,
+          "pattern": "^[a-z][a-z0-9_-]*(/[a-z0-9_-]+)+$",
+          "type": "string"
+        },
+        "witness_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "dataset_kind",
+        "ruleset",
+        "inventory_sha256",
+        "catalog_sha256",
+        "original_catalog_sha256",
+        "purpose",
+        "witness_sha256",
+        "source_profile",
+        "extractor_revision",
+        "extractor_code_sha256",
+        "repository_bindings",
+        "artifacts",
+        "operator_attestation"
+      ],
+      "type": "object"
+    },
+    "witness_artifact": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "pattern": "^[!-~]{1,128}$",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "maxLength": 40,
+          "pattern": "^(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,6}|\\.[0-9]{6}0{1,3})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+          "type": "string"
+        },
+        "origin_kind": {
+          "enum": [
+            "provider_submission_event",
+            "publisher_edit_event",
+            "provider_review_object"
+          ],
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "sha256",
+        "origin_kind",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "witness_binding": {
+      "additionalProperties": false,
+      "properties": {
+        "event_ids": {
+          "items": {
+            "pattern": "^[!-~]{1,128}$",
+            "type": "string"
+          },
+          "maxItems": 200000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "locator": {
+          "$ref": "#/$defs/locator"
+        },
+        "object_observation_ids": {
+          "items": {
+            "pattern": "^[!-~]{1,128}$",
+            "type": "string"
+          },
+          "maxItems": 200000,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "record_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "locator",
+        "record_sha256",
+        "source_sha256",
+        "event_ids",
+        "object_observation_ids"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://example.invalid/143/publication-reconciliation/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/source_acceptance"
+    },
+    {
+      "$ref": "#/$defs/metadata_witness"
+    },
+    {
+      "$ref": "#/$defs/reconciliation"
+    }
+  ],
+  "title": "Draft result-free publication reconciliation artifacts v1"
+}
