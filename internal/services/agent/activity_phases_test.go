@@ -381,6 +381,64 @@ func TestActivityPhaseServicePublishesLifecycleEventsAfterTransitions(t *testing
 	require.Equal(t, threadID, publisher.events[1].ThreadID, "the terminal event should retain the owning thread identity")
 }
 
+func TestActivityPhaseServicePublishesLifecycleEventEnvelopes(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.November, 23, 17, 0, 0, 0, time.UTC)
+	orgID, sessionID, threadID, phaseID, batchID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	phase := models.SessionActivityPhase{
+		ID: phaseID, OrgID: orgID, SessionID: sessionID, ThreadID: threadID,
+		Status: models.ActivityPhaseStatusRunning,
+	}
+	batch := models.ThreadInboxDeliveryBatch{
+		ID: batchID, OrgID: orgID, SessionID: sessionID, ThreadID: threadID,
+		Status: models.InboxDeliveryBatchStarted,
+	}
+	tests := []struct {
+		name     string
+		publish  func(*ActivityPhaseService)
+		expected models.SessionStreamEvent
+	}{
+		{
+			name: "activity phase",
+			publish: func(service *ActivityPhaseService) {
+				service.publishPhase(context.Background(), models.SessionStreamEventActivityPhaseStarted, phase)
+			},
+			expected: models.SessionStreamEvent{
+				ID:    uuid.NewSHA1(uuid.NameSpaceOID, []byte(string(models.SessionStreamEventActivityPhaseStarted)+":"+phase.ID.String()+":"+string(phase.Status))),
+				OrgID: orgID, SessionID: sessionID, ThreadID: threadID,
+				Type: models.SessionStreamEventActivityPhaseStarted, EmittedAt: now,
+				Data: models.ActivityPhaseEvent{Phase: phase},
+			},
+		},
+		{
+			name: "inbox delivery batch",
+			publish: func(service *ActivityPhaseService) {
+				service.publishBatch(context.Background(), models.SessionStreamEventInboxDeliveryStarted, batch)
+			},
+			expected: models.SessionStreamEvent{
+				ID:    uuid.NewSHA1(uuid.NameSpaceOID, []byte(string(models.SessionStreamEventInboxDeliveryStarted)+":"+batch.ID.String()+":"+string(batch.Status))),
+				OrgID: orgID, SessionID: sessionID, ThreadID: threadID,
+				Type: models.SessionStreamEventInboxDeliveryStarted, EmittedAt: now,
+				Data: models.ThreadInboxDeliveryBatchEvent{Batch: batch},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			publisher := &activityPhasePublisherFake{}
+			service := NewActivityPhaseService(&activityPhaseStoreFake{}, zerolog.Nop(), WithActivityPhaseEventPublisher(publisher))
+			service.now = func() time.Time { return now }
+
+			tt.publish(service)
+
+			require.Equal(t, []models.SessionStreamEvent{tt.expected}, publisher.events, "publishing should preserve the complete lifecycle event envelope")
+		})
+	}
+}
+
 func TestSeedActivityPhaseExecutionCommitsBeforePublishing(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

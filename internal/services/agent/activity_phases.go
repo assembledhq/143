@@ -227,9 +227,7 @@ func (s *ActivityPhaseService) publishPhase(ctx context.Context, eventType model
 		Type: eventType, SessionID: phase.SessionID, OrgID: phase.OrgID, ThreadID: phase.ThreadID,
 		EmittedAt: s.now().UTC(), Data: models.ActivityPhaseEvent{Phase: phase},
 	}
-	if err := s.publisher.PublishEvent(ctx, event); err != nil {
-		s.logger.Warn().Err(err).Str("activity_phase_id", phase.ID.String()).Str("event_type", string(eventType)).Msg("failed to publish activity phase event")
-	}
+	s.publishLifecycleEvent(ctx, event, "activity_phase_id", phase.ID, "failed to publish activity phase event")
 }
 
 func (s *ActivityPhaseService) publishBatch(ctx context.Context, eventType models.SessionStreamEventType, batch models.ThreadInboxDeliveryBatch) {
@@ -241,8 +239,12 @@ func (s *ActivityPhaseService) publishBatch(ctx context.Context, eventType model
 		Type: eventType, SessionID: batch.SessionID, OrgID: batch.OrgID, ThreadID: batch.ThreadID,
 		EmittedAt: s.now().UTC(), Data: models.ThreadInboxDeliveryBatchEvent{Batch: batch},
 	}
+	s.publishLifecycleEvent(ctx, event, "thread_inbox_delivery_batch_id", batch.ID, "failed to publish inbox delivery batch event")
+}
+
+func (s *ActivityPhaseService) publishLifecycleEvent(ctx context.Context, event models.SessionStreamEvent, entityField string, entityID uuid.UUID, failureMessage string) {
 	if err := s.publisher.PublishEvent(ctx, event); err != nil {
-		s.logger.Warn().Err(err).Str("thread_inbox_delivery_batch_id", batch.ID.String()).Str("event_type", string(eventType)).Msg("failed to publish inbox delivery batch event")
+		s.logger.Warn().Err(err).Str(entityField, entityID.String()).Str("event_type", string(event.Type)).Msg(failureMessage)
 	}
 }
 
