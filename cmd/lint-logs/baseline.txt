@@ -1,0 +1,19 @@
+# Log statements that wrote personal data before cmd/lint-logs existed.
+# Do not add entries: fix the log line, or annotate it with
+# // lint:allow-log-pii reason="..." when the value is genuinely required.
+# Drop entries for fixed findings with: go run ./cmd/lint-logs -prune-baseline
+internal/api/handlers/auth_claim.go	logInvitationClaimUnknownToken	field "ip"
+internal/api/handlers/auth_email_verification.go	(*AuthHandler).sendEmailVerificationFor	value user.Email
+internal/api/handlers/integrations.go	(*IntegrationHandler).emitGitHubOrgAutoJoinAudit	field "account_login"
+internal/api/handlers/settings.go	(*SettingsHandler).Update	field "user_agent"
+internal/api/handlers/team.go	(*TeamHandler).CreateInvitation	field "email"
+internal/api/handlers/team.go	(*TeamHandler).CreateInvitation	field "email"
+internal/api/handlers/team.go	(*TeamHandler).CreateInvitation	field "github_username"
+internal/api/handlers/webhooks.go	(*WebhookHandler).githubReviewIsOwnApp	field "github_login"
+internal/api/middleware/ratelimit.go	ClaimRateLimit	field "ip"
+internal/api/middleware/ratelimit.go	CreateOrgRateLimit	field "ip"
+internal/api/middleware/ratelimit.go	RateLimit	field "ip"
+internal/services/codereview/dispute_service.go	(*DisputeService).FileFromGitHub	field "filed_by_login"
+internal/services/email/sender.go	(*NoopSender).SendInvitation	value inviterName
+internal/worker/handlers.go	disableGitHubOrgAutoJoinAfterPermissionLoss	field "account_login"
+internal/worker/handlers_linear_agent_helpers.go	applyLinearUserEmailAttribution	field "creator_email"

@@ -68,7 +68,7 @@ Logs are shipped via Vector to a VictoriaLogs instance and visualized in Grafana
 
 **LLM prompts live in Go templates**: All LLM system prompts must be stored as `.template` files in `internal/prompts/templates/`, rendered via the `prompts` package (`internal/prompts/prompts.go`). Never inline prompt strings as Go constants or string literals in service code. Add a corresponding exported render function in `prompts.go` for each new template.
 
-**Logging**: Use `zerolog` for all log output. Never use `fmt.Printf` or `log.Println`. Logs are JSON-structured and shipped to Mezmo.
+**Logging**: Use `zerolog` for all log output. Never use `fmt.Printf` or `log.Println`. Logs are JSON-structured and shipped to Mezmo. Never log personal data (emails, names, logins, client IPs, user agents); log the stable ID instead. `cmd/lint-logs` enforces this in `make lint` and CI — see `internal/AGENTS.md` ("Never log personal data") for the rules and the `// lint:allow-log-pii reason="..."` opt-out.
 
 **Error handling**: Never discard errors with `_ =` in Go or empty `.catch()` in TypeScript. If an error cannot be propagated (e.g., best-effort cleanup after the main operation succeeded), log it at `Warn` level with context. In HTTP handlers, use `zerolog.Ctx(r.Context())` to get the request-scoped logger (enriched with org_id, user_id, request_id by the `LogContext` middleware). In services, use `s.logger`. If an error CAN be propagated, return it — prefer bubbling errors to the top of the call stack. Transaction rollback in `defer` is the one exception: `defer func() { _ = tx.Rollback(ctx) }()` is acceptable because rollback after commit is a no-op. Frontend: at minimum log with `console.error`; prefer surfacing errors through TanStack Query error states.
 

@@ -110,6 +110,22 @@ s.logger.Warn().Err(err).Msg("operation failed")
 log.Warn().Err(err).Msg("operation failed")
 ```
 
+### Rule: Never log personal data
+
+Logs are retained, shipped off-host to VictoriaLogs, and searchable by every operator, so they must not carry personal data: email addresses, people's names, usernames and GitHub/Slack logins, client IP addresses, user agents, phone numbers, postal addresses, or government, financial, and birth-date identifiers. Do not serialize whole user/member/invitee records or request header maps either. Log the stable ID instead — `user_id`, `slack_user_id`, `linear_creator_user_id` — so the line can be joined back to the database without copying the data into the log.
+
+```go
+// CORRECT — the ID identifies the invitee without exposing them
+zerolog.Ctx(r.Context()).Info().Str("invitation_id", inv.ID.String()).Msg("invitation created")
+
+// WRONG — the email and login are now in every log backup
+zerolog.Ctx(r.Context()).Info().Str("email", body.Email).Str("github_username", body.GitHubUsername).Msg("invitation created")
+```
+
+`cmd/lint-logs` (`make lint-logs`, run by `make lint`, pre-commit, pre-push, and CI) enforces this. It flags zerolog fields whose key names personal data (`email`, `github_login`, `client_ip`), personal-data values under any key (`user.Email`, `r.RemoteAddr`, `r.UserAgent()`, `currentUser.Name`), and the same values passed to `Msg`/`Msgf`. Metadata is fine: `email_domain`, `email_verified`, `len(email)`, and values wrapped in a `redact*`/`hash*`/`mask*` helper are not flagged. When a value is genuinely required (for example, the client IP in an abuse-control log), annotate the statement on the line above with `// lint:allow-log-pii reason="..."`; the reason is required.
+
+Log lines that predated the lint are listed in `cmd/lint-logs/baseline.txt`. Never add entries to it: fix the log line or annotate it. After fixing a listed line, run `go run ./cmd/lint-logs -prune-baseline` to drop its entry.
+
 ### Rule: Log best-effort failures at Warn level
 
 When an operation is best-effort (e.g., updating job status after the job already ran, recording a webhook delivery), log failures at `Warn` level so they are visible but don't trigger error alerts:

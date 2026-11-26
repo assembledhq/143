@@ -71,6 +71,7 @@ coverage.html
 /deploy-guardrail
 /lint-schema
 /lint-stores
+/lint-logs
 
 # Go module/build caches (if created locally)
 .gomodcache/

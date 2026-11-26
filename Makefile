@@ -8,7 +8,7 @@ SANDBOX_CLI_GO_SOURCES := $(foreach dir,$(SANDBOX_CLI_PACKAGE_DIRS),$(filter-out
 SANDBOX_CLI_EMBED_SOURCES := $(shell GOOS=linux CGO_ENABLED=0 go list -deps -f '{{if .Module}}{{if eq .Module.Path "github.com/assembledhq/143"}}{{range .EmbedFiles}}{{$$.Dir}}/{{.}} {{end}}{{end}}{{end}}' ./cmd/tools 2>/dev/null)
 SANDBOX_SOURCES := sandbox/Dockerfile sandbox/versions.json sandbox/install_node_toolchains.py internal/nodetoolchain/catalog.json go.mod go.sum $(SANDBOX_CLI_PACKAGE_DIRS) $(SANDBOX_CLI_GO_SOURCES) $(SANDBOX_CLI_EMBED_SOURCES)
 
-.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr-profile test-pr test-coverage-diff test-main test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
+.PHONY: dev dev-ngrok dev-local dev-frontend-only setup test test-race test-coverage test-pr-profile test-pr test-coverage-diff test-main test-integration test-github-rate-limit test-github-rate-limit-redis migrate-up migrate-down demo-seed-check build build-cli frontend-dev frontend-lint frontend-typecheck frontend-check lint lint-bootstrap lint-schema lint-stores lint-tenancy lint-logs hooks-install hooks-uninstall secrets-setup secrets-encrypt secrets-decrypt secrets-edit secrets-rotate single-node-prepare single-node-up single-node-down provision-app provision-worker provision-workers provision-egress provision-db provision-db-backups provision-logging provision-redis tailscale-enroll repair-deploy-sudoers repair-worker-host spin-down-worker deploy deploy-app deploy-worker deploy-worker-preflight deploy-db deploy-logging deploy-fleet logs logs-query setup-readonly-user db-psql db-query
 .PHONY: audit-review-recipes preflight preflight-extended hooks-check security-check test-deploy-scripts
 
 GOLANGCI_LINT_VERSION ?= v2.10.1
@@ -258,7 +258,7 @@ frontend-check:
 server-dev:
 	go run -ldflags "$(LDFLAGS)" cmd/server/main.go
 
-lint: lint-tenancy
+lint: lint-tenancy lint-logs
 	@$(MAKE) lint-bootstrap
 	$(GOLANGCI_LINT_BIN) run ./...
 
@@ -274,6 +274,11 @@ lint-schema:
 lint-stores:
 	@go run ./cmd/lint-stores
 
+# Personal data: log statements must not write emails, names, logins, IPs,
+# user agents, or similar (or be annotated with // lint:allow-log-pii reason="...").
+lint-logs:
+	@go run ./cmd/lint-logs
+
 lint-bootstrap:
 	@mkdir -p $(CURDIR)/bin
 	@if ! $(GOLANGCI_LINT_BIN) version 2>/dev/null | grep -Fq "version $(patsubst v%,%,$(GOLANGCI_LINT_VERSION)) "; then \
@@ -288,8 +293,8 @@ audit-review-recipes: export REVIEW_RECIPE_AUDIT_MANIFEST := $(AUDIT_MANIFEST)
 audit-review-recipes:
 	@go run ./cmd/audit-review-recipes --manifest "$$REVIEW_RECIPE_AUDIT_MANIFEST"
 
-# Point git at .githooks/. The pre-commit hook runs lint-schema / lint-stores
-# (scoped to the staged files) and gofmt before every commit. Pre-push runs
+# Point git at .githooks/. The pre-commit hook runs lint-schema / lint-stores /
+# lint-logs (scoped to the staged files) and gofmt before every commit. Pre-push runs
 # the shared preflight selector against outgoing refs. Skip a WIP commit with
 # `git commit --no-verify` or disable with `make hooks-uninstall`.
 #

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Pre-commit hook for 143: enforce multi-tenancy guardrails + gofmt before code
-# leaves the developer's machine. Installed via `make hooks-install`.
+# Pre-commit hook for 143: enforce multi-tenancy and personal-data-in-logs
+# guardrails + gofmt before code leaves the developer's machine. Installed via
+# `make hooks-install`.
 #
 # To skip (rare): `git commit --no-verify`.
 # To uninstall:   `make hooks-uninstall`.
@@ -111,6 +112,12 @@ if [[ $has_store -eq 1 ]]; then
 fi
 
 if [[ $has_go -eq 1 ]]; then
+  if ensure_tool lint-logs; then
+    run_check "lint-logs" "$bin_dir/lint-logs"
+  else
+    fail=1
+  fi
+
   # gofmt: format-check staged Go files only, quickly.
   staged_go=$(echo "$staged" | grep '\.go$' || true)
   if [[ -n "$staged_go" ]]; then
